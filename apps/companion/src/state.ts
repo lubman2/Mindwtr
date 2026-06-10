@@ -15,6 +15,7 @@ export function openState(path: string): CompanionState {
   mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
   db.exec('PRAGMA journal_mode = WAL;');
+  db.exec('PRAGMA busy_timeout = 5000;');
   db.exec(`
     CREATE TABLE IF NOT EXISTS imports (
       connector TEXT NOT NULL,
