@@ -17,6 +17,9 @@ export type NewTaskInput = {
   tags: string[];
 };
 
+// Mindwtr core nevynucuje délku titulku; drž stejný limit jako mcp-server (MAX_TASK_TITLE_LENGTH).
+const MAX_TITLE_LENGTH = 500;
+
 export function serializeCursor(cursor: GmailCursor): string {
   return JSON.stringify(cursor);
 }
@@ -25,7 +28,12 @@ export function parseCursor(raw: string | null): GmailCursor | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (typeof parsed.uidValidity === 'string' && typeof parsed.lastUid === 'number') {
+    if (
+      typeof parsed.uidValidity === 'string' &&
+      typeof parsed.lastUid === 'number' &&
+      Number.isInteger(parsed.lastUid) &&
+      parsed.lastUid >= 0
+    ) {
       return { uidValidity: parsed.uidValidity, lastUid: parsed.lastUid };
     }
     return null;
@@ -35,7 +43,7 @@ export function parseCursor(raw: string | null): GmailCursor | null {
 }
 
 export function mapMessageToTask(msg: GmailMessage): NewTaskInput {
-  const title = msg.subject.trim() || '(bez předmětu)';
+  const title = (msg.subject.trim() || '(bez předmětu)').slice(0, MAX_TITLE_LENGTH);
   const lines = [`Od: ${msg.from}`];
   if (msg.date) lines.push(`Datum: ${msg.date}`);
   if (msg.messageId) {

@@ -19,6 +19,8 @@ describe('cursor serialization', () => {
     expect(parseCursor('')).toBeNull();
     expect(parseCursor('not-json')).toBeNull();
     expect(parseCursor('{"uidValidity":"x"}')).toBeNull();
+    expect(parseCursor('{"uidValidity":"x","lastUid":1.5}')).toBeNull();
+    expect(parseCursor('{"uidValidity":"x","lastUid":-1}')).toBeNull();
   });
 });
 
@@ -44,6 +46,11 @@ describe('mapMessageToTask', () => {
 
   test('empty subject falls back', () => {
     expect(mapMessageToTask({ ...msg, subject: '  ' }).title).toBe('(bez předmětu)');
+  });
+
+  test('very long subject is clamped to 500 chars', () => {
+    const task = mapMessageToTask({ ...msg, subject: 'x'.repeat(600) });
+    expect(task.title.length).toBe(500);
   });
 
   test('missing messageId and date omit lines', () => {
