@@ -1,0 +1,22 @@
+{
+  "name": "mindwtr-companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "once": "bun src/index.ts --once",
+    "start": "bun src/index.ts",
+    "lint": "eslint -c ../../eslint.node.config.mjs . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@mindwtr/core": "workspace:*",
+    "imapflow": "^1.0.0",
+    "smol-toml": "^1.4.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.2"
+  }
+}
