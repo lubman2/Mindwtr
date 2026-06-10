@@ -1,0 +1,17 @@
+# Zkopíruj do ~/.config/mindwtr-companion/config.toml a vyplň.
+# Secrets NIKDY necommitovat.
+
+# [mindwtr]
+# dbPath = "/Users/lubman/Library/Application Support/mindwtr/mindwtr.db"
+
+# [state]
+# path = "/Users/lubman/.config/mindwtr-companion/state.sqlite"
+
+[gmail]
+user = "tvuj-capture-ucet@gmail.com"
+password = "xxxx xxxx xxxx xxxx"   # Gmail App Password (vyžaduje 2FA)
+# host = "imap.gmail.com"
+# port = 993
+# mailbox = "INBOX"
+# pollSeconds = 300
+# enabled = true
