@@ -47,4 +47,14 @@ password = "x"
   test('missing file throws', () => {
     expect(() => loadConfig('/nonexistent/config.toml')).toThrow();
   });
+
+  test('pollSeconds below 30 throws', () => {
+    const path = writeToml(`
+[gmail]
+user = "a@b.com"
+password = "x"
+pollSeconds = 10
+`);
+    expect(() => loadConfig(path)).toThrow();
+  });
 });
