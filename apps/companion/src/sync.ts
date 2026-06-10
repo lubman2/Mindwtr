@@ -11,6 +11,7 @@ import type { CompanionState } from './state.js';
 
 export type GmailSyncDeps = {
   fetchNewMessages: typeof fetchNewMessages;
+  // Záměrně užší než NewInboxTask z mindwtr.ts — gmail mapping vždy dodává description i tags.
   addInboxTask: (input: { title: string; description: string; tags: string[] }) => Promise<{ id: string }>;
   state: CompanionState;
   log: Logger;
@@ -43,7 +44,10 @@ export async function runGmailSync(
   }
 
   // Kurzor až po úspěšném zpracování všech zpráv — při pádu se příště
-  // zprávy stáhnou znovu a dedup je zahodí.
+  // zprávy stáhnou znovu a dedup je zahodí. Známý kompromis: tvrdý pád
+  // procesu mezi addInboxTask a recordImport může při retry vytvořit
+  // duplicitní task (two-phase zápis bez společné transakce). Pro osobní
+  // daemon přijatelné — duplicita je viditelná v inboxu.
   deps.state.setCursor('gmail', serializeCursor(cursor));
   return { imported, skipped };
 }
