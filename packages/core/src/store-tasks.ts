@@ -18,6 +18,7 @@ import {
     updateVisibleTasks,
 } from './store-helpers';
 import { logWarn } from './logger';
+import { trackSaveTaskInFlight } from './save-task-tracker';
 import { generateUUID as uuidv4 } from './uuid';
 import { normalizeRecurrenceForLoad } from './recurrence';
 import { normalizeFocusTaskLimit } from './focus-utils';
@@ -522,7 +523,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
         const storage = getStorage();
         if (incrementalPersistence.task && !incrementalPersistence.hasRecurringFollowUp && storage.saveTask) {
             const taskToPersist = incrementalPersistence.task;
-            void storage.saveTask(taskToPersist, snapshot ?? undefined).catch((error) => {
+            const savePromise = storage.saveTask(taskToPersist, snapshot ?? undefined).catch((error) => {
                 const message = error instanceof Error ? error.message : String(error);
                 logWarn('Incremental task save failed', {
                     scope: 'store',
@@ -532,6 +533,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
                 });
                 set({ error: `Failed to save task: ${message}` });
             });
+            trackSaveTaskInFlight(savePromise);
         } else if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }

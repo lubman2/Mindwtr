@@ -133,7 +133,8 @@ revBy=excluded.revBy,
 createdAt=excluded.createdAt,
 updatedAt=excluded.updatedAt,
 deletedAt=excluded.deletedAt,
-purgedAt=excluded.purgedAt`;
+purgedAt=excluded.purgedAt
+WHERE tasks.rev IS NULL OR tasks.rev <= excluded.rev`;
 
 const taskToSqliteRow = (task: Task): unknown[] => {
     const taskOrder = Number.isFinite(task.order) ? task.order : task.orderNum;

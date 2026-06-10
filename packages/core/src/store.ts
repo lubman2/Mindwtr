@@ -16,6 +16,7 @@ import { markCoreStartupPhase } from './startup-profiler';
 import { createProjectActions } from './store-projects';
 import { createSettingsActions } from './store-settings';
 import { createTaskActions } from './store-tasks';
+import { getSaveTaskInFlight } from './save-task-tracker';
 
 export { applyTaskUpdates } from './store-helpers';
 
@@ -52,7 +53,7 @@ const MAX_SAVE_RETRY_DELAY_MS = 4000;
 const SAVE_FLUSH_DELAY_MS = 120;
 const ERROR_AUTO_CLEAR_MS = 10_000;
 const SAVE_QUEUE_OVERFLOW_ERROR_PREFIX = 'Save queue overflow:';
-const hasPendingSaveWork = (): boolean => pendingSaves.length > 0 || saveInFlight !== null;
+const hasPendingSaveWork = (): boolean => pendingSaves.length > 0 || saveInFlight !== null || getSaveTaskInFlight() !== null;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const hasOwnField = (value: object, field: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(value, field);
 const getRequiredArrayField = <T>(value: Record<string, unknown>, field: string): T[] => {
@@ -394,6 +395,14 @@ export const flushPendingSave = async (): Promise<void> => {
         }
         const currentQueue = Array.isArray(pendingSaves) ? pendingSaves : [];
         if (currentQueue.length === 0) {
+            // All debounced snapshot saves are done; now await any in-flight incremental
+            // saveTask call so it lands AFTER the full snapshot, not before.
+            const currentSaveTaskInFlight = getSaveTaskInFlight();
+            if (currentSaveTaskInFlight) {
+                markCoreStartupPhase('core.flush_pending_save.await_save_task_in_flight');
+                await currentSaveTaskInFlight;
+                continue;
+            }
             markCoreStartupPhase('core.flush_pending_save.exit_empty');
             return;
         }
