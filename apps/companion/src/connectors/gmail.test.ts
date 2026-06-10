@@ -2,10 +2,13 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   externalIdFor,
+  fetchNewMessages,
   mapMessageToTask,
   parseCursor,
   serializeCursor,
   type GmailMessage,
+  type ImapClientFactory,
+  type ImapEnvelope,
 } from './gmail.js';
 
 describe('cursor serialization', () => {
@@ -68,8 +71,6 @@ describe('externalIdFor', () => {
   });
 });
 
-import { fetchNewMessages, type ImapClientFactory, type ImapEnvelope } from './gmail.js';
-
 const makeFakeFactory = (opts: {
   uidValidity: bigint;
   uidNext: number;
@@ -79,8 +80,8 @@ const makeFakeFactory = (opts: {
     connect: async () => {},
     getMailboxLock: async () => ({ release: () => {} }),
     mailbox: { uidValidity: opts.uidValidity, uidNext: opts.uidNext },
-    fetch: (range: { uid: string }) => {
-      const fromUid = Number(range.uid.split(':')[0]);
+    fetch: (range: string) => {
+      const fromUid = Number(range.split(':')[0]);
       const matched = opts.messages.filter((m) => m.uid >= fromUid);
       // IMAP vrací pro range "N:*" minimálně poslední zprávu, i když je N > maxUid
       const result = matched.length ? matched : opts.messages.slice(-1);

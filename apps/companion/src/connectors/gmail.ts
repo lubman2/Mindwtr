@@ -80,8 +80,9 @@ export type ImapClientLike = {
   getMailboxLock: (mailbox: string) => Promise<{ release: () => void }>;
   mailbox: { uidValidity: bigint; uidNext: number } | boolean;
   fetch: (
-    range: { uid: string },
-    options: { envelope: boolean; uid: boolean },
+    range: string,
+    query: { envelope: boolean; uid: boolean },
+    options: { uid: boolean },
   ) => AsyncIterable<ImapFetchedMessage>;
   logout: () => Promise<void>;
 };
@@ -135,8 +136,9 @@ export async function fetchNewMessages(
       const messages: GmailMessage[] = [];
       let lastUid = cursor.lastUid;
       for await (const item of client.fetch(
-        { uid: `${cursor.lastUid + 1}:*` },
+        `${cursor.lastUid + 1}:*`,
         { envelope: true, uid: true },
+        { uid: true },
       )) {
         // IMAP pro range "N:*" vrátí poslední zprávu i když nic nového není.
         if (item.uid <= cursor.lastUid) continue;
@@ -155,6 +157,10 @@ export async function fetchNewMessages(
       lock.release();
     }
   } finally {
-    await client.logout();
+    try {
+      await client.logout();
+    } catch {
+      // logout je best-effort — spojení už může být pryč
+    }
   }
 }
