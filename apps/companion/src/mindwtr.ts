@@ -46,6 +46,7 @@ export type NewInboxTask = {
 
 export type MindwtrClient = {
   addInboxTask: (input: NewInboxTask) => Promise<Task>;
+  /** Volat až po doběhnutí všech addInboxTask — close není serializovaný přes frontu. */
   close: () => void;
 };
 
@@ -89,6 +90,8 @@ export async function openMindwtr(dbPath: string): Promise<MindwtrClient> {
       queue.run(async () => {
         const state = core.useTaskStore.getState();
         await state.fetchData();
+        // Stejný vzor jako core-adapter v mcp-serveru: `state` je snapshot před fetchData,
+        // diff přes `before` set je serializovaný frontou, takže souběh nehrozí.
         const before = new Set(state._allTasks.map((t: Task) => t.id));
         const result = await state.addTask(input.title, {
           status: 'inbox',
