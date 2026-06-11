@@ -17,3 +17,23 @@ Stav (dedup, kurzory) drží vlastní SQLite v `~/.config/mindwtr-companion/stat
 - `bun run once` — jeden sync cyklus a konec
 - `bun run start` — daemon (poll po `pollSeconds`)
 - `bun test`, `bun run typecheck`, `bun run lint`
+
+## Launchd (trvalý běh na macOS)
+
+    mkdir -p ~/Library/Logs/mindwtr-companion
+    cp launchd/tech.lubman.mindwtr-companion.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/tech.lubman.mindwtr-companion.plist
+
+Zastavení: `launchctl bootout gui/$(id -u)/tech.lubman.mindwtr-companion`
+
+Logy: `~/Library/Logs/mindwtr-companion/companion.log` (JSONL)
+
+Poznámky k provozu:
+
+- Logger zrcadlí všechny záznamy (info i error) na stderr, takže
+  `launchd.err.log` obsahuje i běžný provozní výstup — autoritativní
+  záznam s úrovněmi je `companion.log`.
+- Rotace logů není řešená; `companion.log` roste neomezeně. Při potřebě
+  rotovat ručně (`mv` + restart agenta) nebo přidat vlastní rotaci.
+- Plist předpokládá bun v `~/.bun/bin/bun` a repo v `~/Sites/Mindwtr` —
+  při jiném umístění uprav cesty v plistu.
