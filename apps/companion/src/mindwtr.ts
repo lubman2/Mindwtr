@@ -91,7 +91,9 @@ export async function openMindwtr(dbPath: string): Promise<MindwtrClient> {
         const state = core.useTaskStore.getState();
         await state.fetchData();
         // Stejný vzor jako core-adapter v mcp-serveru: `state` je snapshot před fetchData,
-        // diff přes `before` set je serializovaný frontou, takže souběh nehrozí.
+        // fronta serializuje souběh uvnitř procesu. Externí zápis (desktop app) mezi
+        // fetchData a diffem může v krajním případě připsat cizí task_id do stavové DB —
+        // dedup i import zůstávají korektní.
         const before = new Set(state._allTasks.map((t: Task) => t.id));
         const result = await state.addTask(input.title, {
           status: 'inbox',

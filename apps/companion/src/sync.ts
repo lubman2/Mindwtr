@@ -26,7 +26,11 @@ export async function runGmailSync(
   config: GmailConfig,
   deps: GmailSyncDeps,
 ): Promise<GmailSyncResult> {
-  const previousCursor = parseCursor(deps.state.getCursor('gmail'));
+  const rawCursor = deps.state.getCursor('gmail');
+  const previousCursor = parseCursor(rawCursor);
+  if (rawCursor !== null && previousCursor === null) {
+    deps.log.error('gmail cursor unparseable, re-baselining (maily mezitím se neimportují)');
+  }
   const { messages, cursor } = await deps.fetchNewMessages(config, previousCursor);
 
   let imported = 0;

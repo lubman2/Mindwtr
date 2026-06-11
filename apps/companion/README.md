@@ -7,7 +7,7 @@ Stav (dedup, kurzory) drží vlastní SQLite v `~/.config/mindwtr-companion/stat
 
 ## Setup
 
-1. `cp config.example.toml ~/.config/mindwtr-companion/config.toml` a vyplnit.
+1. `cp config.example.toml ~/.config/mindwtr-companion/config.toml` a vyplnit; doporučeno `chmod 600` (obsahuje app password).
 2. Gmail: na účtu zapnout 2FA a vytvořit App Password (https://myaccount.google.com/apppasswords).
 3. Jednorázový běh: `bun run once` (první běh jen nastaví kurzor, nic neimportuje).
 4. Trvalý běh: launchd agent — viz `launchd/`.

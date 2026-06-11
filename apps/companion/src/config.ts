@@ -12,7 +12,7 @@ const GmailConfigSchema = z.object({
   user: z.string().min(1),
   password: z.string().min(1),
   mailbox: z.string().default('INBOX'),
-  pollSeconds: z.number().int().min(30).default(300),
+  pollSeconds: z.number().int().min(30).max(86_400).default(300),
 });
 
 const ConfigSchema = z.object({
