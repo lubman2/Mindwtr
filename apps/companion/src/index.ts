@@ -46,8 +46,18 @@ async function main(): Promise<void> {
 
   log.info('companion daemon started', { pollSeconds: gmail.pollSeconds });
   await tick();
+  // SIGTERM cleanup záměrně chybí: kurzor se ukládá až po celé dávce a dedup
+  // přežije restart, launchd proces stejně obnoví (KeepAlive).
+  let running = false;
   setInterval(() => {
-    void tick();
+    if (running) {
+      log.info('gmail tick skipped — previous still running');
+      return;
+    }
+    running = true;
+    void tick().finally(() => {
+      running = false;
+    });
   }, gmail.pollSeconds * 1000);
 }
 
