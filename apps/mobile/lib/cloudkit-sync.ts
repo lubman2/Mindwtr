@@ -52,9 +52,10 @@ try {
 const RECORD_TYPES = {
     task: 'MindwtrTask',
     project: 'MindwtrProject',
-    section: 'MindwtrSection',
-    area: 'MindwtrArea',
-    settings: 'MindwtrSettings',
+  section: 'MindwtrSection',
+  area: 'MindwtrArea',
+  person: 'MindwtrPerson',
+  settings: 'MindwtrSettings',
 } as const;
 
 type AccountStatus = 'available' | 'noAccount' | 'restricted' | 'temporarilyUnavailable' | 'unknown';
@@ -232,6 +233,7 @@ export const writeRemoteCloudKit = async (data: AppData, options: CloudKitOperat
         const allProjects = Array.isArray(data.projects) ? data.projects : [];
         const allSections = Array.isArray(data.sections) ? data.sections : [];
         const allAreas = Array.isArray(data.areas) ? data.areas : [];
+        const allPeople = Array.isArray(data.people) ? data.people : [];
 
         const savePromises: Promise<string[]>[] = [];
 
@@ -266,6 +268,15 @@ export const writeRemoteCloudKit = async (data: AppData, options: CloudKitOperat
             savePromises.push(
                 runCloudKitOperation(
                     () => CloudKitSync!.saveRecords(RECORD_TYPES.area, JSON.stringify(allAreas)),
+                    options.signal,
+                    'CloudKit write cancelled',
+                ),
+            );
+        }
+        if (allPeople.length > 0) {
+            savePromises.push(
+                runCloudKitOperation(
+                    () => CloudKitSync!.saveRecords(RECORD_TYPES.person, JSON.stringify(allPeople)),
                     options.signal,
                     'CloudKit write cancelled',
                 ),
@@ -451,7 +462,7 @@ export const subscribeToCloudKitChanges = (onChanged: () => void): (() => void) 
 
 async function fullFetch(options: CloudKitOperationOptions = {}): Promise<AppData> {
     throwIfAborted(options.signal, 'CloudKit read cancelled');
-    const [tasks, projects, sections, areas, settingsRecords] = await Promise.all([
+    const [tasks, projects, sections, areas, people, settingsRecords] = await Promise.all([
         runCloudKitOperation(
             () => CloudKitSync!.fetchAllRecords(RECORD_TYPES.task),
             options.signal,
@@ -469,6 +480,11 @@ async function fullFetch(options: CloudKitOperationOptions = {}): Promise<AppDat
         ),
         runCloudKitOperation(
             () => CloudKitSync!.fetchAllRecords(RECORD_TYPES.area),
+            options.signal,
+            'CloudKit read cancelled',
+        ),
+        runCloudKitOperation(
+            () => CloudKitSync!.fetchAllRecords(RECORD_TYPES.person),
             options.signal,
             'CloudKit read cancelled',
         ),
@@ -513,6 +529,7 @@ async function fullFetch(options: CloudKitOperationOptions = {}): Promise<AppDat
         projects: Array.isArray(projects) ? projects : [],
         sections: Array.isArray(sections) ? sections : [],
         areas: Array.isArray(areas) ? areas : [],
+        people: Array.isArray(people) ? people : [],
         settings,
     } as unknown as AppData;
 }

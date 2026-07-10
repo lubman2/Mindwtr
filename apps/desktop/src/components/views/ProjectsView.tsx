@@ -10,11 +10,29 @@ import {
 } from 'react';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { tFallback, useTaskStore, type Task, type Project } from '@mindwtr/core';
+import {
+    DndContext,
+    DragOverlay,
+    MeasuringStrategy,
+    PointerSensor,
+    useSensor,
+    useSensors,
+    type DragEndEvent,
+    type DragStartEvent,
+} from '@dnd-kit/core';
 import { useLanguage } from '../../contexts/language-context';
 import { PromptModal } from '../PromptModal';
 import { ProjectsSidebar } from './projects/ProjectsSidebar';
 import { AreaManagerModal } from './projects/AreaManagerModal';
 import { ProjectWorkspace } from './projects/ProjectWorkspace';
+import { computeProjectAreaDragResult } from './projects/project-area-dnd';
+import {
+    projectsViewCollisionDetection,
+    resolveTaskSidebarDropTarget,
+    type ProjectsDragData,
+    type TaskSidebarDropTarget,
+} from './projects/projects-view-dnd';
+import type { ProjectAreaSection } from './projects/project-area-collapse';
 import {
     DEFAULT_AREA_COLOR,
     getProjectColor,
@@ -24,7 +42,7 @@ import {
 import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
 import { useUiStore } from '../../store/ui-store';
-import { AREA_FILTER_ALL, AREA_FILTER_NONE, projectMatchesAreaFilter } from '../../lib/area-filter';
+import { AREA_FILTER_ALL, AREA_FILTER_NONE, projectMatchesAreaFilter } from '@mindwtr/core';
 import { reportError } from '../../lib/report-error';
 import { useAreaSidebarState } from './projects/useAreaSidebarState';
 import { useProjectsViewStore } from './projects/useProjectsViewStore';
@@ -46,6 +64,17 @@ import {
 } from '../../constants/layout';
 import { useConfirmDialog } from '../../hooks/useConfirmDialog';
 import { usePersistedViewState } from '../../hooks/usePersistedViewState';
+
+const projectsViewDndMeasuring = {
+    droppable: {
+        strategy: MeasuringStrategy.WhileDragging,
+        frequency: 16,
+    },
+} as const;
+
+type ProjectsViewActiveDrag =
+    | { type: 'task'; taskId: string }
+    | { type: 'project'; section: ProjectAreaSection };
 
 const COLLAPSED_AREAS_STORAGE_KEY = 'mindwtr:projects:collapsedAreas';
 const PROJECTS_VIEW_STATE_STORAGE_KEY = 'mindwtr:view:projects:v1';
@@ -141,7 +170,6 @@ export function ProjectsView() {
         addSection,
         updateSection,
         deleteSection,
-        addTask,
         toggleProjectFocus,
         allTasks,
         highlightTaskId,
@@ -166,6 +194,7 @@ export function ProjectsView() {
     );
     const [isCreating, setIsCreating] = useState(false);
     const [newProjectTitle, setNewProjectTitle] = useState('');
+    const [newProjectAreaId, setNewProjectAreaId] = useState('');
     const [persistedViewState, setPersistedViewState] = usePersistedViewState(
         PROJECTS_VIEW_STATE_STORAGE_KEY,
         DEFAULT_PROJECTS_VIEW_STATE,
@@ -422,6 +451,10 @@ export function ProjectsView() {
 
     const getProjectColorForTask = (project: Project) => getProjectColor(project, areaById, DEFAULT_AREA_COLOR);
 
+    useEffect(() => {
+        setNewProjectAreaId(selectedArea !== ALL_AREAS && selectedArea !== NO_AREA ? selectedArea : '');
+    }, [selectedArea, ALL_AREAS, NO_AREA]);
+
     const sortAreasByName = () => reorderAreas(sortAreasByNameIds(sortedAreas));
     const sortAreasByColor = () => reorderAreas(sortAreasByColorIds(sortedAreas));
 
@@ -520,13 +553,171 @@ export function ProjectsView() {
         };
     }, [projects, selectedArea, selectedTag, ALL_AREAS, NO_AREA, ALL_TAGS, NO_TAGS, areaById, sortedAreas]);
 
+    // One DndContext spans the sidebar and the workspace so task rows can be
+    // dropped on sidebar projects/areas; drags carry typed data and handlers
+    // branch on it (ADR 0023).
+    const dndSensors = useSensors(
+        useSensor(PointerSensor, {
+            activationConstraint: { distance: 5 },
+        }),
+    );
+    const [activeDrag, setActiveDrag] = useState<ProjectsViewActiveDrag | null>(null);
+    const taskDragEndRef = useRef<((event: DragEndEvent) => void) | null>(null);
+
+    const projectDndStates = useMemo(() => {
+        const build = (groups: Array<[string, Project[]]>) => {
+            const projectIdsByArea = new Map<string, string[]>();
+            const projectAreaById = new Map<string, string>();
+            groups.forEach(([areaId, areaProjects]) => {
+                const ids = areaProjects.map((project) => project.id);
+                projectIdsByArea.set(areaId, ids);
+                ids.forEach((id) => projectAreaById.set(id, areaId));
+            });
+            return { projectIdsByArea, projectAreaById };
+        };
+        return {
+            active: build(groupedActiveProjects),
+            deferred: build(groupedDeferredProjects),
+            archived: build(groupedArchivedProjects),
+        };
+    }, [groupedActiveProjects, groupedDeferredProjects, groupedArchivedProjects]);
+
+    const handleProjectDragEnd = useCallback((section: ProjectAreaSection, event: DragEndEvent) => {
+        const failProjectMove = (error: unknown) => {
+            reportError('Failed to move project between areas', error);
+            showToast(t('projects.moveProjectFailed') || 'Failed to move project', 'error');
+        };
+        const { active, over } = event;
+        if (!over || active.id === over.id) return;
+        const dndState = projectDndStates[section];
+        const move = computeProjectAreaDragResult({
+            activeId: String(active.id),
+            overId: String(over.id),
+            projectIdsByArea: dndState.projectIdsByArea,
+            projectAreaById: dndState.projectAreaById,
+        });
+        if (!move) return;
+
+        const sourceAreaArg = move.sourceAreaId === NO_AREA ? undefined : move.sourceAreaId;
+        const destinationAreaArg = move.destinationAreaId === NO_AREA ? undefined : move.destinationAreaId;
+
+        if (!move.movedAcrossAreas) {
+            void Promise.resolve(reorderProjects(move.nextDestinationIds, destinationAreaArg)).catch(failProjectMove);
+            return;
+        }
+
+        void Promise.resolve(updateProject(move.movedProjectId, { areaId: destinationAreaArg }))
+            .then(async (result) => {
+                if (result && result.success === false) {
+                    throw new Error(result.error || 'Failed to move project');
+                }
+                if (move.nextSourceIds.length > 0) {
+                    await Promise.resolve(reorderProjects(move.nextSourceIds, sourceAreaArg));
+                }
+                await Promise.resolve(reorderProjects(move.nextDestinationIds, destinationAreaArg));
+            })
+            .catch(failProjectMove);
+    }, [NO_AREA, projectDndStates, reorderProjects, showToast, t, updateProject]);
+
+    const handleTaskSidebarDrop = useCallback((taskId: string, target: TaskSidebarDropTarget) => {
+        const task = allTasks.find((candidate) => candidate.id === taskId);
+        if (!task) return;
+
+        let destinationName: string;
+        let updates: Partial<Task>;
+        if (target.kind === 'project') {
+            if ((task.projectId ?? undefined) === target.projectId) return;
+            const targetProject = projects.find(
+                (candidate) => candidate.id === target.projectId && !candidate.deletedAt,
+            );
+            if (!targetProject || targetProject.status === 'archived') return;
+            destinationName = targetProject.title;
+            updates = { projectId: target.projectId };
+        } else {
+            const resolvedAreaId = target.areaId === NO_AREA ? undefined : target.areaId;
+            if (resolvedAreaId && !areaById.has(resolvedAreaId)) return;
+            if (!task.projectId && (task.areaId ?? undefined) === resolvedAreaId) return;
+            destinationName = resolvedAreaId
+                ? areaById.get(resolvedAreaId)?.name ?? ''
+                : t('projects.noArea');
+            updates = { projectId: undefined, areaId: resolvedAreaId };
+        }
+
+        const previous: Partial<Task> = {
+            projectId: task.projectId,
+            sectionId: task.sectionId,
+            areaId: task.areaId,
+            order: task.order,
+            orderNum: task.orderNum,
+        };
+        const failTaskMove = (error: unknown) => {
+            reportError('Failed to move task', error);
+            showToast(tFallback(t, 'projects.taskMoveFailed', 'Failed to move task'), 'error');
+        };
+        void Promise.resolve(updateTask(taskId, updates))
+            .then((result) => {
+                if (result && result.success === false) {
+                    throw new Error(result.error || 'Failed to move task');
+                }
+                const message = tFallback(t, 'projects.taskMovedTo', 'Moved to {{name}}')
+                    .replace('{{name}}', destinationName);
+                if (settings?.undoNotificationsEnabled !== false) {
+                    showToast(message, 'success', 6000, {
+                        label: tFallback(t, 'common.undo', 'Undo'),
+                        onClick: () => {
+                            void Promise.resolve(updateTask(taskId, previous)).catch(failTaskMove);
+                        },
+                    });
+                } else {
+                    showToast(message, 'success');
+                }
+            })
+            .catch(failTaskMove);
+    }, [NO_AREA, allTasks, areaById, projects, settings?.undoNotificationsEnabled, showToast, t, updateTask]);
+
+    const handleDndDragStart = useCallback((event: DragStartEvent) => {
+        const data = event.active.data.current as ProjectsDragData | undefined;
+        if (data?.type === 'task') {
+            setActiveDrag({ type: 'task', taskId: String(event.active.id) });
+        } else if (data?.type === 'project') {
+            setActiveDrag({ type: 'project', section: data.section });
+        }
+    }, []);
+
+    const handleDndDragCancel = useCallback(() => setActiveDrag(null), []);
+
+    const handleDndDragEnd = useCallback((event: DragEndEvent) => {
+        setActiveDrag(null);
+        const data = event.active.data.current as ProjectsDragData | undefined;
+        if (data?.type === 'project') {
+            handleProjectDragEnd(data.section, event);
+            return;
+        }
+        if (data?.type === 'task') {
+            const { over } = event;
+            if (over) {
+                const target = resolveTaskSidebarDropTarget(String(over.id), over.data.current);
+                if (target) {
+                    handleTaskSidebarDrop(String(event.active.id), target);
+                    return;
+                }
+            }
+            taskDragEndRef.current?.(event);
+        }
+    }, [handleProjectDragEnd, handleTaskSidebarDrop]);
+
+    const draggedTask = useMemo(() => {
+        if (activeDrag?.type !== 'task') return null;
+        return allTasks.find((candidate) => candidate.id === activeDrag.taskId) ?? null;
+    }, [activeDrag, allTasks]);
+
     const handleCreateProject = async (e: FormEvent) => {
         e.preventDefault();
         if (!newProjectTitle.trim() || isCreatingProject) return;
         setIsCreatingProject(true);
         try {
             const resolvedAreaId =
-                selectedArea !== ALL_AREAS && selectedArea !== NO_AREA ? selectedArea : undefined;
+                newProjectAreaId && areaById.has(newProjectAreaId) ? newProjectAreaId : undefined;
             const areaColor = resolvedAreaId ? areaById.get(resolvedAreaId)?.color : undefined;
             await addProject(
                 newProjectTitle,
@@ -535,6 +726,7 @@ export function ProjectsView() {
             );
             setNewProjectTitle('');
             setIsCreating(false);
+            setNewProjectAreaId(selectedArea !== ALL_AREAS && selectedArea !== NO_AREA ? selectedArea : '');
         } catch (error) {
             reportError('Failed to create project', error);
             showToast(t('projects.createFailed') || 'Failed to create project', 'error');
@@ -565,6 +757,14 @@ export function ProjectsView() {
     return (
         <ErrorBoundary>
             <div className="h-full px-4 py-3">
+                <DndContext
+                    sensors={dndSensors}
+                    collisionDetection={projectsViewCollisionDetection}
+                    measuring={projectsViewDndMeasuring}
+                    onDragStart={handleDndDragStart}
+                    onDragCancel={handleDndDragCancel}
+                    onDragEnd={handleDndDragEnd}
+                >
                 <div
                     ref={projectsLayoutRef}
                     className="mx-auto flex h-full w-full min-w-0 gap-5 xl:gap-6"
@@ -587,10 +787,16 @@ export function ProjectsView() {
                                     isCreating={isCreating}
                                     isCreatingProject={isCreatingProject}
                                     newProjectTitle={newProjectTitle}
+                                    newProjectAreaId={newProjectAreaId}
+                                    areaOptions={sortedAreas}
                                     onStartCreate={() => setIsCreating(true)}
-                                    onCancelCreate={() => setIsCreating(false)}
+                                    onCancelCreate={() => {
+                                        setIsCreating(false);
+                                        setNewProjectAreaId(selectedArea !== ALL_AREAS && selectedArea !== NO_AREA ? selectedArea : '');
+                                    }}
                                     onCreateProject={handleCreateProject}
                                     onChangeNewProjectTitle={setNewProjectTitle}
+                                    onChangeNewProjectAreaId={setNewProjectAreaId}
                                     onSelectTag={setSelectedTag}
                                     groupedActiveProjects={groupedActiveProjects}
                                     groupedDeferredProjects={groupedDeferredProjects}
@@ -609,10 +815,8 @@ export function ProjectsView() {
                                     projects={projects}
                                     focusedProjectCount={focusedProjectCount}
                                     toggleProjectFocus={toggleProjectFocus}
-                                    updateProject={updateProject}
-                                    reorderProjects={reorderProjects}
                                     onDuplicateProject={handleDuplicateProject}
-                                    showToast={showToast}
+                                    draggingSection={activeDrag?.type === 'project' ? activeDrag.section : null}
                                     collapseLabel={collapseProjectsSidebarLabel}
                                     onToggleCollapsed={toggleProjectsSidebarCollapsed}
                                 />
@@ -651,9 +855,7 @@ export function ProjectsView() {
                     )}
 
                     <ProjectWorkspace
-                        addProject={addProject}
                         addSection={addSection}
-                        addTask={addTask}
                         allTasks={allTasks}
                         allTokens={allTokens}
                         areaById={areaById}
@@ -696,8 +898,17 @@ export function ProjectsView() {
                         updateProject={updateProject}
                         updateSection={updateSection}
                         updateTask={updateTask}
+                        taskDragEndRef={taskDragEndRef}
                     />
                 </div>
+                <DragOverlay dropAnimation={null}>
+                    {draggedTask ? (
+                        <div className="pointer-events-none max-w-[280px] truncate rounded-lg border border-border bg-card px-3 py-2 text-sm shadow-lg">
+                            {draggedTask.title}
+                        </div>
+                    ) : null}
+                </DragOverlay>
+                </DndContext>
 
                 {showAreaManager && (
                     <AreaManagerModal

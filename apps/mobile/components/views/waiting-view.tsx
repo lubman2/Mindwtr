@@ -1,5 +1,5 @@
 import { View, Text, FlatList, ScrollView, StyleSheet, TouchableOpacity, Platform } from 'react-native';
-import { getWaitingPerson, isTaskInActiveProject, safeParseDueDate, shallow, useTaskStore } from '@mindwtr/core';
+import { getTranslationsSync, getWaitingPerson, isTaskInActiveProject, safeParseDueDate, shallow, useTaskStore } from '@mindwtr/core';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Task, TaskStatus } from '@mindwtr/core';
 import { useTheme } from '../../contexts/theme-context';
@@ -11,33 +11,48 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
-import { projectMatchesAreaFilter, taskMatchesAreaFilter } from '@/lib/area-filter';
+import { projectMatchesAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
 import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigation';
 import { SwipeableTaskItem } from '../swipeable-task-item';
 import { TaskEditModal } from '../task-edit-modal';
+import { TaskListBulkBar, getBulkMoveStatusOptions } from '../task-list/TaskListBulkBar';
+import { useTaskListSelection } from '../use-task-list-selection';
+import { TaskListTagModal } from '../task-list/TaskListTagModal';
 
 export function WaitingView() {
-  const { tasks, projects, updateTask, updateProject, deleteTask, highlightTaskId, setHighlightTask, settings } = useTaskStore((state) => ({
+  const { tasks, projects, updateTask, updateProject, deleteTask, restoreTask, batchMoveTasks, batchDeleteTasks, batchUpdateTasks, highlightTaskId, setHighlightTask } = useTaskStore((state) => ({
     tasks: state.tasks,
     projects: state.projects,
     updateTask: state.updateTask,
     updateProject: state.updateProject,
     deleteTask: state.deleteTask,
+    restoreTask: state.restoreTask,
+    batchMoveTasks: state.batchMoveTasks,
+    batchDeleteTasks: state.batchDeleteTasks,
+    batchUpdateTasks: state.batchUpdateTasks,
     highlightTaskId: state.highlightTaskId,
     setHighlightTask: state.setHighlightTask,
-    settings: state.settings,
   }), shallow);
   const { isDark } = useTheme();
-  const { t } = useLanguage();
+  const { language, t } = useLanguage();
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [selectedWaitingPerson, setSelectedWaitingPerson] = useState('');
   const router = useRouter();
+  const restoreActionLabel = getTranslationsSync(language)['trash.restoreToInbox']
+    || getTranslationsSync('en')['trash.restoreToInbox']
+    || 'Restore';
 
   const tc = useThemeColors();
   const insets = useSafeAreaInsets();
   const navBarInset = Platform.OS === 'android' && insets.bottom >= 24 ? insets.bottom : 0;
   const { areaById, resolvedAreaFilter } = useMobileAreaFilter();
   const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+  const tasksById = useMemo(() => {
+    return tasks.reduce((acc, task) => {
+      acc[task.id] = task;
+      return acc;
+    }, {} as Record<string, Task>);
+  }, [tasks]);
   const taskListContentStyle = useMemo(
     () => [styles.taskListContent, navBarInset ? { paddingBottom: 16 + navBarInset } : null],
     [navBarInset],
@@ -105,6 +120,35 @@ export function WaitingView() {
       setSelectedWaitingPerson('');
     }
   }, [selectedWaitingPerson, waitingPeople]);
+
+  const {
+    bulkActionLabel,
+    bulkActionLoading,
+    exitSelectionMode,
+    handleBatchAddTag,
+    handleBatchDelete,
+    handleBatchMove,
+    hasSelection,
+    multiSelectedIds,
+    rangeSelectMode,
+    selectedIdsArray,
+    selectionMode,
+    setTagInput,
+    setTagModalVisible,
+    tagInput,
+    tagModalVisible,
+    toggleRangeSelectMode,
+    toggleMultiSelect,
+  } = useTaskListSelection({
+    batchDeleteTasks,
+    batchMoveTasks,
+    batchUpdateTasks,
+    restoreActionLabel,
+    restoreTask,
+    t,
+    tasksById,
+  });
+  const bulkMoveStatusOptions = useMemo(() => getBulkMoveStatusOptions('waiting'), []);
 
   const handleStatusChange = (id: string, status: TaskStatus) => {
     return updateTask(id, { status });
@@ -195,6 +239,24 @@ export function WaitingView() {
         )}
       </View>
 
+      {selectionMode ? (
+        <TaskListBulkBar
+          bulkActionLabel={bulkActionLabel}
+          bulkActionLoading={bulkActionLoading}
+          handleBatchDelete={handleBatchDelete}
+          handleBatchMove={handleBatchMove}
+          hasSelection={hasSelection}
+          onExitSelectionMode={exitSelectionMode}
+          onOpenTagModal={() => setTagModalVisible(true)}
+          onToggleRangeSelectMode={toggleRangeSelectMode}
+          rangeSelectMode={rangeSelectMode}
+          selectedCount={selectedIdsArray.length}
+          statusOptions={bulkMoveStatusOptions}
+          t={t}
+          themeColors={tc}
+        />
+      ) : null}
+
       <FlatList
         data={filteredWaitingTasks}
         renderItem={({ item: task }) => (
@@ -203,9 +265,13 @@ export function WaitingView() {
             isDark={isDark}
             tc={tc}
             onPress={() => setEditingTask(task)}
+            selectionMode={selectionMode}
+            isMultiSelected={multiSelectedIds.has(task.id)}
+            onToggleSelect={() => toggleMultiSelect(task.id, { visibleTaskIds: filteredWaitingTasks.map((visibleTask) => visibleTask.id) })}
             onStatusChange={(status) => handleStatusChange(task.id, status)}
             onDelete={() => { void deleteTask(task.id); }}
             isHighlighted={task.id === highlightTaskId}
+            statusBadgeAsIcon
             onProjectPress={openProjectScreen}
             onContextPress={openContextsScreen}
             onTagPress={openContextsScreen}
@@ -218,7 +284,7 @@ export function WaitingView() {
         maxToRenderPerBatch={12}
         windowSize={5}
         updateCellsBatchingPeriod={50}
-        removeClippedSubviews={filteredWaitingTasks.length >= 25}
+        removeClippedSubviews={false}
         showsVerticalScrollIndicator={false}
         ListHeaderComponent={deferredProjects.length > 0 ? (
           <View style={[styles.projectSection, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
@@ -267,6 +333,19 @@ export function WaitingView() {
             </Text>
           </View>
         ) : null}
+      />
+
+      <TaskListTagModal
+        onChangeTag={setTagInput}
+        onClose={() => {
+          setTagModalVisible(false);
+          setTagInput('');
+        }}
+        onSave={handleBatchAddTag}
+        t={t}
+        tagInput={tagInput}
+        themeColors={tc}
+        visible={tagModalVisible}
       />
 
       <TaskEditModal

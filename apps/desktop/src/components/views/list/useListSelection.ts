@@ -18,6 +18,7 @@ import type {
 } from '@mindwtr/core';
 
 import { reportError } from '../../../lib/report-error';
+import { undoTaskCompletion } from '../../../lib/undo-task-completion';
 import type { NextGroupBy } from './next-grouping';
 
 type ShowToast = (
@@ -281,11 +282,28 @@ export function useListSelection({
         setSelectedIndex(index);
         if (shouldVirtualize) {
             scrollToVirtualIndex(index, 'center');
-        }
-
-        const element = document.querySelector(`[data-task-id="${highlightTaskId}"]`) as HTMLElement | null;
-        if (element && typeof (element as { scrollIntoView?: (options?: ScrollIntoViewOptions) => void }).scrollIntoView === 'function') {
-            element.scrollIntoView({ block: 'center' });
+        } else {
+            let retryTimer: number | null = null;
+            let cancelled = false;
+            let attempts = 0;
+            const scrollHighlightedTask = () => {
+                if (cancelled) return;
+                const element = document.querySelector(`[data-task-id="${highlightTaskId}"]`) as HTMLElement | null;
+                if (element && typeof (element as { scrollIntoView?: (options?: ScrollIntoViewOptions) => void }).scrollIntoView === 'function') {
+                    element.scrollIntoView({ block: 'center' });
+                    return;
+                }
+                if (attempts >= 8) return;
+                attempts += 1;
+                retryTimer = window.setTimeout(scrollHighlightedTask, 50);
+            };
+            scrollHighlightedTask();
+            const timer = window.setTimeout(() => setHighlightTask(null), 4000);
+            return () => {
+                cancelled = true;
+                if (retryTimer !== null) window.clearTimeout(retryTimer);
+                window.clearTimeout(timer);
+            };
         }
 
         const timer = window.setTimeout(() => setHighlightTask(null), 4000);
@@ -329,6 +347,7 @@ export function useListSelection({
         const task = filteredTasks[selectedIndex];
         if (!task) return;
         const nextStatus: TaskStatus = task.status === 'done' ? 'inbox' : 'done';
+        const wasFocusedToday = task.isFocusedToday === true;
         void Promise.resolve(moveTask(task.id, nextStatus))
             .then(() => {
                 if (!undoNotificationsEnabled || nextStatus !== 'done') return;
@@ -339,7 +358,8 @@ export function useListSelection({
                     {
                         label: t('common.undo') || 'Undo',
                         onClick: () => {
-                            void Promise.resolve(moveTask(task.id, task.status));
+                            void undoTaskCompletion(task.id, task.status, wasFocusedToday)
+                                .catch((error) => reportError('Failed to undo task completion', error));
                         },
                     },
                 );
@@ -397,11 +417,13 @@ export function useListSelection({
             toggleDoneSelected,
             deleteSelected,
             focusAddInput: () => {
-                if (showViewFilterInput) {
-                    viewFilterInputRef.current?.focus();
+                if (addInputRef.current) {
+                    addInputRef.current.focus();
                     return;
                 }
-                addInputRef.current?.focus();
+                if (showViewFilterInput) {
+                    viewFilterInputRef.current?.focus();
+                }
             },
         });
 

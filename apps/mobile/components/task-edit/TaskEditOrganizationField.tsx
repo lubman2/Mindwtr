@@ -10,7 +10,8 @@ import {
 } from '@mindwtr/core';
 
 import type { TaskEditFieldRendererProps } from './TaskEditFieldRenderer.types';
-import { getEditedTaskValue } from './task-edit-modal.utils';
+import { getAreaIdForClearedProject, getEditedTaskValue } from './task-edit-modal.utils';
+import { CompactText } from '@/components/compact-text';
 
 type OrganizationFieldId =
     | 'status'
@@ -31,6 +32,7 @@ export function TaskEditOrganizationField({
     areas,
     assignedToSuggestions,
     availableStatusOptions,
+    createAssignedToPerson,
     editedTask,
     energyLevelOptions,
     fieldId,
@@ -39,6 +41,7 @@ export function TaskEditOrganizationField({
     priorityOptions,
     projectSections,
     projects,
+    requestStatusChange,
     setEditedTask,
     setShowAreaPicker,
     setShowProjectPicker,
@@ -49,6 +52,7 @@ export function TaskEditOrganizationField({
     tc,
     timeEstimateOptions,
     timeEstimatesEnabled,
+    timeSpentEnabled,
 }: TaskEditOrganizationFieldProps) {
     const inputStyle = { backgroundColor: tc.inputBg, borderColor: tc.border, color: tc.text };
     const currentTimeEstimate = editedTask.timeEstimate;
@@ -108,13 +112,24 @@ export function TaskEditOrganizationField({
                 accessibilityRole="button"
                 accessibilityLabel={`${label}: ${value}`}
             >
-                <Text style={[styles.compactFieldLabel, { color: tc.secondaryText }]}>{label}</Text>
-                <Text style={[styles.compactFieldValue, { color: tc.tint }]} numberOfLines={1}>
+                <CompactText
+                    style={[styles.compactFieldLabel, { color: tc.secondaryText }]}
+                >
+                    {label}
+                </CompactText>
+                <CompactText
+                    style={[styles.compactFieldValue, { color: tc.tint }]}
+                    numberOfLines={2}
+                >
                     {value}
-                </Text>
+                </CompactText>
             </TouchableOpacity>
         </View>
     );
+    const assignedToDraft = String(editedTask.assignedTo ?? '').trim();
+    const assignedToCreateLabel = translateWithFallback(t, 'people.new', 'New Person');
+    const canCreateAssignedToPerson = assignedToDraft.length > 0
+        && !assignedToSuggestions.some((name) => name.trim().toLowerCase() === assignedToDraft.toLowerCase());
 
     switch (fieldId) {
         case 'status':
@@ -126,7 +141,7 @@ export function TaskEditOrganizationField({
                             <TouchableOpacity
                                 key={status}
                                 style={[styles.statusChipCompact, ...getStatusChipStyle(editedTask.status === status)]}
-                                onPress={() => setEditedTask((prev) => ({ ...prev, status }))}
+                                onPress={() => requestStatusChange(status)}
                                 accessibilityRole="button"
                                 accessibilityState={{ selected: editedTask.status === status }}
                                 accessibilityLabel={`${t('taskEdit.statusLabel')}: ${getStatusLabel(status)}`}
@@ -169,7 +184,12 @@ export function TaskEditOrganizationField({
                         {!!projectId && (
                             <TouchableOpacity
                                 style={[styles.clearDateBtn, { borderColor: tc.border, backgroundColor: tc.filterBg }]}
-                                onPress={() => setEditedTask((prev) => ({ ...prev, projectId: undefined, sectionId: undefined }))}
+                                onPress={() => setEditedTask((prev) => ({
+                                    ...prev,
+                                    projectId: undefined,
+                                    sectionId: undefined,
+                                    areaId: getAreaIdForClearedProject(prev, task, projects),
+                                }))}
                             >
                                 <Text style={[styles.clearDateText, { color: tc.secondaryText }]}>{t('common.clear')}</Text>
                             </TouchableOpacity>
@@ -309,8 +329,23 @@ export function TaskEditOrganizationField({
                         accessibilityLabel={t('taskEdit.assignedTo')}
                         accessibilityHint={t('taskEdit.assignedToPlaceholder')}
                     />
-                    {assignedToSuggestions.length > 0 && (
+                    {(assignedToSuggestions.length > 0 || canCreateAssignedToPerson) && (
                         <View style={[styles.tokenSuggestionsMenu, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
+                            {canCreateAssignedToPerson && (
+                                <TouchableOpacity
+                                    style={[
+                                        styles.tokenSuggestionItem,
+                                        assignedToSuggestions.length === 0 ? styles.tokenSuggestionItemLast : null,
+                                    ]}
+                                    onPress={() => {
+                                        void createAssignedToPerson(assignedToDraft);
+                                    }}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={`${assignedToCreateLabel}: ${assignedToDraft}`}
+                                >
+                                    <Text style={[styles.tokenSuggestionText, { color: tc.tint }]}>+ {assignedToCreateLabel} &quot;{assignedToDraft}&quot;</Text>
+                                </TouchableOpacity>
+                            )}
                             {assignedToSuggestions.map((name, index) => (
                                 <TouchableOpacity
                                     key={name}
@@ -384,6 +419,29 @@ export function TaskEditOrganizationField({
                             placeholderTextColor={tc.secondaryText}
                             accessibilityLabel={`${t('taskEdit.timeEstimateLabel')}: ${customTimeEstimateLabel}`}
                         />
+                    )}
+                    {timeSpentEnabled && (
+                        <>
+                            <Text style={[styles.label, { color: tc.secondaryText, marginTop: 12 }]}>
+                                {translateWithFallback(t, 'taskEdit.timeSpentLabel', 'Time Spent')}
+                            </Text>
+                            <TextInput
+                                style={[styles.input, inputStyle]}
+                                value={typeof editedTask.timeSpentMinutes === 'number' ? String(editedTask.timeSpentMinutes) : ''}
+                                onChangeText={(text) => {
+                                    const digits = text.replace(/[^0-9]/g, '');
+                                    setEditedTask((prev) => ({
+                                        ...prev,
+                                        timeSpentMinutes: digits ? Number(digits) : undefined,
+                                    }));
+                                }}
+                                keyboardType="number-pad"
+                                onFocus={(event) => handleInputFocus(event.nativeEvent.target)}
+                                placeholder={translateWithFallback(t, 'taskEdit.timeSpentPlaceholder', 'minutes')}
+                                placeholderTextColor={tc.secondaryText}
+                                accessibilityLabel={translateWithFallback(t, 'taskEdit.timeSpentLabel', 'Time Spent')}
+                            />
+                        </>
                     )}
                 </View>
             );

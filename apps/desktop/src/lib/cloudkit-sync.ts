@@ -42,6 +42,7 @@ const RECORD_TYPES = {
     project: 'MindwtrProject',
     section: 'MindwtrSection',
     area: 'MindwtrArea',
+    person: 'MindwtrPerson',
     settings: 'MindwtrSettings',
 } as const;
 
@@ -177,6 +178,7 @@ export const writeRemoteCloudKit = async (data: AppData): Promise<void> => {
         const allProjects = Array.isArray(data.projects) ? data.projects : [];
         const allSections = Array.isArray(data.sections) ? data.sections : [];
         const allAreas = Array.isArray(data.areas) ? data.areas : [];
+        const allPeople = Array.isArray(data.people) ? data.people : [];
 
         const savePromises: Promise<{ conflictIDs: string[] }>[] = [];
 
@@ -209,6 +211,14 @@ export const writeRemoteCloudKit = async (data: AppData): Promise<void> => {
                 tauriInvoke('cloudkit_save_records', {
                     recordType: RECORD_TYPES.area,
                     recordsJson: JSON.stringify(allAreas),
+                }),
+            );
+        }
+        if (allPeople.length > 0) {
+            savePromises.push(
+                tauriInvoke('cloudkit_save_records', {
+                    recordType: RECORD_TYPES.person,
+                    recordsJson: JSON.stringify(allPeople),
                 }),
             );
         }
@@ -346,11 +356,12 @@ export const consumePendingRemoteChange = async (): Promise<boolean> => {
 // ---------------------------------------------------------------------------
 
 async function fullFetch(): Promise<AppData> {
-    const [tasks, projects, sections, areas, settingsRecords] = await Promise.all([
+    const [tasks, projects, sections, areas, people, settingsRecords] = await Promise.all([
         tauriInvoke<Array<Record<string, unknown>>>('cloudkit_fetch_all_records', { recordType: RECORD_TYPES.task }),
         tauriInvoke<Array<Record<string, unknown>>>('cloudkit_fetch_all_records', { recordType: RECORD_TYPES.project }),
         tauriInvoke<Array<Record<string, unknown>>>('cloudkit_fetch_all_records', { recordType: RECORD_TYPES.section }),
         tauriInvoke<Array<Record<string, unknown>>>('cloudkit_fetch_all_records', { recordType: RECORD_TYPES.area }),
+        tauriInvoke<Array<Record<string, unknown>>>('cloudkit_fetch_all_records', { recordType: RECORD_TYPES.person }),
         tauriInvoke<Array<Record<string, unknown>>>('cloudkit_fetch_all_records', {
             recordType: RECORD_TYPES.settings,
         }),
@@ -385,6 +396,7 @@ async function fullFetch(): Promise<AppData> {
         projects: Array.isArray(projects) ? projects : [],
         sections: Array.isArray(sections) ? sections : [],
         areas: Array.isArray(areas) ? areas : [],
+        people: Array.isArray(people) ? people : [],
         settings,
     } as unknown as AppData;
 }

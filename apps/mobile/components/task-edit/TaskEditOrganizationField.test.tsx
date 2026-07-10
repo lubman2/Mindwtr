@@ -46,6 +46,7 @@ const t = (key: string) => ({
     'taskEdit.sectionLabel': 'Section',
     'taskEdit.noSectionOption': 'No Section',
     'taskEdit.statusLabel': 'Status',
+    'people.new': 'New Person',
     'common.clear': 'Clear',
 }[key] ?? key);
 
@@ -57,6 +58,7 @@ const baseProps = {
     editedTask: {},
     energyLevelOptions: [],
     handleInputFocus: vi.fn(),
+    createAssignedToPerson: vi.fn(),
     prioritiesEnabled: true,
     priorityOptions: [],
     projectSections: [],
@@ -147,5 +149,29 @@ describe('TaskEditOrganizationField', () => {
         });
 
         expect(tree.toJSON()).toBeNull();
+    });
+
+    it('offers to create a person from an unmatched assignment value', async () => {
+        const createAssignedToPerson = vi.fn().mockResolvedValue({ id: 'person-1', name: 'Morgan' });
+
+        let tree!: renderer.ReactTestRenderer;
+        await act(async () => {
+            tree = renderer.create(
+                <TaskEditOrganizationField
+                    {...(baseProps as any)}
+                    fieldId="assignedTo"
+                    editedTask={{ assignedTo: 'Morgan' }}
+                    assignedToSuggestions={[]}
+                    createAssignedToPerson={createAssignedToPerson}
+                />
+            );
+        });
+
+        const createButton = tree.root.findByProps({ accessibilityLabel: 'New Person: Morgan' });
+        await act(async () => {
+            await createButton.props.onPress();
+        });
+
+        expect(createAssignedToPerson).toHaveBeenCalledWith('Morgan');
     });
 });

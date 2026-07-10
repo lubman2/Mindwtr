@@ -4,6 +4,7 @@ import {
     formatTimeEstimateLabel,
     isCustomTimeEstimate,
     parseTimeEstimateInput,
+    tFallback,
     timeEstimateToMinutes,
     type TaskEnergyLevel,
     type TaskPriority,
@@ -369,14 +370,18 @@ function ToggleTokenField({
 
 function AutocompleteTextField({
     ariaLabel,
+    createLabel,
     label,
+    onCreate,
     options,
     placeholder,
     value,
     onChange,
 }: {
     ariaLabel: string;
+    createLabel?: string;
     label: string;
+    onCreate?: (value: string) => void | Promise<void>;
     options: string[];
     placeholder: string;
     value: string;
@@ -386,6 +391,11 @@ function AutocompleteTextField({
     const [focused, setFocused] = useState(false);
     const [activeIndex, setActiveIndex] = useState(0);
     const query = value.trim();
+    const hasExactMatch = useMemo(() => {
+        if (!query) return false;
+        const queryKey = query.toLowerCase();
+        return uniqueOptions(options).some((option) => option.toLowerCase() === queryKey);
+    }, [options, query]);
     const suggestions = useMemo(() => {
         if (!focused || !query) return [];
         const queryKey = query.toLowerCase();
@@ -394,6 +404,8 @@ function AutocompleteTextField({
             .filter((option) => option.toLowerCase() !== queryKey)
             .slice(0, 6);
     }, [focused, options, query]);
+    const showCreate = Boolean(focused && query && onCreate && createLabel && !hasExactMatch);
+    const optionCount = suggestions.length + (showCreate ? 1 : 0);
 
     useEffect(() => {
         setActiveIndex(0);
@@ -405,21 +417,32 @@ function AutocompleteTextField({
         requestAnimationFrame(() => inputRef.current?.focus());
     };
 
+    const selectCreate = () => {
+        if (!onCreate || !query) return;
+        void onCreate(query);
+        setFocused(false);
+        requestAnimationFrame(() => inputRef.current?.focus());
+    };
+
     const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-        if (suggestions.length === 0) return;
+        if (optionCount === 0) return;
         if (event.key === 'ArrowDown') {
             event.preventDefault();
-            setActiveIndex((index) => (index + 1) % suggestions.length);
+            setActiveIndex((index) => (index + 1) % optionCount);
             return;
         }
         if (event.key === 'ArrowUp') {
             event.preventDefault();
-            setActiveIndex((index) => (index - 1 + suggestions.length) % suggestions.length);
+            setActiveIndex((index) => (index - 1 + optionCount) % optionCount);
             return;
         }
         if (event.key === 'Enter') {
             event.preventDefault();
             event.stopPropagation();
+            if (showCreate && activeIndex === suggestions.length) {
+                selectCreate();
+                return;
+            }
             selectSuggestion(suggestions[activeIndex] ?? suggestions[0]);
             return;
         }
@@ -440,7 +463,7 @@ function AutocompleteTextField({
                     value={value}
                     aria-label={ariaLabel}
                     aria-autocomplete="list"
-                    aria-expanded={suggestions.length > 0}
+                    aria-expanded={optionCount > 0}
                     onChange={(event) => onChange(event.target.value)}
                     onKeyDown={handleKeyDown}
                     onFocus={() => setFocused(true)}
@@ -448,11 +471,55 @@ function AutocompleteTextField({
                     placeholder={placeholder}
                     className="text-xs bg-muted/50 border border-border rounded px-2 py-1 w-full text-foreground"
                 />
-                <SuggestionList
-                    activeIndex={activeIndex}
-                    suggestions={suggestions}
-                    onSelect={selectSuggestion}
-                />
+                {optionCount > 0 && (
+                    <div
+                        role="listbox"
+                        className="absolute left-0 right-0 top-full z-30 mt-1 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-lg"
+                    >
+                        {suggestions.map((suggestion, index) => (
+                            <button
+                                key={suggestion}
+                                type="button"
+                                role="option"
+                                aria-selected={index === activeIndex}
+                                onMouseDown={(event) => {
+                                    event.preventDefault();
+                                    selectSuggestion(suggestion);
+                                }}
+                                onClick={() => selectSuggestion(suggestion)}
+                                className={cn(
+                                    'flex w-full items-center px-2.5 py-1.5 text-left text-xs transition-colors',
+                                    index === activeIndex
+                                        ? 'bg-primary text-primary-foreground'
+                                        : 'hover:bg-muted/70'
+                                )}
+                            >
+                                {suggestion}
+                            </button>
+                        ))}
+                        {showCreate && (
+                            <button
+                                type="button"
+                                role="option"
+                                aria-label={`${createLabel}: ${query}`}
+                                aria-selected={activeIndex === suggestions.length}
+                                onMouseDown={(event) => {
+                                    event.preventDefault();
+                                    selectCreate();
+                                }}
+                                onClick={selectCreate}
+                                className={cn(
+                                    'flex w-full items-center px-2.5 py-1.5 text-left text-xs transition-colors',
+                                    activeIndex === suggestions.length
+                                        ? 'bg-primary text-primary-foreground'
+                                        : 'text-primary hover:bg-muted/70'
+                                )}
+                            >
+                                + {createLabel} &quot;{query}&quot;
+                            </button>
+                        )}
+                    </div>
+                )}
             </div>
         </div>
     );
@@ -548,16 +615,20 @@ export function AssignedToField({
     value,
     options = [],
     onChange,
+    onCreatePerson,
 }: {
     t: (key: string) => string;
     value: string;
     options?: string[];
     onChange: (value: string) => void;
+    onCreatePerson?: (name: string) => void | Promise<void>;
 }) {
     return (
         <AutocompleteTextField
             ariaLabel={t('taskEdit.assignedTo')}
+            createLabel={tFallback(t, 'people.new', 'New Person')}
             label={t('taskEdit.assignedTo')}
+            onCreate={onCreatePerson}
             options={options}
             placeholder={t('taskEdit.assignedToPlaceholder')}
             value={value}
@@ -714,5 +785,40 @@ export function TagsField({
             value={value}
             onChange={onChange}
         />
+    );
+}
+
+export function TimeSpentField({
+    t,
+    value,
+    onChange,
+}: {
+    t: (key: string) => string;
+    value: number | undefined;
+    onChange: (value: number | undefined) => void;
+}) {
+    return (
+        <div className="flex flex-col gap-1 w-full">
+            <label className={taskEditorLabelClassName}>{t('taskEdit.timeSpentLabel')}</label>
+            <input
+                type="number"
+                min={0}
+                step={5}
+                inputMode="numeric"
+                aria-label={t('taskEdit.timeSpentLabel')}
+                value={value ?? ''}
+                onChange={(event) => {
+                    const raw = event.target.value;
+                    if (!raw) {
+                        onChange(undefined);
+                        return;
+                    }
+                    const parsed = Number(raw);
+                    onChange(Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : undefined);
+                }}
+                placeholder={t('taskEdit.timeSpentPlaceholder')}
+                className="text-xs bg-muted/50 border border-border rounded px-2 py-1 w-full text-foreground placeholder:text-muted-foreground"
+            />
+        </div>
     );
 }

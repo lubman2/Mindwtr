@@ -35,11 +35,13 @@ import {
   sortTasksBySavedPreference,
   translateWithFallback,
   useTaskStore,
+  getAdvancedReviewDate,
   isTaskInActiveProject,
   isDueForReview,
   safeFormatDate,
   safeParseDate,
   safeParseDueDate,
+  getTaskMetadataFilterVisibility,
   shallow,
   type Project,
   type Task,
@@ -49,12 +51,15 @@ import {
   type TimeEstimate,
   type FocusGroupBy,
   type FilterCriteria,
+  type MultiValueFilterMatchMode,
   type SavedFilter,
   type SortField,
   type ProjectDeadlineBoost,
 } from '@mindwtr/core';
 import { SwipeableTaskItem } from '@/components/swipeable-task-item';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
+import { CompactText } from '@/components/compact-text';
 import { useTheme } from '../../../contexts/theme-context';
 import { useLanguage } from '../../../contexts/language-context';
 import { useToast } from '../../../contexts/toast-context';
@@ -65,19 +70,28 @@ import {
   formatFocusTimeEstimateLabel,
   getFocusTokenOptions,
   groupFocusTasksByContext,
+  groupFocusTasksByTag,
   splitFocusedTasks,
 } from '@/lib/focus-screen-utils';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
 import { PullSyncIndicator } from '@/components/PullSyncIndicator';
 import { useManualPullSync } from '@/hooks/use-manual-pull-sync';
-import { projectMatchesAreaFilter, taskMatchesAreaFilter } from '@/lib/area-filter';
+import { projectMatchesAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
 import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigation';
+import {
+  buildFocusListLayoutFrames,
+  focusItemLayoutKey,
+  focusSectionHeaderLayoutKey,
+  reconcileFocusListMeasuredHeights,
+  FOCUS_ESTIMATED_TASK_HEIGHT,
+  FOCUS_LIST_HEADER_LAYOUT_KEY,
+} from '@/components/focus/focus-list-layout';
 
 const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 const ENERGY_LEVEL_OPTIONS: TaskEnergyLevel[] = ['low', 'medium', 'high'];
 const ALL_TIME_ESTIMATE_OPTIONS: TimeEstimate[] = ['5min', '10min', '15min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
 const DEFAULT_TIME_ESTIMATE_PRESETS: TimeEstimate[] = ['5min', '10min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
-const FOCUS_GROUP_BY_OPTIONS: FocusGroupBy[] = ['none', 'context', 'project', 'area', 'energy', 'priority'];
+const FOCUS_GROUP_BY_OPTIONS: FocusGroupBy[] = ['none', 'context', 'project', 'area', 'energy', 'priority', 'person', 'tag'];
 const FOCUS_SORT_OPTIONS: SortField[] = ['default', 'due', 'start', 'priority', 'created', 'created-desc'];
 const NO_PROJECT_FILTER_ID = SAVED_FILTER_NO_PROJECT_ID;
 const DEFAULT_FOCUS_SORT_BY: SortField = 'default';
@@ -110,6 +124,7 @@ const DEFAULT_EXPANDED_SECTIONS = {
 };
 
 type TaskActionResult = { success?: boolean; error?: unknown } | void;
+type FocusExpandedSections = typeof DEFAULT_EXPANDED_SECTIONS;
 
 type FocusFilterChip = {
   id: string;
@@ -175,9 +190,11 @@ function buildFocusFilterCriteria({
   locations,
   priorities,
   projects,
+  contextMatchMode,
   timeEstimates,
   tokens,
 }: {
+  contextMatchMode: MultiValueFilterMatchMode;
   energyLevels: TaskEnergyLevel[];
   locations: string[];
   priorities: TaskPriority[];
@@ -189,6 +206,7 @@ function buildFocusFilterCriteria({
   const tags = tokens.filter((token) => token.trim().startsWith('#'));
   return {
     ...(contexts.length > 0 ? { contexts } : {}),
+    ...(contexts.length > 1 ? { contextMatchMode } : {}),
     ...(tags.length > 0 ? { tags } : {}),
     ...(projects.length > 0 ? { projects } : {}),
     ...(locations.length > 0 ? { locations } : {}),
@@ -245,27 +263,44 @@ function buildFocusTaskGroups(
   });
 }
 
-const readPersistedNextActionsExpanded = (raw: string | null): boolean | null => {
+const readPersistedFocusExpandedSections = (raw: string | null): Partial<FocusExpandedSections> | null => {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as {
       expandedSections?: {
+        focus?: unknown;
+        next?: unknown;
         nextActions?: unknown;
+        reviewDue?: unknown;
+        reviewProjects?: unknown;
+        schedule?: unknown;
       };
     };
-    return typeof parsed.expandedSections?.nextActions === 'boolean'
-      ? parsed.expandedSections.nextActions
-      : null;
+    const persisted = parsed.expandedSections;
+    if (!persisted) return null;
+    const next: Partial<FocusExpandedSections> = {};
+    if (typeof persisted.focus === 'boolean') next.focus = persisted.focus;
+    if (typeof persisted.schedule === 'boolean') next.schedule = persisted.schedule;
+    const nextActionsExpanded = typeof persisted.next === 'boolean'
+      ? persisted.next
+      : persisted.nextActions;
+    if (typeof nextActionsExpanded === 'boolean') next.next = nextActionsExpanded;
+    if (typeof persisted.reviewDue === 'boolean') next.reviewDue = persisted.reviewDue;
+    if (typeof persisted.reviewProjects === 'boolean') next.reviewProjects = persisted.reviewProjects;
+    return Object.keys(next).length > 0 ? next : null;
   } catch {
     return null;
   }
 };
 
-const serializeFocusViewState = (expandedSections: typeof DEFAULT_EXPANDED_SECTIONS): string => JSON.stringify({
+const serializeFocusViewState = (expandedSections: FocusExpandedSections): string => JSON.stringify({
   expandedSections: {
+    focus: expandedSections.focus,
     schedule: expandedSections.schedule,
+    next: expandedSections.next,
     nextActions: expandedSections.next,
     reviewDue: expandedSections.reviewDue,
+    reviewProjects: expandedSections.reviewProjects,
   },
 });
 
@@ -286,6 +321,7 @@ export default function FocusScreen() {
   const { t } = useLanguage();
   const { showToast } = useToast();
   const tc = useThemeColors();
+  const filledButton = useFilledButtonColors();
   const pullSync = useManualPullSync();
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isModalVisible, setIsModalVisible] = useState(false);
@@ -300,13 +336,15 @@ export default function FocusScreen() {
   const [selectedEnergyLevels, setSelectedEnergyLevels] = useState<TaskEnergyLevel[]>([]);
   const [selectedTimeEstimates, setSelectedTimeEstimates] = useState<TimeEstimate[]>([]);
   const [locationFilter, setLocationFilter] = useState('');
+  const [contextMatchMode, setContextMatchMode] = useState<MultiValueFilterMatchMode>('all');
   const [activeSavedFilterId, setActiveSavedFilterId] = useState<string | null>(null);
   const [focusSortBy, setFocusSortBy] = useState<SortField>(DEFAULT_FOCUS_SORT_BY);
   const [saveFilterDialogVisible, setSaveFilterDialogVisible] = useState(false);
   const [saveFilterName, setSaveFilterName] = useState('');
   const showFutureStarts = settings?.appearance?.showFutureStarts === true;
   const [expandedSections, setExpandedSections] = useState(DEFAULT_EXPANDED_SECTIONS);
-  const didToggleNextSectionRef = useRef(false);
+  const [focusViewStateHydrated, setFocusViewStateHydrated] = useState(false);
+  const didToggleSectionRef = useRef(false);
   const lastOpenedFromNotificationRef = useRef<string | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pomodoroEnabled = settings?.features?.pomodoro === true;
@@ -336,14 +374,27 @@ export default function FocusScreen() {
   const activeTasks = useMemo(() => (
     baseActiveTasks.filter((task) => shouldShowTaskForStart(task, { showFutureStarts }))
   ), [baseActiveTasks, showFutureStarts]);
-  const hiddenFutureStartCount = useMemo(() => (
-    baseActiveTasks.filter((task) => !shouldShowTaskForStart(task, { showFutureStarts: false })).length
+  const futureStartTasks = useMemo(() => (
+    baseActiveTasks.filter((task) => !shouldShowTaskForStart(task, { showFutureStarts: false }))
   ), [baseActiveTasks]);
+  const hiddenFutureStartCount = futureStartTasks.length;
+  const futureStartPreview = useMemo(() => {
+    if (!showFutureStarts || futureStartTasks.length === 0) return '';
+    const visibleTitles = futureStartTasks.slice(0, 2).map((task) => task.title.trim()).filter(Boolean);
+    const remainingCount = futureStartTasks.length - visibleTitles.length;
+    return remainingCount > 0
+      ? `${visibleTitles.join(', ')} +${remainingCount}`
+      : visibleTitles.join(', ');
+  }, [futureStartTasks, showFutureStarts]);
   const tokenOptions = useMemo(() => getFocusTokenOptions(activeTasks), [activeTasks]);
-  const showLocationFilter = useMemo(() => (
-    locationFilter.trim().length > 0
-    || activeTasks.some((task) => String(task.location ?? '').trim().length > 0)
-  ), [activeTasks, locationFilter]);
+  const metadataFilterVisibility = useMemo(() => getTaskMetadataFilterVisibility(activeTasks, {
+    prioritiesEnabled,
+    timeEstimatesEnabled,
+  }), [activeTasks, prioritiesEnabled, timeEstimatesEnabled]);
+  const showPriorityFilters = metadataFilterVisibility.priority;
+  const showEnergyLevelFilters = metadataFilterVisibility.energyLevel;
+  const showTimeEstimateFilters = metadataFilterVisibility.timeEstimate;
+  const showLocationFilter = metadataFilterVisibility.location;
   const activeProjectIds = useMemo(() => (
     new Set(activeTasks.map((task) => task.projectId).filter((projectId): projectId is string => Boolean(projectId)))
   ), [activeTasks]);
@@ -375,26 +426,33 @@ export default function FocusScreen() {
   const currentFilterCriteria = useMemo(() => buildFocusFilterCriteria({
     tokens: selectedTokens,
     projects: selectedProjects,
-    locations: locationFilter.trim() ? [locationFilter.trim()] : [],
-    priorities: prioritiesEnabled ? selectedPriorities : [],
-    energyLevels: selectedEnergyLevels,
-    timeEstimates: timeEstimatesEnabled ? selectedTimeEstimates : [],
+    locations: showLocationFilter && locationFilter.trim() ? [locationFilter.trim()] : [],
+    priorities: showPriorityFilters ? selectedPriorities : [],
+    energyLevels: showEnergyLevelFilters ? selectedEnergyLevels : [],
+    contextMatchMode,
+    timeEstimates: showTimeEstimateFilters ? selectedTimeEstimates : [],
   }), [
+    contextMatchMode,
     locationFilter,
-    prioritiesEnabled,
+    showEnergyLevelFilters,
+    showPriorityFilters,
     selectedEnergyLevels,
     selectedPriorities,
     selectedProjects,
     selectedTimeEstimates,
     selectedTokens,
-    timeEstimatesEnabled,
+    showLocationFilter,
+    showTimeEstimateFilters,
   ]);
   const rawEffectiveFilterCriteria = activeSavedFilter?.criteria ?? currentFilterCriteria;
+  const effectiveContextMatchMode = rawEffectiveFilterCriteria.contextMatchMode ?? 'all';
   const effectiveFilterCriteria = useMemo<FilterCriteria>(() => ({
     ...rawEffectiveFilterCriteria,
-    ...(prioritiesEnabled ? {} : { priority: undefined }),
-    ...(timeEstimatesEnabled ? {} : { timeEstimates: undefined, timeEstimateRange: undefined }),
-  }), [prioritiesEnabled, rawEffectiveFilterCriteria, timeEstimatesEnabled]);
+    ...(showPriorityFilters ? {} : { priority: undefined }),
+    ...(showEnergyLevelFilters ? {} : { energy: undefined }),
+    ...(showLocationFilter ? {} : { locations: undefined }),
+    ...(showTimeEstimateFilters ? {} : { timeEstimates: undefined, timeEstimateRange: undefined }),
+  }), [rawEffectiveFilterCriteria, showEnergyLevelFilters, showLocationFilter, showPriorityFilters, showTimeEstimateFilters]);
   const hasCurrentFilterCriteria = hasActiveFilterCriteria(currentFilterCriteria);
   const hasFilters = hasActiveFilterCriteria(effectiveFilterCriteria);
   const canSaveFocusPerspective = activeSavedFilterId === null
@@ -425,6 +483,10 @@ export default function FocusScreen() {
         return resolveText('focus.group.energy', 'Energy');
       case 'priority':
         return resolveText('focus.group.priority', 'Priority');
+      case 'person':
+        return resolveText('people.title', 'People');
+      case 'tag':
+        return resolveText('tags.title', 'Tags');
       case 'none':
       default:
         return resolveText('focus.group.none', 'None');
@@ -537,6 +599,49 @@ export default function FocusScreen() {
       })
       .catch((error) => showTaskUpdateError(getUnknownErrorMessage(error)));
   }, [resolveText, showTaskUpdateError, showToast, updateTask]);
+  const advanceTaskReview = useCallback((task: Task) => {
+    const previousReviewAt = task.reviewAt;
+
+    void Promise.resolve(updateTask(task.id, { reviewAt: getAdvancedReviewDate(task.reviewAt) }))
+      .then((result: TaskActionResult) => {
+        const failure = getActionFailureMessage(result);
+        if (failure) {
+          showTaskUpdateError(failure);
+          return;
+        }
+        showToast({
+          title: task.title,
+          message: resolveText('review.advanceWeekDone', 'Next review in 1 week'),
+          tone: 'success',
+          actionLabel: resolveText('common.undo', 'Undo'),
+          onAction: async () => {
+            const undoResult = await updateTask(task.id, { reviewAt: previousReviewAt });
+            const undoFailure = getActionFailureMessage(undoResult);
+            if (undoFailure) throw new Error(undoFailure);
+          },
+          durationMs: 5200,
+        });
+      })
+      .catch((error) => showTaskUpdateError(getUnknownErrorMessage(error)));
+  }, [resolveText, showTaskUpdateError, showToast, updateTask]);
+  const openReviewMenu = useCallback((task: Task) => {
+    Alert.alert(
+      task.title,
+      undefined,
+      [
+        {
+          text: resolveText('review.markReviewed', 'Mark reviewed'),
+          onPress: () => markTaskReviewed(task),
+        },
+        {
+          text: resolveText('review.advanceWeek', 'Review in 1 week'),
+          onPress: () => advanceTaskReview(task),
+        },
+        { text: resolveText('common.cancel', 'Cancel'), style: 'cancel' },
+      ],
+      { cancelable: true },
+    );
+  }, [advanceTaskReview, markTaskReviewed, resolveText]);
   const openDeferDatePicker = useCallback((task: Task) => {
     setDeferPickerDate(getStartDateOffset(1));
     setDeferPickerTask(task);
@@ -621,6 +726,10 @@ export default function FocusScreen() {
       current.includes(estimate) ? current.filter((item) => item !== estimate) : [...current, estimate]
     ));
   }, []);
+  const updateContextMatchMode = useCallback((mode: MultiValueFilterMatchMode) => {
+    setActiveSavedFilterId(null);
+    setContextMatchMode(mode);
+  }, []);
   const updateLocationFilter = useCallback((value: string) => {
     setActiveSavedFilterId(null);
     setLocationFilter(value);
@@ -634,6 +743,7 @@ export default function FocusScreen() {
     setSelectedPriorities([]);
     setSelectedEnergyLevels([]);
     setSelectedTimeEstimates([]);
+    setContextMatchMode('all');
   }, []);
   const applySavedFocusFilter = useCallback((filter: SavedFilter) => {
     const criteria = filter.criteria ?? {};
@@ -648,6 +758,7 @@ export default function FocusScreen() {
     )));
     setSelectedEnergyLevels((criteria.energy ?? []).filter((energy): energy is TaskEnergyLevel => energySet.has(energy)));
     setSelectedTimeEstimates((criteria.timeEstimates ?? []).filter((estimate): estimate is TimeEstimate => estimateSet.has(estimate)));
+    setContextMatchMode(criteria.contextMatchMode ?? 'all');
     setFocusSortBy(filter.sortBy ?? DEFAULT_FOCUS_SORT_BY);
     setActiveSavedFilterId(filter.id);
     setFiltersVisible(false);
@@ -730,15 +841,23 @@ export default function FocusScreen() {
     let active = true;
     AsyncStorage.getItem(FOCUS_VIEW_STATE_STORAGE_KEY)
       .then((raw) => {
-        if (!active || didToggleNextSectionRef.current) return;
-        const persistedNextExpanded = readPersistedNextActionsExpanded(raw);
-        if (typeof persistedNextExpanded !== 'boolean') return;
-        setExpandedSections((current) => ({
-          ...current,
-          next: persistedNextExpanded,
-        }));
+        if (!active) return;
+        if (!didToggleSectionRef.current) {
+          const persistedExpandedSections = readPersistedFocusExpandedSections(raw);
+          if (persistedExpandedSections) {
+            setExpandedSections((current) => ({
+              ...current,
+              ...persistedExpandedSections,
+            }));
+          }
+        }
+        setFocusViewStateHydrated(true);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (active) {
+          setFocusViewStateHydrated(true);
+        }
+      });
     return () => {
       active = false;
     };
@@ -786,16 +905,28 @@ export default function FocusScreen() {
   }, [projectOptions, showNoProjectOption]);
 
   useEffect(() => {
-    if (prioritiesEnabled) return;
+    if (showPriorityFilters) return;
     if (selectedPriorities.length === 0) return;
     setSelectedPriorities([]);
-  }, [prioritiesEnabled, selectedPriorities.length]);
+  }, [selectedPriorities.length, showPriorityFilters]);
 
   useEffect(() => {
-    if (timeEstimatesEnabled) return;
+    if (showEnergyLevelFilters) return;
+    if (selectedEnergyLevels.length === 0) return;
+    setSelectedEnergyLevels([]);
+  }, [selectedEnergyLevels.length, showEnergyLevelFilters]);
+
+  useEffect(() => {
+    if (showLocationFilter) return;
+    if (locationFilter.trim().length === 0) return;
+    setLocationFilter('');
+  }, [locationFilter, showLocationFilter]);
+
+  useEffect(() => {
+    if (showTimeEstimateFilters) return;
     if (selectedTimeEstimates.length === 0) return;
     setSelectedTimeEstimates([]);
-  }, [selectedTimeEstimates.length, timeEstimatesEnabled]);
+  }, [selectedTimeEstimates.length, showTimeEstimateFilters]);
 
   const sequentialProjectIds = useMemo(() => {
     return new Set(visibleProjects.filter((project) => project.isSequential).map((project) => project.id));
@@ -904,6 +1035,8 @@ export default function FocusScreen() {
   }, [visibleProjects]);
 
   const sections = useMemo<FocusSection[]>(() => {
+    if (!focusViewStateHydrated) return [];
+
     const buildTaskItems = (items: Task[], grouped = false): FocusListItem[] => (
       items.map((task) => ({ type: 'task' as const, task, grouped }))
     );
@@ -969,6 +1102,15 @@ export default function FocusScreen() {
               }
               : { id: 'priority:none', title: resolveText('focus.group.noPriority', 'No priority'), muted: true, sortOrder: getPrioritySortOrder(undefined) }
           ));
+        case 'person':
+          return buildFocusTaskGroups(nextActions, (task) => {
+            const name = task.assignedTo?.trim();
+            return name
+              ? { id: `person:${name.toLowerCase()}`, title: name }
+              : { id: 'person:none', title: resolveText('people.unassigned', 'Unassigned'), muted: true, sortOrder: Number.POSITIVE_INFINITY };
+          });
+        case 'tag':
+          return groupFocusTasksByTag(nextActions, resolveText('projects.noTags', 'No tags'));
         case 'none':
         default:
           return [];
@@ -980,9 +1122,6 @@ export default function FocusScreen() {
         return buildTaskItems(nextActions);
       }
       const groups = buildNextActionGroups();
-      if (groups.length <= 1) {
-        return buildTaskItems(nextActions);
-      }
       return groups
         .flatMap((group) => [
           {
@@ -1044,6 +1183,7 @@ export default function FocusScreen() {
     effectiveFocusGroupBy,
     expandedSections.focus,
     expandedSections.next,
+    focusViewStateHydrated,
     expandedSections.reviewDue,
     expandedSections.reviewProjects,
     expandedSections.schedule,
@@ -1056,10 +1196,88 @@ export default function FocusScreen() {
     schedule,
     t,
   ]);
+  const focusListVersion = useMemo(() => (
+    sections.map((section) => {
+      const itemVersion = section.data.map((item) => {
+        if (item.type === 'task') {
+          return [
+            'task',
+            item.task.id,
+            item.task.status,
+            item.task.isFocusedToday === true ? 'focused' : 'unfocused',
+            item.task.updatedAt ?? '',
+            item.task.rev ?? '',
+          ].join(':');
+        }
+        if (item.type === 'project') {
+          return [
+            'project',
+            item.project.id,
+            item.project.status,
+            item.project.reviewAt ?? '',
+            item.project.updatedAt ?? '',
+          ].join(':');
+        }
+        return ['group', item.id, item.count].join(':');
+      }).join(',');
+      return [section.type, section.expanded ? 'expanded' : 'collapsed', section.totalCount, itemVersion].join('|');
+    }).join('||')
+  ), [sections]);
   const firstVisibleSectionType = useMemo(
     () => sections.find((section) => section.totalCount > 0)?.type ?? null,
     [sections]
   );
+  // Measured-height getItemLayout, mirroring task-list.tsx: without it the
+  // SectionList estimates unmounted regions from a running average, and the
+  // mixed row heights (group headers vs task rows) make Android's scroll
+  // corrections oscillate at the bottom of the list (#826).
+  const focusItemHeightsRef = useRef<Record<string, number>>({});
+  const [focusLayoutVersion, setFocusLayoutVersion] = useState(0);
+  const registerFocusItemHeight = useCallback((itemKey: string, height: number) => {
+    const rounded = Math.round(height);
+    if (!Number.isFinite(rounded) || rounded <= 0) return;
+    if (focusItemHeightsRef.current[itemKey] === rounded) return;
+    focusItemHeightsRef.current[itemKey] = rounded;
+    setFocusLayoutVersion((prev) => prev + 1);
+  }, []);
+  const wasPullRefreshingRef = useRef(false);
+  useEffect(() => {
+    if (wasPullRefreshingRef.current && !pullSync.refreshing) {
+      focusItemHeightsRef.current = {};
+      setFocusLayoutVersion((prev) => prev + 1);
+    }
+    wasPullRefreshingRef.current = pullSync.refreshing;
+  }, [pullSync.refreshing]);
+  useEffect(() => {
+    const { heights, changed } = reconcileFocusListMeasuredHeights(
+      sections,
+      firstVisibleSectionType,
+      focusItemHeightsRef.current,
+    );
+    if (changed) {
+      focusItemHeightsRef.current = heights;
+      setFocusLayoutVersion((prev) => prev + 1);
+    }
+  }, [firstVisibleSectionType, sections]);
+  const focusItemLayouts = useMemo(() => {
+    // focusLayoutVersion invalidates memoized frames when ref-backed heights change.
+    void focusLayoutVersion;
+    return buildFocusListLayoutFrames(sections, {
+      measuredHeights: focusItemHeightsRef.current,
+      firstVisibleSectionType,
+    });
+  }, [firstVisibleSectionType, focusLayoutVersion, sections]);
+  const getFocusItemLayout = useCallback((_: unknown, index: number) => {
+    const frame = focusItemLayouts[index];
+    if (frame) {
+      return { index, length: frame.length, offset: frame.offset };
+    }
+    return {
+      index,
+      length: FOCUS_ESTIMATED_TASK_HEIGHT,
+      offset: FOCUS_ESTIMATED_TASK_HEIGHT * index,
+    };
+  }, [focusItemLayouts]);
   const hasTasks = focusedTasks.length > 0 || schedule.length > 0 || nextActions.length > 0 || reviewDue.length > 0 || reviewDueProjects.length > 0;
   const activeFilterCount = countFilterCriteria(effectiveFilterCriteria);
   const advancedFilterChips = useMemo<FocusFilterChip[]>(() => {
@@ -1100,21 +1318,21 @@ export default function FocusScreen() {
         onPress: () => toggleProject(project.id),
       });
     });
-    selectedPriorities.forEach((priority) => {
+    (showPriorityFilters ? selectedPriorities : []).forEach((priority) => {
       chips.push({
         id: `priority:${priority}`,
         label: t(`priority.${priority}`),
         onPress: () => togglePriority(priority),
       });
     });
-    selectedEnergyLevels.forEach((energyLevel) => {
+    (showEnergyLevelFilters ? selectedEnergyLevels : []).forEach((energyLevel) => {
       chips.push({
         id: `energy:${energyLevel}`,
         label: t(`energyLevel.${energyLevel}`),
         onPress: () => toggleEnergyLevel(energyLevel),
       });
     });
-    selectedTimeEstimates.forEach((estimate) => {
+    (showTimeEstimateFilters ? selectedTimeEstimates : []).forEach((estimate) => {
       chips.push({
         id: `time:${estimate}`,
         label: formatFocusTimeEstimateLabel(estimate),
@@ -1122,7 +1340,7 @@ export default function FocusScreen() {
       });
     });
     const normalizedLocationFilter = locationFilter.trim();
-    if (normalizedLocationFilter && !activeSavedFilter) {
+    if (showLocationFilter && normalizedLocationFilter && !activeSavedFilter) {
       chips.push({
         id: `location:${normalizedLocationFilter}`,
         label: `${resolveText('taskEdit.locationLabel', 'Location')}: ${normalizedLocationFilter}`,
@@ -1137,6 +1355,10 @@ export default function FocusScreen() {
     locationFilter,
     projectById,
     resolveText,
+    showEnergyLevelFilters,
+    showLocationFilter,
+    showPriorityFilters,
+    showTimeEstimateFilters,
     selectedEnergyLevels,
     selectedPriorities,
     selectedProjects,
@@ -1156,6 +1378,11 @@ export default function FocusScreen() {
     setSaveFilterName(defaultName);
     setSaveFilterDialogVisible(true);
   }, [activeFilterChips, resolveText]);
+  const selectedContextCount = useMemo(
+    () => selectedTokens.filter((token) => token.trim().startsWith('@')).length,
+    [selectedTokens],
+  );
+  const showContextMatchMode = selectedContextCount > 1;
   const emptyTitle = hasFilters ? resolveText('filters.noMatch', 'No tasks match these filters.') : t('agenda.allClear');
   const emptySubtitle = hasFilters ? resolveText('filters.label', 'Filters') : t('agenda.noTasks');
   const pomodoroTasks = useMemo(() => {
@@ -1179,17 +1406,13 @@ export default function FocusScreen() {
   }, [updateTask]);
 
   const toggleSection = useCallback((sectionType: FocusSectionType) => {
-    if (sectionType === 'next') {
-      didToggleNextSectionRef.current = true;
-    }
+    didToggleSectionRef.current = true;
     setExpandedSections((current) => {
       const next = {
         ...current,
         [sectionType]: !current[sectionType],
       };
-      if (sectionType === 'next') {
-        AsyncStorage.setItem(FOCUS_VIEW_STATE_STORAGE_KEY, serializeFocusViewState(next)).catch(() => {});
-      }
+      AsyncStorage.setItem(FOCUS_VIEW_STATE_STORAGE_KEY, serializeFocusViewState(next)).catch(() => {});
       return next;
     });
   }, []);
@@ -1205,9 +1428,12 @@ export default function FocusScreen() {
     ];
     const textColor = isAdvanced ? tc.tint : selected ? tc.onTint : tc.text;
     const chipText = (
-      <Text style={[styles.filterChipText, { color: textColor }]}>
+      <CompactText
+        style={[styles.filterChipText, { color: textColor }]}
+        numberOfLines={2}
+      >
         {label}
-      </Text>
+      </CompactText>
     );
 
     if (!onPress) {
@@ -1249,8 +1475,20 @@ export default function FocusScreen() {
   }, [resolveText, tc.border, tc.filterBg, tc.onTint, tc.text, tc.tint]);
 
   const renderItem = ({ item, section }: { item: FocusListItem; section: FocusSection }) => {
+    // Margin-free measuring wrapper: its height includes the row's own
+    // margins, matching the cell frames VirtualizedList measures natively.
+    const measureRow = (node: React.ReactNode) => (
+      <View
+        onLayout={(event) => registerFocusItemHeight(
+          focusItemLayoutKey(section.type, item),
+          event.nativeEvent.layout.height,
+        )}
+      >
+        {node}
+      </View>
+    );
     if (item.type === 'groupHeader') {
-      return (
+      return measureRow(
         <View
           accessible
           accessibilityRole="header"
@@ -1280,7 +1518,7 @@ export default function FocusScreen() {
 
     if (item.type === 'project') {
       const project = item.project;
-      return (
+      return measureRow(
         <TouchableOpacity
           accessibilityRole="button"
           accessibilityLabel={`${resolveText('common.open', 'Open')} ${project.title}`}
@@ -1315,7 +1553,7 @@ export default function FocusScreen() {
     const canMarkReviewed = section.type === 'reviewDue' && Boolean(item.task.reviewAt);
     const canDeferTask = !canMarkReviewed && !item.task.dueDate && (item.task.isFocusedToday === true || item.task.status === 'next');
     const longPressAction = canMarkReviewed
-      ? () => markTaskReviewed(item.task)
+      ? () => openReviewMenu(item.task)
       : canDeferTask
         ? () => openDeferMenu(item.task)
         : undefined;
@@ -1329,7 +1567,7 @@ export default function FocusScreen() {
       resolveText,
     );
 
-    return (
+    return measureRow(
       <View
         style={[
           styles.itemWrapper,
@@ -1345,7 +1583,7 @@ export default function FocusScreen() {
           onDelete={() => { void deleteTask(item.task.id); }}
           isHighlighted={item.task.id === highlightTaskId}
           showFocusToggle
-          hideStatusBadge
+          hideStatusBadge={section.type !== 'reviewDue'}
           projectDeadlineLabel={projectDeadlineLabel}
           onLongPressAction={longPressAction}
           onLongPressActionLabel={longPressActionLabel}
@@ -1362,8 +1600,10 @@ export default function FocusScreen() {
     <View style={[styles.container, { backgroundColor: tc.bg }]}>
       <SectionList
         sections={sections}
+        extraData={focusListVersion}
         keyExtractor={(item) => item.type === 'task' ? item.task.id : item.type === 'project' ? `project:${item.project.id}` : item.id}
         stickySectionHeadersEnabled={false}
+        getItemLayout={getFocusItemLayout}
         initialNumToRender={FOCUS_LIST_INITIAL_RENDER_COUNT}
         maxToRenderPerBatch={FOCUS_LIST_BATCH_RENDER_COUNT}
         windowSize={FOCUS_LIST_WINDOW_SIZE}
@@ -1382,6 +1622,12 @@ export default function FocusScreen() {
           />
         )}
         ListHeaderComponent={(
+          <View
+            onLayout={(event) => registerFocusItemHeight(
+              FOCUS_LIST_HEADER_LAYOUT_KEY,
+              event.nativeEvent.layout.height,
+            )}
+          >
           <View style={styles.header}>
             {pomodoroEnabled && (
               <PomodoroPanel
@@ -1458,12 +1704,12 @@ export default function FocusScreen() {
                           },
                         ]}
                       >
-                        <Text
+                        <CompactText
                           style={[styles.savedFilterChipText, { color: selected ? tc.onTint : tc.text }]}
-                          numberOfLines={1}
+                          numberOfLines={2}
                         >
                           {filter.icon ? `${filter.icon} ` : ''}{filter.name}
-                        </Text>
+                        </CompactText>
                       </TouchableOpacity>
                       {selected ? (
                         <TouchableOpacity
@@ -1500,9 +1746,16 @@ export default function FocusScreen() {
             ) : null}
             {hiddenFutureStartCount > 0 ? (
               <View style={[styles.futureStartNotice, { borderColor: tc.border, backgroundColor: tc.cardBg }]}>
-                <Text style={[styles.futureStartText, { color: tc.secondaryText }]}>
-                  {formatFutureStartNotice(hiddenFutureStartCount, showFutureStarts)}
-                </Text>
+                <View style={styles.futureStartCopy}>
+                  <Text style={[styles.futureStartText, { color: tc.secondaryText }]}>
+                    {formatFutureStartNotice(hiddenFutureStartCount, showFutureStarts)}
+                  </Text>
+                  {futureStartPreview ? (
+                    <Text style={[styles.futureStartPreview, { color: tc.text }]} numberOfLines={2}>
+                      {futureStartPreview}
+                    </Text>
+                  ) : null}
+                </View>
                 <TouchableOpacity
                   accessibilityRole="button"
                   onPress={toggleFutureStarts}
@@ -1517,9 +1770,16 @@ export default function FocusScreen() {
               </View>
             ) : null}
           </View>
+          </View>
         )}
         renderSectionHeader={({ section }) => (
           section.totalCount > 0 ? (
+            <View
+              onLayout={(event) => registerFocusItemHeight(
+                focusSectionHeaderLayoutKey(section, section.type === firstVisibleSectionType),
+                event.nativeEvent.layout.height,
+              )}
+            >
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={section.title}
@@ -1533,19 +1793,40 @@ export default function FocusScreen() {
               <Text style={[styles.sectionChevron, { color: tc.secondaryText }]}>
                 {section.expanded ? '▾' : '▸'}
               </Text>
-              <Text style={[styles.sectionTitle, { color: tc.tint }]}>{section.title}</Text>
-              <Text style={[styles.sectionCount, { color: tc.secondaryText }]}>({section.totalCount})</Text>
+              <CompactText
+                style={[styles.sectionTitle, { color: tc.tint }]}
+                numberOfLines={2}
+              >
+                {section.title}
+              </CompactText>
+              <CompactText
+                style={[styles.sectionCount, { color: tc.secondaryText }]}
+              >
+                ({section.totalCount})
+              </CompactText>
               <View style={[styles.sectionLine, { backgroundColor: tc.border }]} />
             </Pressable>
+            </View>
           ) : null
         )}
         renderItem={renderItem}
         ListEmptyComponent={!hasTasks ? (
           <View style={styles.emptyState}>
-            <Text style={[styles.emptyTitle, { color: tc.text }]}>{emptyTitle}</Text>
-            <Text style={[styles.emptySubtitle, { color: tc.secondaryText }]}>{emptySubtitle}</Text>
+            <CompactText
+              style={[styles.emptyTitle, { color: tc.text }]}
+              numberOfLines={2}
+            >
+              {emptyTitle}
+            </CompactText>
+            <CompactText
+              style={[styles.emptySubtitle, { color: tc.secondaryText }]}
+              numberOfLines={3}
+            >
+              {emptySubtitle}
+            </CompactText>
           </View>
         ) : null}
+        removeClippedSubviews={false}
       />
       <PullSyncIndicator state={pullSync.indicatorState} />
       <Modal
@@ -1643,6 +1924,36 @@ export default function FocusScreen() {
                   <View style={styles.sheetChipRow}>
                     {tokenOptions.map((token) => renderFilterChip(token, selectedTokens.includes(token), () => toggleToken(token)))}
                   </View>
+                  {showContextMatchMode ? (
+                    <View style={styles.matchModeRow}>
+                      <Text style={[styles.matchModeLabel, { color: tc.secondaryText }]}>
+                        {resolveText('filters.contextMatchMode', 'Context match')}
+                      </Text>
+                      <View style={[styles.matchModeControl, { borderColor: tc.border, backgroundColor: tc.filterBg }]}>
+                        {(['any', 'all'] as const).map((mode) => (
+                          <TouchableOpacity
+                            key={mode}
+                            accessibilityRole="button"
+                            accessibilityState={{ selected: effectiveContextMatchMode === mode }}
+                            onPress={() => updateContextMatchMode(mode)}
+                            style={[
+                              styles.matchModeButton,
+                              { backgroundColor: effectiveContextMatchMode === mode ? tc.tint : 'transparent' },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.matchModeButtonText,
+                                { color: effectiveContextMatchMode === mode ? tc.onTint : tc.secondaryText },
+                              ]}
+                            >
+                              {mode === 'any' ? resolveText('filters.matchAny', 'Any') : resolveText('common.all', 'All')}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+                  ) : null}
                 </>
               ) : null}
 
@@ -1683,7 +1994,7 @@ export default function FocusScreen() {
                 </>
               ) : null}
 
-              {prioritiesEnabled ? (
+              {showPriorityFilters ? (
                 <>
                   <Text style={[styles.sheetSectionLabel, { color: tc.secondaryText }]}>
                     {resolveText('filters.priority', 'Priority')}
@@ -1696,16 +2007,20 @@ export default function FocusScreen() {
                 </>
               ) : null}
 
-              <Text style={[styles.sheetSectionLabel, { color: tc.secondaryText }]}>
-                {resolveText('taskEdit.energyLevel', 'Energy level')}
-              </Text>
-              <View style={styles.sheetChipRow}>
-                {ENERGY_LEVEL_OPTIONS.map((energyLevel) => (
-                  renderFilterChip(t(`energyLevel.${energyLevel}`), selectedEnergyLevels.includes(energyLevel), () => toggleEnergyLevel(energyLevel))
-                ))}
-              </View>
+              {showEnergyLevelFilters ? (
+                <>
+                  <Text style={[styles.sheetSectionLabel, { color: tc.secondaryText }]}>
+                    {resolveText('taskEdit.energyLevel', 'Energy level')}
+                  </Text>
+                  <View style={styles.sheetChipRow}>
+                    {ENERGY_LEVEL_OPTIONS.map((energyLevel) => (
+                      renderFilterChip(t(`energyLevel.${energyLevel}`), selectedEnergyLevels.includes(energyLevel), () => toggleEnergyLevel(energyLevel))
+                    ))}
+                  </View>
+                </>
+              ) : null}
 
-              {timeEstimatesEnabled && effectiveTimeEstimatePresets.length > 0 ? (
+              {showTimeEstimateFilters && effectiveTimeEstimatePresets.length > 0 ? (
                 <>
                   <Text style={[styles.sheetSectionLabel, { color: tc.secondaryText }]}>
                     {resolveText('filters.timeEstimate', 'Time estimate')}
@@ -1769,10 +2084,10 @@ export default function FocusScreen() {
                 style={[
                   styles.dialogButton,
                   styles.dialogPrimaryButton,
-                  { backgroundColor: saveFilterName.trim() ? tc.tint : tc.filterBg },
+                  { backgroundColor: saveFilterName.trim() ? filledButton.backgroundColor : tc.filterBg },
                 ]}
               >
-                <Text style={[styles.dialogButtonText, { color: saveFilterName.trim() ? tc.onTint : tc.secondaryText }]}>
+                <Text style={[styles.dialogButtonText, { color: saveFilterName.trim() ? (filledButton.textColor ?? tc.onTint) : tc.secondaryText }]}>
                   {resolveText('common.save', 'Save')}
                 </Text>
               </TouchableOpacity>
@@ -1968,6 +2283,10 @@ const styles = StyleSheet.create({
   filterChip: {
     borderWidth: 1,
     borderRadius: 22,
+    flexBasis: 104,
+    flexGrow: 1,
+    flexShrink: 1,
+    maxWidth: '100%',
     paddingHorizontal: 10,
     paddingVertical: 10,
     minHeight: 44,
@@ -1988,6 +2307,9 @@ const styles = StyleSheet.create({
   filterChipText: {
     fontSize: 12,
     fontWeight: '600',
+    flexShrink: 1,
+    minWidth: 0,
+    textAlign: 'center',
   },
   clearFiltersButton: {
     justifyContent: 'center',
@@ -2009,9 +2331,17 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 12,
   },
-  futureStartText: {
+  futureStartCopy: {
     flex: 1,
+    minWidth: 0,
+    gap: 3,
+  },
+  futureStartText: {
     fontSize: 12,
+    fontWeight: '600',
+  },
+  futureStartPreview: {
+    fontSize: 13,
     fontWeight: '600',
   },
   futureStartButton: {
@@ -2043,6 +2373,8 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 12,
     fontWeight: '700',
+    flexShrink: 1,
+    minWidth: 0,
     textTransform: 'uppercase',
     letterSpacing: 1,
   },
@@ -2057,6 +2389,7 @@ const styles = StyleSheet.create({
   },
   sectionLine: {
     flex: 1,
+    minWidth: 24,
     height: 1,
     borderRadius: 1,
   },
@@ -2231,6 +2564,37 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
+  },
+  matchModeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+  },
+  matchModeLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  matchModeControl: {
+    minHeight: 36,
+    flexDirection: 'row',
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 2,
+  },
+  matchModeButton: {
+    minWidth: 52,
+    minHeight: 30,
+    flexGrow: 1,
+    flexShrink: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 15,
+    paddingHorizontal: 10,
+  },
+  matchModeButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
   sheetInput: {
     minHeight: 44,

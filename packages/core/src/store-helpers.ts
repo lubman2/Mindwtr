@@ -4,10 +4,12 @@ import {
     collectTaskTokenUsage,
     getUsedTaskTokensFromUsage,
 } from './task-token-usage';
+import { resolveRelativeStartUpdates } from './task-relative-start';
 import { rescheduleTask } from './task-utils';
+import { safeParseDate } from './date';
 import { filterNotDeleted } from './sync-helpers';
 import { nextRevision, normalizeRevision } from './sync-revision';
-import type { AiSettings, AppData, Area, Project, Section, Task, TaskStatus } from './types';
+import type { AiSettings, AppData, Area, Person, Project, Section, Task, TaskStatus } from './types';
 import { generateUUID as uuidv4 } from './uuid';
 import type { DerivedState, SaveBaseState } from './store-types';
 
@@ -21,11 +23,6 @@ type EntityWithRevision = EntityWithId & {
     deletedAt?: string;
     purgedAt?: string;
 };
-
-let projectOrderCacheRef: Task[] | null = null;
-let projectOrderCacheValue: Map<string, number> | null = null;
-let reservedProjectOrdersRef: Task[] | null = null;
-let reservedProjectOrdersValue: Map<string, number> | null = null;
 
 export const getNextDataChangeAt = (previous: number, now = Date.now()): number => (
     Math.max(now, previous + 1)
@@ -43,6 +40,7 @@ export const getReferenceTaskFieldClears = (): Partial<Task> => ({
     status: 'reference',
     startTime: undefined,
     dueDate: undefined,
+    relativeStartOffset: undefined,
     reviewAt: undefined,
     recurrence: undefined,
     priority: undefined,
@@ -66,19 +64,27 @@ export function applyTaskUpdates(oldTask: Task, updates: Partial<Task>, now: str
     let nextRecurringTask: Task | null = null;
     const isCompleteStatus = (status: TaskStatus) => status === 'done' || status === 'archived';
 
+    // A caller-supplied completedAt backdates the completion (e.g. "I actually
+    // finished this yesterday") and must also anchor after-completion recurrence,
+    // because the next instance is spawned here and never recomputed later.
+    const explicitCompletedAt = typeof updates.completedAt === 'string' && safeParseDate(updates.completedAt)
+        ? updates.completedAt
+        : undefined;
+
     if (statusChanged && incomingStatus === 'done') {
+        const completedAt = explicitCompletedAt ?? now;
         finalUpdates = {
             ...updatesToApply,
             status: incomingStatus,
-            completedAt: now,
+            completedAt,
             isFocusedToday: false,
         };
-        nextRecurringTask = createNextRecurringTask(oldTask, now, oldTask.status);
+        nextRecurringTask = createNextRecurringTask(oldTask, completedAt, oldTask.status);
     } else if (statusChanged && incomingStatus === 'archived') {
         finalUpdates = {
             ...updatesToApply,
             status: incomingStatus,
-            completedAt: oldTask.completedAt || now,
+            completedAt: explicitCompletedAt ?? (oldTask.completedAt || now),
             isFocusedToday: false,
         };
     } else if (statusChanged && isCompleteStatus(oldTask.status) && !isCompleteStatus(incomingStatus)) {
@@ -89,8 +95,12 @@ export function applyTaskUpdates(oldTask: Task, updates: Partial<Task>, now: str
         };
     }
 
-    if (Object.prototype.hasOwnProperty.call(updatesToApply, 'dueDate') && incomingStatus !== 'reference') {
-        const rescheduled = rescheduleTask(oldTask, updatesToApply.dueDate);
+    if (incomingStatus !== 'reference') {
+        finalUpdates = resolveRelativeStartUpdates(oldTask, finalUpdates);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(finalUpdates, 'dueDate') && incomingStatus !== 'reference') {
+        const rescheduled = rescheduleTask(oldTask, finalUpdates.dueDate);
         finalUpdates = {
             ...finalUpdates,
             dueDate: rescheduled.dueDate,
@@ -146,6 +156,9 @@ export const selectVisibleSections = (sections: Section[]): Section[] =>
 
 export const selectVisibleAreas = (areas: Area[]): Area[] =>
     filterNotDeleted(areas);
+
+export const selectVisiblePeople = (people: Person[]): Person[] =>
+    filterNotDeleted(people).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
 export const completeTaskForProjectArchive = (task: Task, archivedAt: string, deviceId?: string): Task => ({
     ...task,
@@ -379,6 +392,7 @@ export const buildSaveSnapshot = (state: SaveBaseState, overrides?: Partial<AppD
     const projects = overrides?.projects ?? state._allProjects;
     const sections = overrides?.sections ?? state._allSections;
     const areas = overrides?.areas ?? state._allAreas;
+    const people = overrides?.people ?? state._allPeople;
     if (overrides?.tasks) {
         assertCollectionSnapshotIncludesExistingItems<Task>('task', tasks, state._allTasks);
     }
@@ -391,11 +405,15 @@ export const buildSaveSnapshot = (state: SaveBaseState, overrides?: Partial<AppD
     if (overrides?.areas) {
         assertCollectionSnapshotIncludesExistingItems<Area>('area', areas, state._allAreas);
     }
+    if (overrides?.people) {
+        assertCollectionSnapshotIncludesExistingItems<Person>('person', people, state._allPeople);
+    }
     return {
         tasks,
         projects,
         sections,
         areas,
+        people,
         settings: overrides?.settings ?? state.settings,
     };
 };
@@ -549,7 +567,7 @@ export const stripSensitiveSettings = (settings: AppData['settings']): AppData['
 
 export const normalizeAiSettingsForSync = (ai?: AiSettings): AiSettings | undefined => {
     if (!ai) return ai;
-    const { apiKey, ...rest } = ai;
+    const { apiKey: _apiKey, ...rest } = ai;
     if (!rest.speechToText) return rest;
     return {
         ...rest,
@@ -583,9 +601,6 @@ export const getTaskOrder = (task: Pick<Task, 'order' | 'orderNum'>): number | u
 };
 
 const getProjectOrderIndex = (tasks: Task[]): Map<string, number> => {
-    if (projectOrderCacheRef === tasks && projectOrderCacheValue) {
-        return projectOrderCacheValue;
-    }
     const nextCache = new Map<string, number>();
     for (const task of tasks) {
         if (task.deletedAt || !task.projectId) continue;
@@ -594,12 +609,6 @@ const getProjectOrderIndex = (tasks: Task[]): Map<string, number> => {
         if (order > previous) {
             nextCache.set(task.projectId, order);
         }
-    }
-    projectOrderCacheRef = tasks;
-    projectOrderCacheValue = nextCache;
-    if (reservedProjectOrdersRef !== tasks) {
-        reservedProjectOrdersRef = tasks;
-        reservedProjectOrdersValue = null;
     }
     return nextCache;
 };
@@ -612,23 +621,14 @@ export const getNextProjectOrder = (
     return (getProjectOrderIndex(tasks).get(projectId) ?? -1) + 1;
 };
 
-export const reserveNextProjectOrder = (
-    projectId: string | undefined,
-    tasks: Task[]
-): number | undefined => {
-    if (!projectId) return undefined;
-    if (reservedProjectOrdersRef !== tasks || !reservedProjectOrdersValue) {
-        reservedProjectOrdersRef = tasks;
-        reservedProjectOrdersValue = new Map<string, number>();
-    }
-    const snapshotReservations = reservedProjectOrdersValue;
-    const reserved = snapshotReservations.get(projectId);
-    if (typeof reserved === 'number') {
-        snapshotReservations.set(projectId, reserved + 1);
-        return reserved;
-    }
-    const nextOrder = getNextProjectOrder(projectId, tasks);
-    if (typeof nextOrder !== 'number') return undefined;
-    snapshotReservations.set(projectId, nextOrder + 1);
-    return nextOrder;
+export type ProjectOrderReserver = (projectId: string | undefined) => number | undefined;
+
+export const createProjectOrderReserver = (tasks: Task[]): ProjectOrderReserver => {
+    const nextOrders = getProjectOrderIndex(tasks);
+    return (projectId: string | undefined): number | undefined => {
+        if (!projectId) return undefined;
+        const nextOrder = (nextOrders.get(projectId) ?? -1) + 1;
+        nextOrders.set(projectId, nextOrder);
+        return nextOrder;
+    };
 };

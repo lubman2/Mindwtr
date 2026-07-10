@@ -22,6 +22,10 @@ on:
         required: false
       APPLE_PROVISIONING_PROFILE:
         required: false
+      VITE_DROPBOX_APP_KEY:
+        required: false
+      ANALYTICS_HEARTBEAT_URL:
+        required: false
   workflow_dispatch:
     inputs:
       tag:
@@ -53,12 +57,14 @@ jobs:
     timeout-minutes: 90
     env:
       VITE_DROPBOX_APP_KEY: ${{ vars.VITE_DROPBOX_APP_KEY || secrets.VITE_DROPBOX_APP_KEY }}
-      VITE_FEEDBACK_ENDPOINT_URL: ${{ vars.VITE_FEEDBACK_ENDPOINT_URL || 'https://mindwtr-feedback.mindwtr.workers.dev' }}
+      VITE_FEEDBACK_ENDPOINT_URL: ${{ vars.VITE_FEEDBACK_ENDPOINT_URL || 'https://feedback.mindwtr.app' }}
       VITE_DONATION_PROMPT_ENABLED: "true"
 
     steps:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.tag || github.event.inputs.tag || github.ref }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -83,8 +89,6 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -92,7 +96,7 @@ jobs:
           bun-version-file: ".bun-version"
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Import Developer ID certificate
         env:
@@ -372,7 +376,7 @@ jobs:
           for attempt in 1 2 3; do
             log_file="${RUNNER_TEMP}/tauri-macos-build-${{ matrix.rust_target }}-${attempt}.log"
             echo "Running macOS bundle build (attempt ${attempt}/3)..."
-            if cargo tauri build --target ${{ matrix.rust_target }} 2>&1 | tee "${log_file}"; then
+            if bunx tauri build --target ${{ matrix.rust_target }} 2>&1 | tee "${log_file}"; then
               exit 0
             fi
 
@@ -393,6 +397,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VITE_ANALYTICS_HEARTBEAT_URL: ${{ secrets.ANALYTICS_HEARTBEAT_URL }}
+          VITE_ANALYTICS_RELEASE_VERSION: ${{ inputs.tag || github.event.inputs.tag || github.ref_name }}
           TAURI_LOG_LEVEL: "debug"
           RUST_LOG: "tauri=debug,tauri_bundler=debug,tauri_cli=debug"
           MACOSX_DEPLOYMENT_TARGET: "10.15"
@@ -518,12 +523,31 @@ jobs:
 
       - name: Collect macOS artifacts
         run: |
+          set -euo pipefail
           mkdir -p release-artifacts
-          for f in $(find apps/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle -name "*.dmg" -o -name "*.app.tar.gz"); do
-            base=$(basename "$f")
-            lower=$(echo "$base" | tr 'A-Z' 'a-z')
-            cp "$f" "release-artifacts/$lower"
-          done
+          TAG_INPUT="${{ inputs.tag || github.event.inputs.tag }}"
+          TAG="${TAG_INPUT:-${GITHUB_REF#refs/tags/}}"
+          VERSION="${TAG#v}"
+          BASE_VERSION="$(python3 -c 'import json; print(json.load(open("apps/desktop/src-tauri/tauri.conf.json", encoding="utf-8"))["version"])')"
+          if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            VERSION="${BASE_VERSION}"
+          fi
+
+          release_asset_name() {
+            local raw="$1"
+            local name
+            name="$(echo "$raw" | tr 'A-Z' 'a-z')"
+            name="${name//_${BASE_VERSION}_/_${VERSION}_}"
+            name="${name//-${BASE_VERSION}-/-${VERSION}-}"
+            printf '%s\n' "$name"
+          }
+
+          find "apps/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle" -type f \( -name "*.dmg" -o -name "*.app.tar.gz" \) -print0 \
+            | while IFS= read -r -d '' f; do
+                base="$(basename "$f")"
+                target="$(release_asset_name "$base")"
+                cp "$f" "release-artifacts/$target"
+              done
           ls -la release-artifacts/ || true
         shell: bash
 

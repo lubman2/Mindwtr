@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'node:module';
 
 import { SqliteAdapter, type SqliteClient } from './sqlite-adapter';
+import { consoleLogger, setLogger, type LogPayload } from './logger';
+import { SQLITE_BASE_SCHEMA } from './sqlite-schema';
 import type { AppData } from './types';
 
 const require = createRequire(import.meta.url);
@@ -107,7 +109,7 @@ describeSqlite('SqliteAdapter', () => {
         db.close();
     });
 
-    it('round-trips tasks, projects, areas, and settings', async () => {
+    it('round-trips tasks, projects, areas, people, and settings', async () => {
         const now = new Date().toISOString();
         const archivedAt = '2026-05-12T09:00:00.000Z';
         const data: AppData = {
@@ -123,6 +125,9 @@ describeSqlite('SqliteAdapter', () => {
                     projectArchivedAt: archivedAt,
                     rev: 5,
                     revBy: 'device-desktop',
+                    boardOrder: 4,
+                    repeatReminderMinutes: 30,
+                    timeSpentMinutes: 95,
                     tags: ['#docs', '#writing'],
                     contexts: ['@computer'],
                     recurrence: {
@@ -163,6 +168,8 @@ describeSqlite('SqliteAdapter', () => {
                     revBy: 'device-desktop',
                     createdAt: now,
                     updatedAt: now,
+                    deletedAt: archivedAt,
+                    purgedAt: archivedAt,
                 },
             ],
             sections: [
@@ -189,6 +196,27 @@ describeSqlite('SqliteAdapter', () => {
                     revBy: 'device-desktop',
                 },
             ],
+            people: [
+                {
+                    id: 'person-1',
+                    name: 'Alex',
+                    note: 'Design lead',
+                    referenceLink: 'https://example.com/alex',
+                    rev: 6,
+                    revBy: 'device-desktop',
+                    createdAt: now,
+                    updatedAt: now,
+                },
+                {
+                    id: 'person-deleted',
+                    name: 'Jordan',
+                    rev: 7,
+                    revBy: 'device-mobile',
+                    createdAt: now,
+                    updatedAt: archivedAt,
+                    deletedAt: archivedAt,
+                },
+            ],
             settings: {
                 gtd: { autoArchiveDays: 7 },
                 savedFilters: [
@@ -212,6 +240,22 @@ describeSqlite('SqliteAdapter', () => {
         expect(loaded.projects).toHaveLength(1);
         expect(loaded.sections).toHaveLength(1);
         expect(loaded.areas).toHaveLength(1);
+        expect(loaded.people).toHaveLength(2);
+        expect(loaded.people?.[0]).toMatchObject({
+            id: 'person-1',
+            name: 'Alex',
+            note: 'Design lead',
+            referenceLink: 'https://example.com/alex',
+            rev: 6,
+            revBy: 'device-desktop',
+        });
+        expect(loaded.people?.[1]).toMatchObject({
+            id: 'person-deleted',
+            name: 'Jordan',
+            rev: 7,
+            revBy: 'device-mobile',
+            deletedAt: archivedAt,
+        });
         expect(loaded.settings.gtd?.autoArchiveDays).toBe(7);
         expect(loaded.settings.savedFilters?.[0]).toMatchObject({
             id: 'filter-1',
@@ -246,6 +290,9 @@ describeSqlite('SqliteAdapter', () => {
         expect(task.projectArchivedAt).toBe(archivedAt);
         expect(task.rev).toBe(5);
         expect(task.revBy).toBe('device-desktop');
+        expect(task.boardOrder).toBe(4);
+        expect(task.repeatReminderMinutes).toBe(30);
+        expect(task.timeSpentMinutes).toBe(95);
 
         const project = loaded.projects[0];
         expect(project.title).toBe('Mindwtr');
@@ -254,6 +301,8 @@ describeSqlite('SqliteAdapter', () => {
         expect(project.sequentialScope).toBe('section');
         expect(project.isFocused).toBe(false);
         expect(project.dueDate).toBe('2026-03-31');
+        expect(project.deletedAt).toBe(archivedAt);
+        expect(project.purgedAt).toBe(archivedAt);
         expect(project.rev).toBe(7);
         expect(project.revBy).toBe('device-desktop');
 
@@ -270,6 +319,16 @@ describeSqlite('SqliteAdapter', () => {
         expect(area.order).toBe(0);
         expect(area.rev).toBe(3);
         expect(area.revBy).toBe('device-desktop');
+    });
+
+    it('declares repeat reminder minutes in the base task schema', () => {
+        db.exec(SQLITE_BASE_SCHEMA);
+
+        const taskColumns = allSql<{ name: string }>(db, 'PRAGMA table_info(tasks)')
+            .map((column) => column.name);
+
+        expect(taskColumns).toContain('repeatReminderMinutes');
+        expect(taskColumns).toContain('timeSpentMinutes');
     });
 
     it('updates a single task row through saveTask while preserving unrelated data', async () => {
@@ -339,6 +398,197 @@ describeSqlite('SqliteAdapter', () => {
             { id: 'task-1', title: 'Updated task' },
             { id: 'task-2', title: 'Unchanged task' },
         ]);
+    });
+
+    it('does not let a stale full snapshot overwrite a newer task revision', async () => {
+        const baseTask = {
+            id: 'task-1',
+            title: 'Original task',
+            status: 'next',
+            tags: [],
+            contexts: [],
+            createdAt: '2026-06-10T08:00:00.000Z',
+            updatedAt: '2026-06-10T08:00:00.000Z',
+            rev: 4,
+            revBy: 'device-old',
+        };
+        const baseData: AppData = {
+            tasks: [baseTask],
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        };
+
+        await adapter.saveData(baseData);
+        await adapter.saveTask({
+            ...baseTask,
+            title: 'Newer incremental task',
+            updatedAt: '2026-06-10T08:01:00.000Z',
+            rev: 5,
+            revBy: 'device-new',
+        });
+        await adapter.saveData({
+            ...baseData,
+            tasks: [{
+                ...baseTask,
+                title: 'Stale snapshot task',
+                updatedAt: '2026-06-10T08:00:30.000Z',
+            }],
+        });
+
+        const loaded = await adapter.getData();
+        expect(loaded.tasks).toHaveLength(1);
+        expect(loaded.tasks[0]).toMatchObject({
+            id: 'task-1',
+            title: 'Newer incremental task',
+            rev: 5,
+            revBy: 'device-new',
+            updatedAt: '2026-06-10T08:01:00.000Z',
+        });
+    });
+
+    it('allows equal-revision task upserts for unchanged ordering semantics', async () => {
+        const task = {
+            id: 'task-1',
+            title: 'Original task',
+            status: 'next',
+            tags: [],
+            contexts: [],
+            createdAt: '2026-06-10T08:00:00.000Z',
+            updatedAt: '2026-06-10T08:00:00.000Z',
+            rev: 5,
+            revBy: 'device-a',
+        };
+
+        await adapter.saveData({
+            tasks: [task],
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        });
+        await adapter.saveTask({
+            ...task,
+            title: 'Equal revision task',
+            updatedAt: '2026-06-10T08:02:00.000Z',
+        });
+
+        const loaded = await adapter.getData();
+        expect(loaded.tasks[0]).toMatchObject({
+            title: 'Equal revision task',
+            rev: 5,
+            updatedAt: '2026-06-10T08:02:00.000Z',
+        });
+    });
+
+    it('guards container upserts with revision ordering', async () => {
+        const now = '2026-06-10T08:00:00.000Z';
+        const baseArea = {
+            id: 'area-1',
+            name: 'Current area',
+            color: '#2563EB',
+            icon: 'briefcase',
+            order: 0,
+            createdAt: now,
+            updatedAt: now,
+            rev: 10,
+            revBy: 'device-new',
+        };
+        const baseProject = {
+            id: 'project-1',
+            title: 'Current project',
+            status: 'active' as const,
+            color: '#2563EB',
+            order: 0,
+            createdAt: now,
+            updatedAt: now,
+            rev: 10,
+            revBy: 'device-new',
+        };
+        const baseSection = {
+            id: 'section-1',
+            projectId: 'project-1',
+            title: 'Current section',
+            description: 'current description',
+            order: 0,
+            createdAt: now,
+            updatedAt: now,
+            rev: 10,
+            revBy: 'device-new',
+        };
+        const basePerson = {
+            id: 'person-1',
+            name: 'Current person',
+            note: 'current note',
+            referenceLink: 'https://example.com/current',
+            createdAt: now,
+            updatedAt: now,
+            rev: 10,
+            revBy: 'device-new',
+        };
+        const baseData: AppData = {
+            tasks: [],
+            projects: [baseProject],
+            sections: [baseSection],
+            areas: [baseArea],
+            people: [basePerson],
+            settings: {},
+        };
+        const loadContainers = async () => {
+            const loaded = await adapter.getData();
+            return {
+                area: loaded.areas.find((area) => area.id === baseArea.id),
+                project: loaded.projects.find((project) => project.id === baseProject.id),
+                section: loaded.sections.find((section) => section.id === baseSection.id),
+                person: loaded.people?.find((person) => person.id === basePerson.id),
+            };
+        };
+
+        await adapter.saveData(baseData);
+        await adapter.saveData({
+            ...baseData,
+            areas: [{ ...baseArea, name: 'Stale area', updatedAt: '2026-06-10T08:00:30.000Z', rev: 1, revBy: 'device-old' }],
+            projects: [{ ...baseProject, title: 'Stale project', updatedAt: '2026-06-10T08:00:30.000Z', rev: 1, revBy: 'device-old' }],
+            sections: [{ ...baseSection, title: 'Stale section', updatedAt: '2026-06-10T08:00:30.000Z', rev: 1, revBy: 'device-old' }],
+            people: [{ ...basePerson, name: 'Stale person', updatedAt: '2026-06-10T08:00:30.000Z', rev: 1, revBy: 'device-old' }],
+        });
+
+        let loaded = await loadContainers();
+        expect(loaded.area).toMatchObject({ name: 'Current area', rev: 10, revBy: 'device-new' });
+        expect(loaded.project).toMatchObject({ title: 'Current project', rev: 10, revBy: 'device-new' });
+        expect(loaded.section).toMatchObject({ title: 'Current section', rev: 10, revBy: 'device-new' });
+        expect(loaded.person).toMatchObject({ name: 'Current person', rev: 10, revBy: 'device-new' });
+
+        const equalUpdatedAt = '2026-06-10T08:02:00.000Z';
+        const equalData: AppData = {
+            ...baseData,
+            areas: [{ ...baseArea, name: 'Equal area', updatedAt: equalUpdatedAt, revBy: 'device-equal' }],
+            projects: [{ ...baseProject, title: 'Equal project', updatedAt: equalUpdatedAt, revBy: 'device-equal' }],
+            sections: [{ ...baseSection, title: 'Equal section', updatedAt: equalUpdatedAt, revBy: 'device-equal' }],
+            people: [{ ...basePerson, name: 'Equal person', updatedAt: equalUpdatedAt, revBy: 'device-equal' }],
+        };
+        await adapter.saveData(equalData);
+
+        loaded = await loadContainers();
+        expect(loaded.area).toMatchObject({ name: 'Equal area', rev: 10, revBy: 'device-equal', updatedAt: equalUpdatedAt });
+        expect(loaded.project).toMatchObject({ title: 'Equal project', rev: 10, revBy: 'device-equal', updatedAt: equalUpdatedAt });
+        expect(loaded.section).toMatchObject({ title: 'Equal section', rev: 10, revBy: 'device-equal', updatedAt: equalUpdatedAt });
+        expect(loaded.person).toMatchObject({ name: 'Equal person', rev: 10, revBy: 'device-equal', updatedAt: equalUpdatedAt });
+
+        await adapter.saveData({
+            ...equalData,
+            areas: [{ ...equalData.areas[0], name: 'Missing rev area', rev: undefined, revBy: undefined }],
+            projects: [{ ...equalData.projects[0], title: 'Missing rev project', rev: undefined, revBy: undefined }],
+            sections: [{ ...equalData.sections[0], title: 'Missing rev section', rev: undefined, revBy: undefined }],
+            people: [{ ...equalData.people![0], name: 'Missing rev person', rev: undefined, revBy: undefined }],
+        });
+
+        loaded = await loadContainers();
+        expect(loaded.area).toMatchObject({ name: 'Equal area', rev: 10, revBy: 'device-equal' });
+        expect(loaded.project).toMatchObject({ title: 'Equal project', rev: 10, revBy: 'device-equal' });
+        expect(loaded.section).toMatchObject({ title: 'Equal section', rev: 10, revBy: 'device-equal' });
+        expect(loaded.person).toMatchObject({ name: 'Equal person', rev: 10, revBy: 'device-equal' });
     });
 
     it('normalizes legacy string recurrence values when loading tasks', async () => {
@@ -492,6 +742,54 @@ describeSqlite('SqliteAdapter', () => {
         expect(remainingSections).toHaveLength(0);
     });
 
+    it('logs reference diagnostics when full snapshot persistence hits a foreign key failure', async () => {
+        const now = '2026-06-18T23:21:00.000Z';
+        const logs: LogPayload[] = [];
+        setLogger((payload) => {
+            logs.push(payload);
+        });
+        try {
+            await expect(adapter.saveData({
+                tasks: [],
+                projects: [],
+                sections: [
+                    {
+                        id: 'orphan-section',
+                        projectId: 'missing-project',
+                        title: 'Orphan section',
+                        order: 0,
+                        createdAt: now,
+                        updatedAt: now,
+                    },
+                ],
+                areas: [],
+                settings: {},
+            })).rejects.toThrow(/FOREIGN KEY/i);
+        } finally {
+            setLogger(consoleLogger);
+        }
+
+        expect(logs).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                level: 'warn',
+                message: 'SQLite saveData failed',
+                scope: 'sqlite',
+                category: 'storage',
+                context: expect.objectContaining({
+                    step: 'sections',
+                    referenceIssues: 1,
+                    referenceIssueSamples: [
+                        {
+                            kind: 'section.projectId',
+                            id: 'orphan-section',
+                            missingId: 'missing-project',
+                        },
+                    ],
+                }),
+            }),
+        ]));
+    });
+
     it('returns lightweight search results for FTS queries', async () => {
         const allMock = vi
             .fn()
@@ -589,6 +887,32 @@ describeSqlite('SqliteAdapter', () => {
 
         expect(results.tasks.map((task) => task.id)).toEqual(['task-location']);
         expect(results.tasks[0]?.location).toBe('Main Office');
+    });
+
+    it('indexes assigned people in full text search', async () => {
+        const now = new Date().toISOString();
+        await adapter.saveData({
+            tasks: [
+                {
+                    id: 'task-assigned',
+                    title: 'Unrelated task',
+                    status: 'waiting',
+                    contexts: [],
+                    tags: [],
+                    assignedTo: 'John Smith',
+                    createdAt: now,
+                    updatedAt: now,
+                },
+            ],
+            projects: [],
+            areas: [],
+            sections: [],
+            settings: {},
+        });
+
+        const results = await adapter.searchAll('john');
+
+        expect(results.tasks.map((task) => task.id)).toEqual(['task-assigned']);
     });
 
     it('indexes checklist item titles in full text search', async () => {
@@ -744,9 +1068,11 @@ describeSqlite('SqliteAdapter', () => {
         const columns = allSql<{ name: string }>(db, 'PRAGMA table_info(tasks)');
         const names = columns.map((col) => col.name);
         expect(names).toContain('orderNum');
+        expect(names).toContain('boardOrder');
         expect(names).toContain('areaId');
         expect(names).toContain('sectionId');
         expect(names).toContain('purgedAt');
+        expect(names).toContain('relativeStartOffset');
         expect(names).toContain('rev');
         expect(names).toContain('revBy');
         const taskIndexes = allSql<{ name: string }>(db, 'PRAGMA index_list(tasks)');
@@ -762,6 +1088,22 @@ describeSqlite('SqliteAdapter', () => {
         expect(projectColumnNames).toContain('revBy');
         const projectIndexes = allSql<{ name: string }>(db, 'PRAGMA index_list(projects)');
         expect(projectIndexes.map((row) => row.name)).toContain('idx_projects_dueDate');
+
+        const peopleColumns = allSql<{ name: string }>(db, 'PRAGMA table_info(people)');
+        const peopleColumnNames = peopleColumns.map((col) => col.name);
+        expect(peopleColumnNames).toEqual(expect.arrayContaining([
+            'id',
+            'name',
+            'note',
+            'referenceLink',
+            'rev',
+            'revBy',
+            'createdAt',
+            'updatedAt',
+            'deletedAt',
+        ]));
+        const peopleIndexes = allSql<{ name: string }>(db, 'PRAGMA index_list(people)');
+        expect(peopleIndexes.map((row) => row.name)).toContain('idx_people_updatedAt_rev');
 
         const sectionColumns = allSql<{ name: string }>(db, 'PRAGMA table_info(sections)');
         const sectionColumnNames = sectionColumns.map((col) => col.name);
@@ -816,6 +1158,13 @@ describeSqlite('SqliteAdapter', () => {
                 VALUES ('bad-json', 'Bad json', 'next', '{invalid', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
             `)
         ).toThrow(/invalid_tasks_tags_json/i);
+
+        expect(() =>
+            runSql(db, `
+                INSERT INTO tasks (id, title, status, relativeStartOffset, createdAt, updatedAt)
+                VALUES ('bad-relative-start-json', 'Bad relative start json', 'next', '{invalid', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+            `)
+        ).toThrow(/invalid_tasks_relative_start_offset_json/i);
     });
 
     it('creates composite indexes used by sync queries', async () => {
@@ -839,6 +1188,165 @@ describeSqlite('SqliteAdapter', () => {
         expect(names.has('idx_sections_updatedAt_rev')).toBe(true);
         expect(names.has('idx_areas_updatedAt_rev')).toBe(true);
         expect(names.has('idx_tasks_area_deletedAt')).toBe(true);
+    });
+});
+
+describeSqlite('SqliteAdapter incremental saveData', () => {
+    let db: Database;
+    let adapter: SqliteAdapter;
+    let statements: { sql: string; params: unknown[] }[];
+
+    const baseData = (): AppData => {
+        const now = '2026-07-01T08:00:00.000Z';
+        return {
+            tasks: [
+                { id: 'task-1', title: 'First', status: 'next', tags: [], contexts: [], createdAt: now, updatedAt: now, rev: 1, revBy: 'dev-a' },
+                { id: 'task-2', title: 'Second', status: 'inbox', tags: [], contexts: [], createdAt: now, updatedAt: now, rev: 1, revBy: 'dev-a' },
+            ],
+            projects: [
+                { id: 'project-1', title: 'Project', status: 'active', color: '#2563EB', order: 0, createdAt: now, updatedAt: now, rev: 1, revBy: 'dev-a' },
+            ],
+            sections: [],
+            areas: [],
+            people: [],
+            settings: { gtd: { autoArchiveDays: 3 } },
+        };
+    };
+
+    beforeEach(() => {
+        if (!RuntimeDatabase) {
+            throw new Error('No compatible sqlite runtime available for tests');
+        }
+        db = new RuntimeDatabase(':memory:');
+        statements = [];
+        const base = createClient(db);
+        adapter = new SqliteAdapter({
+            ...base,
+            run: async (sql: string, params: unknown[] = []) => {
+                statements.push({ sql, params });
+                return base.run(sql, params);
+            },
+        });
+    });
+
+    afterEach(() => {
+        db.close();
+    });
+
+    it('performs no table writes when a second identical saveData runs', async () => {
+        const data = baseData();
+        await adapter.saveData(data);
+        statements = [];
+        await adapter.saveData(data);
+        const writes = statements.filter(({ sql }) =>
+            sql.startsWith('INSERT INTO') || sql.startsWith('DELETE FROM') || sql.startsWith('CREATE TEMP TABLE'));
+        expect(writes).toEqual([]);
+        expect(adapter.getLastSaveDataStats()).toMatchObject({
+            incremental: true,
+            writtenRows: 0,
+            removedRows: 0,
+            settingsWritten: false,
+        });
+    });
+
+    it('writes only the rows that changed since the last save', async () => {
+        const data = baseData();
+        await adapter.saveData(data);
+        statements = [];
+        await adapter.saveData({
+            ...data,
+            tasks: [
+                data.tasks[0],
+                { ...data.tasks[1], title: 'Second edited', rev: 2, updatedAt: '2026-07-01T09:00:00.000Z' },
+            ],
+        });
+        const taskInserts = statements.filter(({ sql }) => sql.startsWith('INSERT INTO tasks'));
+        expect(taskInserts).toHaveLength(1);
+        expect(taskInserts[0].params).toContain('task-2');
+        expect(taskInserts[0].params).not.toContain('task-1');
+        expect(statements.filter(({ sql }) => sql.startsWith('INSERT INTO projects'))).toEqual([]);
+        expect(statements.filter(({ sql }) => sql.startsWith('INSERT INTO settings'))).toEqual([]);
+        const rows = allSql<{ id: string; title: string }>(db, 'SELECT id, title FROM tasks ORDER BY id');
+        expect(rows).toEqual([
+            { id: 'task-1', title: 'First' },
+            { id: 'task-2', title: 'Second edited' },
+        ]);
+        expect(adapter.getLastSaveDataStats()).toMatchObject({
+            incremental: true,
+            writtenRows: 1,
+            removedRows: 0,
+        });
+    });
+
+    it('treats content-identical task clones as unchanged without relying on object identity (#766)', async () => {
+        const data = baseData();
+        await adapter.saveData(data);
+        statements = [];
+        await adapter.saveData({
+            ...data,
+            tasks: data.tasks.map((task) => ({ ...task })),
+        });
+        expect(statements.filter(({ sql }) => sql.startsWith('INSERT INTO tasks'))).toEqual([]);
+        expect(adapter.getLastSaveDataStats()).toMatchObject({
+            incremental: true,
+            writtenRows: 0,
+            removedRows: 0,
+        });
+    });
+
+    it('removes dropped rows with targeted deletes instead of temp-table scans', async () => {
+        const data = baseData();
+        await adapter.saveData(data);
+        statements = [];
+        await adapter.saveData({ ...data, tasks: [data.tasks[0]] });
+        const deletes = statements.filter(({ sql }) => sql.startsWith('DELETE FROM tasks'));
+        expect(deletes).toHaveLength(1);
+        expect(deletes[0].params).toEqual(['task-2']);
+        expect(statements.filter(({ sql }) => sql.startsWith('CREATE TEMP TABLE'))).toEqual([]);
+        const rows = allSql<{ id: string }>(db, 'SELECT id FROM tasks');
+        expect(rows).toEqual([{ id: 'task-1' }]);
+    });
+
+    it('prunes a task created through saveTask when a later snapshot omits it', async () => {
+        const data = baseData();
+        await adapter.saveData(data);
+        await adapter.saveTask({
+            id: 'task-3', title: 'Incremental', status: 'inbox', tags: [], contexts: [],
+            createdAt: '2026-07-01T10:00:00.000Z', updatedAt: '2026-07-01T10:00:00.000Z', rev: 1, revBy: 'dev-a',
+        });
+        await adapter.saveData(data);
+        const rows = allSql<{ id: string }>(db, 'SELECT id FROM tasks ORDER BY id');
+        expect(rows).toEqual([{ id: 'task-1' }, { id: 'task-2' }]);
+    });
+
+    it('falls back to a full write after a failed save', async () => {
+        const data = baseData();
+        await adapter.saveData(data);
+        await expect(adapter.saveData({
+            ...data,
+            tasks: [{ ...data.tasks[0], status: 'not-a-status', rev: 2 }],
+        })).rejects.toThrow();
+        statements = [];
+        await adapter.saveData(data);
+        const taskInserts = statements.filter(({ sql }) => sql.startsWith('INSERT INTO tasks'));
+        expect(taskInserts).toHaveLength(1);
+        expect(taskInserts[0].params).toContain('task-1');
+        expect(taskInserts[0].params).toContain('task-2');
+        const rows = allSql<{ id: string; status: string }>(db, 'SELECT id, status FROM tasks ORDER BY id');
+        expect(rows).toEqual([
+            { id: 'task-1', status: 'next' },
+            { id: 'task-2', status: 'inbox' },
+        ]);
+    });
+
+    it('still skips stale rows the revision guard would reject', async () => {
+        const data = baseData();
+        await adapter.saveData(data);
+        await adapter.saveTask({ ...data.tasks[0], title: 'Newer', rev: 5, updatedAt: '2026-07-01T11:00:00.000Z' });
+        await adapter.saveData(data);
+        await adapter.saveData(data);
+        const row = getSql<{ title: string; rev: number }>(db, 'SELECT title, rev FROM tasks WHERE id = ?', ['task-1']);
+        expect(row).toMatchObject({ title: 'Newer', rev: 5 });
     });
 });
 
@@ -866,6 +1374,7 @@ describe('SqliteAdapter saveData pruning', () => {
                 createdAt: now,
                 updatedAt: now,
             })),
+            people: [],
             settings: {},
         };
 
@@ -875,7 +1384,8 @@ describe('SqliteAdapter saveData pruning', () => {
             .map(([sql]) => String(sql))
             .filter((sql) => sql.startsWith('CREATE TEMP TABLE temp_'));
         const tempNames = tempCreateCalls.map((sql) => sql.match(/CREATE TEMP TABLE (temp_[a-z0-9_]+)/)?.[1]);
-        expect(new Set(tempNames).size).toBe(5);
+        expect(new Set(tempNames).size).toBe(6);
+        expect(tempNames.some((name) => name?.startsWith('temp_people_ids_'))).toBe(true);
 
         const tempAreaInsertCalls = run.mock.calls.filter(([sql]) =>
             String(sql).startsWith('INSERT OR IGNORE INTO temp_areas_ids_')

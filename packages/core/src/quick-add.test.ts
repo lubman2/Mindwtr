@@ -1,8 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { getTaskDateCoherenceIssues } from './task-date-coherence';
-import { getQuickAddProjectInitialProps, parseQuickAdd, parseQuickAddDateCommands } from './quick-add';
+import { getQuickAddProjectInitialProps, parseQuickAdd, parseQuickAddDateCommands, splitQuickAddBulkLines } from './quick-add';
 
 describe('quick-add', () => {
+    it('splits bulk quick-add text into trimmed nonblank lines', () => {
+        expect(splitQuickAddBulkLines('  Email Bob  \r\n\nCall Alice\n\t\nReview notes +Work  ')).toEqual([
+            'Email Bob',
+            'Call Alice',
+            'Review notes +Work',
+        ]);
+        expect(splitQuickAddBulkLines('One task only')).toEqual(['One task only']);
+        expect(splitQuickAddBulkLines(' \n\t\r\n ')).toEqual([]);
+    });
+
     it('parses status, due, note, tags, contexts', () => {
         const now = new Date('2025-01-01T10:00:00Z');
         const result = parseQuickAdd('Call mom @phone #family /next /due:tomorrow 5pm /note:ask about trip', undefined, now);
@@ -30,6 +40,23 @@ describe('quick-add', () => {
         expect(result.title).toBe('Review someday idea');
         expect(result.props.status).toBe('someday');
         expect(result.props.isFocusedToday).toBe(true);
+    });
+
+    it('parses energy quick-add commands', () => {
+        const result = parseQuickAdd('Draft proposal /energy:High /next');
+
+        expect(result.title).toBe('Draft proposal');
+        expect(result.props.energyLevel).toBe('high');
+        expect(result.props.status).toBe('next');
+    });
+
+    it('keeps parsing later energy commands after a note', () => {
+        const result = parseQuickAdd('Call mom /note:ask about trip /energy:low /next');
+
+        expect(result.title).toBe('Call mom');
+        expect(result.props.description).toBe('ask about trip');
+        expect(result.props.energyLevel).toBe('low');
+        expect(result.props.status).toBe('next');
     });
 
     it('parses URL notes into the description field', () => {
@@ -115,6 +142,41 @@ describe('quick-add', () => {
         expect(result.props.startTime).toBe(new Date(2025, 0, 2, 0, 0, 0, 0).toISOString());
         expect(result.props.reviewAt).toBe(new Date(2025, 0, 3, 0, 0, 0, 0).toISOString());
         expect(result.props.dueDate).toBe('2025-01-08');
+    });
+
+    it('uses default schedule time for start and review commands without explicit time', () => {
+        const now = new Date('2025-01-01T10:00:00Z');
+        const result = parseQuickAdd(
+            'Review proposal /start:tomorrow /review:friday /due:next week',
+            undefined,
+            now,
+            undefined,
+            { defaultScheduleTime: '09:30' },
+        );
+
+        const relativeResult = parseQuickAdd('Task /start: 1d', undefined, now, undefined, {
+            defaultScheduleTime: '09:30',
+        });
+
+        expect(result.title).toBe('Review proposal');
+        expect(result.props.startTime).toBe(new Date(2025, 0, 2, 9, 30, 0, 0).toISOString());
+        expect(result.props.reviewAt).toBe(new Date(2025, 0, 3, 9, 30, 0, 0).toISOString());
+        expect(result.props.dueDate).toBe('2025-01-08');
+        expect(relativeResult.props.startTime).toBe(new Date(2025, 0, 2, 9, 30, 0, 0).toISOString());
+    });
+
+    it('keeps explicit quick-add times ahead of the default schedule time', () => {
+        const now = new Date('2025-01-01T10:00:00Z');
+        const result = parseQuickAdd(
+            'Review proposal /start:tomorrow 2:15pm /review:friday 11am',
+            undefined,
+            now,
+            undefined,
+            { defaultScheduleTime: '09:30' },
+        );
+
+        expect(result.props.startTime).toBe(new Date(2025, 0, 2, 14, 15, 0, 0).toISOString());
+        expect(result.props.reviewAt).toBe(new Date(2025, 0, 3, 11, 0, 0, 0).toISOString());
     });
 
     it('parses abbreviated weekday commands like /start:mon', () => {
@@ -359,6 +421,76 @@ describe('quick-add', () => {
         expect(explicitResult.props.areaId).toBe('a2');
     });
 
+    it('matches an existing multi-word project and keeps trailing words in the title', () => {
+        const now = new Date('2026-07-03T10:00:00Z');
+        const projects = [
+            { id: 'p1', title: 'My Project', status: 'active', color: '#000000', tagIds: [], order: 0, createdAt: now.toISOString(), updatedAt: now.toISOString() },
+            { id: 'p2', title: 'My Project Extended', status: 'active', color: '#000000', tagIds: [], order: 1, createdAt: now.toISOString(), updatedAt: now.toISOString() },
+        ];
+
+        const trailing = parseQuickAdd('buy milk +My Project this week', projects as any, now);
+        expect(trailing.props.projectId).toBe('p1');
+        expect(trailing.projectTitle).toBeUndefined();
+        expect(trailing.title).toContain('this week');
+
+        const longest = parseQuickAdd('review +My Project Extended cleanup', projects as any, now);
+        expect(longest.props.projectId).toBe('p2');
+        expect(longest.title).toBe('review cleanup');
+
+        const leading = parseQuickAdd('+My Project buy milk', projects as any, now);
+        expect(leading.props.projectId).toBe('p1');
+        expect(leading.title).toBe('buy milk');
+    });
+
+    it('matches an existing multi-word area and keeps trailing words in the title', () => {
+        const now = new Date('2026-07-03T10:00:00Z');
+        const areas = [
+            { id: 'a1', name: 'Work', color: '#111111', order: 0, createdAt: now.toISOString(), updatedAt: now.toISOString() },
+            { id: 'a2', name: 'Home Stuff', color: '#222222', order: 1, createdAt: now.toISOString(), updatedAt: now.toISOString() },
+        ];
+
+        const single = parseQuickAdd('buy milk !Work call bob', undefined, now, areas as any);
+        expect(single.props.areaId).toBe('a1');
+        expect(single.title).toBe('buy milk call bob');
+
+        const multi = parseQuickAdd('plan !Home Stuff shelf build', undefined, now, areas as any);
+        expect(multi.props.areaId).toBe('a2');
+        expect(multi.title).toBe('plan shelf build');
+    });
+
+    it('leaves an unmatched area token in the text instead of swallowing it', () => {
+        const now = new Date('2026-07-03T10:00:00Z');
+        const areas = [
+            { id: 'a1', name: 'Work', color: '#111111', order: 0, createdAt: now.toISOString(), updatedAt: now.toISOString() },
+        ];
+
+        const result = parseQuickAdd('buy milk !Nowhere extra words', undefined, now, areas as any);
+        expect(result.props.areaId).toBeUndefined();
+        expect(result.title).toBe('buy milk !Nowhere extra words');
+    });
+
+    it('supports quoted project and area names for explicit delimiting', () => {
+        const now = new Date('2026-07-03T10:00:00Z');
+        const projects = [
+            { id: 'p1', title: 'My Project', status: 'active', color: '#000000', tagIds: [], order: 0, createdAt: now.toISOString(), updatedAt: now.toISOString() },
+        ];
+        const areas = [
+            { id: 'a2', name: 'Home Stuff', color: '#222222', order: 1, createdAt: now.toISOString(), updatedAt: now.toISOString() },
+        ];
+
+        const createQuoted = parseQuickAdd('task +"Brand New Proj" more words', projects as any, now);
+        expect(createQuoted.projectTitle).toBe('Brand New Proj');
+        expect(createQuoted.title).toBe('task more words');
+
+        const matchQuoted = parseQuickAdd('task +"My Project" more words', projects as any, now);
+        expect(matchQuoted.props.projectId).toBe('p1');
+        expect(matchQuoted.title).toBe('task more words');
+
+        const areaQuoted = parseQuickAdd('task !"Home Stuff" more words', undefined, now, areas as any);
+        expect(areaQuoted.props.areaId).toBe('a2');
+        expect(areaQuoted.title).toBe('task more words');
+    });
+
     it('uses parsed area before fallback area when creating a project from quick add', () => {
         expect(getQuickAddProjectInitialProps({ areaId: 'parsed-area' }, 'fallback-area')).toEqual({ areaId: 'parsed-area' });
         expect(getQuickAddProjectInitialProps({}, 'fallback-area')).toEqual({ areaId: 'fallback-area' });
@@ -394,6 +526,48 @@ describe('quick-add', () => {
         expect(result.props.status).toBe('next');
     });
 
+    it('matches the longest existing multi-word tag from quick add tokens', () => {
+        const now = new Date('2026-05-19T10:00:00Z');
+        const result = parseQuickAdd(
+            'Buy headset #home office',
+            undefined,
+            now,
+            undefined,
+            { knownTags: ['#home', '#home office'] },
+        );
+
+        expect(result.title).toBe('Buy headset');
+        expect(result.props.tags).toEqual(['#home office']);
+    });
+
+    it('leaves trailing words in the title after a matched multi-word tag', () => {
+        const now = new Date('2026-05-19T10:00:00Z');
+        const result = parseQuickAdd(
+            'Buy headset #home office supplies',
+            undefined,
+            now,
+            undefined,
+            { knownTags: ['#home office'] },
+        );
+
+        expect(result.title).toBe('Buy headset supplies');
+        expect(result.props.tags).toEqual(['#home office']);
+    });
+
+    it('supports quoted multi-word tags without known tag lookup', () => {
+        const result = parseQuickAdd('Buy headset #"home office"');
+
+        expect(result.title).toBe('Buy headset');
+        expect(result.props.tags).toEqual(['#home office']);
+    });
+
+    it('keeps unknown unquoted multi-word tags single-word to avoid guessing', () => {
+        const result = parseQuickAdd('Buy headset #home office');
+
+        expect(result.title).toBe('Buy headset office');
+        expect(result.props.tags).toEqual(['#home']);
+    });
+
     it('keeps simple single-word tags from consuming following title text', () => {
         const now = new Date('2026-05-19T10:00:00Z');
         const result = parseQuickAdd('Email #project stakeholders /next', undefined, now);
@@ -401,5 +575,46 @@ describe('quick-add', () => {
         expect(result.title).toBe('Email stakeholders');
         expect(result.props.tags).toEqual(['#project']);
         expect(result.props.status).toBe('next');
+    });
+
+    it('preserveText keeps the original title but still applies detected metadata (#742)', () => {
+        const now = new Date('2025-01-01T10:00:00Z');
+        const input = 'Call mom @phone #family /due:tomorrow';
+        const result = parseQuickAdd(input, undefined, now, undefined, { preserveText: true });
+
+        expect(result.title).toBe(input);
+        expect(result.props.contexts).toEqual(['@phone']);
+        expect(result.props.tags).toEqual(['#family']);
+        expect(result.props.dueDate).toBeTruthy();
+    });
+
+    it('preserveText leaves a pasted URL untouched and extracts no implicit date (#742)', () => {
+        const now = new Date('2025-01-01T10:00:00Z');
+        const input = 'Read https://en.wikipedia.org/wiki/Foo_(bar) tomorrow';
+        const result = parseQuickAdd(input, undefined, now, undefined, { preserveText: true });
+
+        expect(result.title).toBe(input);
+        expect(result.detectedDate).toBeUndefined();
+        expect(result.props.dueDate).toBeUndefined();
+    });
+
+    it('default mode still strips recognized tokens (preserve is opt-in)', () => {
+        const result = parseQuickAdd('Buy milk #grocery', undefined, undefined, undefined, {
+            knownTags: ['#grocery'],
+        });
+
+        expect(result.title).toBe('Buy milk');
+        expect(result.props.tags).toEqual(['#grocery']);
+    });
+
+    it('parseQuickAddDateCommands preserves the title when requested (#742)', () => {
+        const now = new Date('2025-01-01T10:00:00Z');
+        const stripped = parseQuickAddDateCommands('Submit report /due:tomorrow', now);
+        expect(stripped.title).toBe('Submit report');
+        expect(stripped.props.dueDate).toBeTruthy();
+
+        const preserved = parseQuickAddDateCommands('Submit report /due:tomorrow', now, { preserveText: true });
+        expect(preserved.title).toBe('Submit report /due:tomorrow');
+        expect(preserved.props.dueDate).toBeTruthy();
     });
 });

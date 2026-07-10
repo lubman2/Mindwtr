@@ -1,5 +1,6 @@
 import React from 'react';
 import { TouchableOpacity } from 'react-native';
+import { Plus } from 'lucide-react-native';
 import { act, create } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -7,12 +8,22 @@ import Index from '../app/index';
 import TabLayout from '../app/(drawer)/(tabs)/_layout';
 
 const mockRouterPush = vi.hoisted(() => vi.fn());
+const selectedAreaIdForNewTasksMock = vi.hoisted(() => ({ current: null as string | null | undefined }));
 const mockTaskSettings = vi.hoisted(() => ({
   appearance: {} as Record<string, unknown>,
   gtd: {
     defaultCaptureMethod: 'text',
+    defaultAreaMode: undefined as 'none' | 'fixed' | 'active' | undefined,
+    defaultAreaId: undefined as string | undefined,
   },
   savedSearches: [],
+}));
+const mockThemeTokens = vi.hoisted(() => ({
+  value: { isMaterial: false, roles: null, shape: { large: 16 } } as {
+    isMaterial: boolean;
+    roles: Record<string, string> | null;
+    shape: { large: number };
+  },
 }));
 
 vi.mock('expo-router', () => {
@@ -76,6 +87,11 @@ vi.mock('@react-navigation/native', () => ({
 }));
 
 vi.mock('@mindwtr/core', () => ({
+  getDefaultTaskAreaMode: (settings: any) => {
+    const mode = settings?.gtd?.defaultAreaMode;
+    if (mode === 'none' || mode === 'fixed' || mode === 'active') return mode;
+    return settings?.gtd?.defaultAreaId ? 'fixed' : 'none';
+  },
   tFallback: (t: (key: string) => string, key: string, fallback: string) => {
     const translated = t(key);
     return translated && translated !== key ? translated : fallback;
@@ -100,7 +116,7 @@ vi.mock('@/components/quick-capture-sheet', () => ({
 }));
 
 vi.mock('@/hooks/use-mobile-area-filter', () => ({
-  useMobileAreaFilter: () => ({ selectedAreaIdForNewTasks: null }),
+  useMobileAreaFilter: () => ({ selectedAreaIdForNewTasks: selectedAreaIdForNewTasksMock.current }),
 }));
 
 vi.mock('@/hooks/use-mobile-sync-badge', () => ({
@@ -120,6 +136,10 @@ vi.mock('@/hooks/use-theme-colors', () => ({
     text: '#f8fafc',
     tint: '#3b82f6',
   }),
+}));
+
+vi.mock('@/hooks/use-theme-tokens', () => ({
+  useThemeTokens: () => mockThemeTokens.value,
 }));
 
 vi.mock('../contexts/language-context', () => ({
@@ -201,6 +221,22 @@ const getCaptureButtonInnerStyle = (tree: ReturnType<typeof create>) => {
   ))[0];
   if (!view) throw new Error('Capture button inner view not found');
   return flattenStyle(view.props.style);
+};
+
+const getCaptureInnerStyleBySize = (tree: ReturnType<typeof create>) => {
+  const view = tree.root.findAll((node) => {
+    if (String(node.type) !== 'View') return false;
+    const s = flattenStyle(node.props.style);
+    return s.width === 40 && s.height === 34;
+  })[0];
+  if (!view) throw new Error('Capture button inner view not found');
+  return flattenStyle(view.props.style);
+};
+
+const getCaptureIconColor = (tree: ReturnType<typeof create>) => {
+  const icon = tree.root.findAllByType(Plus)[0];
+  if (!icon) throw new Error('Capture plus icon not found');
+  return icon.props.color;
 };
 
 const getMenuButton = (tree: ReturnType<typeof create>) => {
@@ -303,7 +339,11 @@ describe('mobile tab quick capture', () => {
     mockRouterPush.mockClear();
     mockTaskSettings.appearance = {};
     mockTaskSettings.gtd.defaultCaptureMethod = 'text';
+    mockTaskSettings.gtd.defaultAreaMode = undefined;
+    mockTaskSettings.gtd.defaultAreaId = undefined;
     mockTaskSettings.savedSearches = [];
+    selectedAreaIdForNewTasksMock.current = null;
+    mockThemeTokens.value = { isMaterial: false, roles: null, shape: { large: 16 } };
   });
 
   it('unmounts the quick capture sheet after close so the next plus tap gets a fresh modal', () => {
@@ -338,6 +378,24 @@ describe('mobile tab quick capture', () => {
     expect(sheets[0]?.props.visible).toBe(true);
   });
 
+  it('passes the selected area filter into quick capture initial props in active area mode', () => {
+    mockTaskSettings.gtd.defaultAreaMode = 'active';
+    selectedAreaIdForNewTasksMock.current = 'area-work';
+    let tree!: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<TabLayout />);
+    });
+
+    act(() => {
+      getAddTaskButton(tree).props.onPress();
+    });
+
+    const sheets = getQuickCaptureSheets(tree);
+    expect(sheets).toHaveLength(1);
+    expect(sheets[0]?.props.initialProps).toEqual({ areaId: 'area-work' });
+  });
+
   it('defaults cold tab startup to Focus', () => {
     let tree!: ReturnType<typeof create>;
 
@@ -368,10 +426,11 @@ describe('mobile tab quick capture', () => {
     expect(headerTitle.props.maxFontSizeMultiplier).toBe(1.15);
   });
 
-  it('redirects root cold launch to Focus', () => {
+  it('redirects root cold launch to Focus when no recent session is stored', async () => {
     let tree!: ReturnType<typeof create>;
 
-    act(() => {
+    // Session restore reads storage asynchronously before redirecting.
+    await act(async () => {
       tree = create(<Index />);
     });
 
@@ -418,6 +477,33 @@ describe('mobile tab quick capture', () => {
     }));
   });
 
+  it('boosts the capture FAB to the high-emphasis M3 primary role under Material', () => {
+    // Capture is Mindwtr's most important action, so under M3 the FAB uses the
+    // high-emphasis FAB role (primary/onPrimary), not the deliberately subdued
+    // primaryContainer. Other primary buttons stay primaryContainer (canonical),
+    // preserving M3's emphasis hierarchy with capture at the top.
+    mockThemeTokens.value = {
+      isMaterial: true,
+      roles: {
+        primary: '#AAC7FF',
+        onPrimary: '#003063',
+        primaryContainer: '#00458B',
+        onPrimaryContainer: '#D7E2FF',
+      },
+      shape: { large: 16 },
+    };
+
+    let tree!: ReturnType<typeof create>;
+    act(() => {
+      tree = create(<TabLayout />);
+    });
+
+    const inner = getCaptureInnerStyleBySize(tree);
+    expect(inner.backgroundColor).toBe('#AAC7FF');
+    expect(inner.borderRadius).toBe(16);
+    expect(getCaptureIconColor(tree)).toBe('#003063');
+  });
+
   it('opens the More sheet from the menu tab and navigates from its original calendar icon', () => {
     let tree!: ReturnType<typeof create>;
 
@@ -435,13 +521,16 @@ describe('mobile tab quick capture', () => {
     expect(getMoreSheetButtonIconName(tree, 'Board View')).toBe('square.grid.2x2.fill');
     expect(getMoreSheetButtonIconName(tree, 'Someday')).toBe('arrow.up.circle.fill');
     const trashLabel = getMoreSheetButtonLabelNode(tree, 'Trash');
-    expect(trashLabel.props.numberOfLines).toBe(1);
+    // #632: utility labels can wrap and gently fit, so the longest label
+    // ("Reference") stays readable at large font scales.
+    expect(trashLabel.props.numberOfLines).toBe(2);
     expect(trashLabel.props.adjustsFontSizeToFit).toBe(true);
-    expect(trashLabel.props.maxFontSizeMultiplier).toBe(1.15);
+    expect(trashLabel.props.maxFontSizeMultiplier).toBe(1);
     expect(flattenStyle(getMoreSheetButtons(tree, 'Trash')[0]?.props.style)).toEqual(expect.objectContaining({
-      flexBasis: '30%',
-      minWidth: 92,
+      flex: 1,
+      minWidth: 0,
     }));
+    expect(flattenStyle(getMoreSheetButtons(tree, 'Trash')[0]?.props.style)).not.toHaveProperty('flexBasis');
 
     const calendarButtons = getMoreSheetButtons(tree, 'Calendar');
     expect(calendarButtons.length).toBeGreaterThan(0);

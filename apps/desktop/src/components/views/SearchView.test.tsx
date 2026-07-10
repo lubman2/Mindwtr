@@ -72,4 +72,13 @@ describe('SearchView', () => {
             (checkbox as HTMLInputElement).checked
         ))).toEqual([false, false]);
     });
+
+    it('shows bulk organize for selected saved-search results', () => {
+        const { getByRole } = renderSearchView();
+
+        fireEvent.click(getByRole('button', { name: 'Select' }));
+        fireEvent.click(getByRole('button', { name: 'Select All' }));
+
+        expect(getByRole('button', { name: 'Bulk organize' })).toBeInTheDocument();
+    });
 });

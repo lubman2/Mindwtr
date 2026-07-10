@@ -38,6 +38,7 @@ describe('TaskItemDisplay', () => {
 
     afterEach(() => {
         vi.unstubAllGlobals();
+        vi.useRealTimers();
     });
 
     it('renders task age in Chinese when language is zh', () => {
@@ -71,6 +72,122 @@ describe('TaskItemDisplay', () => {
         );
 
         expect(getByText('2周前')).toBeInTheDocument();
+    });
+
+    const renderWithRename = (props: {
+        onRenameTitle: ReturnType<typeof vi.fn>;
+        onEdit?: ReturnType<typeof vi.fn>;
+        renameRequestToken?: number;
+    }) => (
+        <LanguageProvider>
+            <TaskItemDisplay
+                task={baseTask}
+                language="en"
+                selectionMode={false}
+                isViewOpen={false}
+                actions={{
+                    onToggleView: vi.fn(),
+                    onEdit: props.onEdit ?? vi.fn(),
+                    onRenameTitle: props.onRenameTitle,
+                    onDelete: vi.fn(),
+                    onDuplicate: vi.fn(),
+                    onStatusChange: vi.fn(),
+                    openAttachment: vi.fn(),
+                }}
+                visibleAttachments={[]}
+                recurrenceRule=""
+                recurrenceStrategy="strict"
+                prioritiesEnabled={false}
+                timeEstimatesEnabled={false}
+                isStagnant={false}
+                showQuickDone={false}
+                readOnly={false}
+                renameRequestToken={props.renameRequestToken ?? 0}
+                t={(key: string) => key}
+            />
+        </LanguageProvider>
+    );
+
+    it('opens the full editor on double-click even when inline rename is available', () => {
+        const onRenameTitle = vi.fn();
+        const onEdit = vi.fn();
+        const { getByText, queryByLabelText } = render(renderWithRename({ onRenameTitle, onEdit }));
+
+        fireEvent.doubleClick(getByText('Localized age'));
+
+        expect(onEdit).toHaveBeenCalled();
+        expect(queryByLabelText('Rename task')).not.toBeInTheDocument();
+        expect(onRenameTitle).not.toHaveBeenCalled();
+    });
+
+    it('renames the title in place on rename request and saves with Enter', () => {
+        const onRenameTitle = vi.fn();
+        const onEdit = vi.fn();
+        const { rerender, getByLabelText, queryByLabelText } = render(
+            renderWithRename({ onRenameTitle, onEdit, renameRequestToken: 0 })
+        );
+
+        rerender(renderWithRename({ onRenameTitle, onEdit, renameRequestToken: 1 }));
+
+        const input = getByLabelText('Rename task') as HTMLInputElement;
+        expect(input.value).toBe('Localized age');
+        expect(onEdit).not.toHaveBeenCalled();
+
+        fireEvent.change(input, { target: { value: 'Renamed task' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+
+        expect(onRenameTitle).toHaveBeenCalledWith('Renamed task');
+        expect(queryByLabelText('Rename task')).not.toBeInTheDocument();
+    });
+
+    it('cancels the inline rename with Escape without saving', () => {
+        const onRenameTitle = vi.fn();
+        const { rerender, getByLabelText, queryByLabelText } = render(
+            renderWithRename({ onRenameTitle, renameRequestToken: 0 })
+        );
+
+        rerender(renderWithRename({ onRenameTitle, renameRequestToken: 1 }));
+        const input = getByLabelText('Rename task') as HTMLInputElement;
+        fireEvent.change(input, { target: { value: 'Discarded' } });
+        fireEvent.keyDown(input, { key: 'Escape' });
+
+        expect(onRenameTitle).not.toHaveBeenCalled();
+        expect(queryByLabelText('Rename task')).not.toBeInTheDocument();
+    });
+
+    it('opens the full editor on double-click when inline rename is unavailable', () => {
+        const onEdit = vi.fn();
+        const { getByText } = render(
+            <LanguageProvider>
+                <TaskItemDisplay
+                    task={baseTask}
+                    language="en"
+                    selectionMode={false}
+                    isViewOpen={false}
+                    actions={{
+                        onToggleView: vi.fn(),
+                        onEdit,
+                        onDelete: vi.fn(),
+                        onDuplicate: vi.fn(),
+                        onStatusChange: vi.fn(),
+                        openAttachment: vi.fn(),
+                    }}
+                    visibleAttachments={[]}
+                    recurrenceRule=""
+                    recurrenceStrategy="strict"
+                    prioritiesEnabled={false}
+                    timeEstimatesEnabled={false}
+                    isStagnant={false}
+                    showQuickDone={false}
+                    readOnly={false}
+                    t={(key: string) => key}
+                />
+            </LanguageProvider>
+        );
+
+        fireEvent.doubleClick(getByText('Localized age'));
+
+        expect(onEdit).toHaveBeenCalled();
     });
 
     it('hides task age by default', () => {
@@ -141,6 +258,184 @@ describe('TaskItemDisplay', () => {
         expect(getByText('Starts after due date')).toBeInTheDocument();
     });
 
+    it('shows the daily recurrence interval in task metadata', () => {
+        const { getByText } = render(
+            <LanguageProvider>
+                <TaskItemDisplay
+                    task={{
+                        ...baseTask,
+                        recurrence: { rule: 'daily', rrule: 'FREQ=DAILY;INTERVAL=3' },
+                    }}
+                    language="en"
+                    selectionMode={false}
+                    isViewOpen={false}
+                    actions={{
+                        onToggleView: vi.fn(),
+                        onEdit: vi.fn(),
+                        onDelete: vi.fn(),
+                        onDuplicate: vi.fn(),
+                        onStatusChange: vi.fn(),
+                        openAttachment: vi.fn(),
+                    }}
+                    visibleAttachments={[]}
+                    recurrenceRule="daily"
+                    recurrenceStrategy="strict"
+                    prioritiesEnabled={false}
+                    timeEstimatesEnabled={false}
+                    isStagnant={false}
+                    showQuickDone={false}
+                    readOnly={false}
+                    t={(key: string) => ({
+                        'recurrence.daily': 'Daily',
+                        'recurrence.repeatEvery': 'Repeat every',
+                        'recurrence.dayUnit': 'day(s)',
+                    }[key] ?? key)}
+                />
+            </LanguageProvider>
+        );
+
+        expect(getByText('Daily · Repeat every 3 day(s)')).toBeInTheDocument();
+    });
+
+    it('promotes waiting and someday tasks to Next from the quick action instead of completing them', () => {
+        for (const status of ['waiting', 'someday'] as const) {
+            const onStatusChange = vi.fn();
+            const { getByRole, queryByRole, unmount } = render(
+                <LanguageProvider>
+                    <TaskItemDisplay
+                        task={{ ...baseTask, status }}
+                        language="en"
+                        selectionMode={false}
+                        isViewOpen={false}
+                        actions={{
+                            onToggleView: vi.fn(),
+                            onEdit: vi.fn(),
+                            onDelete: vi.fn(),
+                            onDuplicate: vi.fn(),
+                            onStatusChange,
+                            openAttachment: vi.fn(),
+                        }}
+                        visibleAttachments={[]}
+                        recurrenceRule=""
+                        recurrenceStrategy="strict"
+                        prioritiesEnabled={false}
+                        timeEstimatesEnabled={false}
+                        isStagnant={false}
+                        showQuickDone
+                        readOnly={false}
+                        t={(key: string) => ({
+                            'status.next': 'Next',
+                            'status.done': 'Done',
+                        }[key] ?? key)}
+                    />
+                </LanguageProvider>
+            );
+
+            fireEvent.click(getByRole('button', { name: 'Next' }));
+            expect(onStatusChange).toHaveBeenCalledWith('next');
+            expect(queryByRole('button', { name: 'Done' })).not.toBeInTheDocument();
+            unmount();
+        }
+    });
+
+    it('shows the upcoming occurrence for an unscheduled recurring task without the calendar toggle', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(2026, 6, 3, 12, 0, 0));
+        try {
+            const { getByText } = render(
+                <LanguageProvider>
+                    <TaskItemDisplay
+                        task={{
+                            ...baseTask,
+                            recurrence: {
+                                rule: 'monthly',
+                                strategy: 'strict',
+                                byMonthDay: [9],
+                                rrule: 'FREQ=MONTHLY;BYMONTHDAY=9',
+                            },
+                        }}
+                        language="en"
+                        selectionMode={false}
+                        isViewOpen
+                        actions={{
+                            onToggleView: vi.fn(),
+                            onEdit: vi.fn(),
+                            onDelete: vi.fn(),
+                            onDuplicate: vi.fn(),
+                            onStatusChange: vi.fn(),
+                            openAttachment: vi.fn(),
+                        }}
+                        visibleAttachments={[]}
+                        recurrenceRule="monthly"
+                        recurrenceStrategy="strict"
+                        prioritiesEnabled={false}
+                        timeEstimatesEnabled={false}
+                        isStagnant={false}
+                        showQuickDone={false}
+                        readOnly={false}
+                        t={(key: string) => ({
+                            'recurrence.monthly': 'Monthly',
+                            'recurrence.nextCalendarPreview': 'Next calendar preview',
+                        }[key] ?? key)}
+                    />
+                </LanguageProvider>
+            );
+
+            expect(getByText('Monthly · Next calendar preview: Jul 9, 2026')).toBeInTheDocument();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('shows the projected recurrence date in task preview metadata', () => {
+        // The projected date is computed from "now"; freeze it so the
+        // hardcoded Jul 9 expectation stays valid after that date passes.
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(2026, 6, 3, 12, 0, 0));
+        const { getByText } = render(
+            <LanguageProvider>
+                <TaskItemDisplay
+                    task={{
+                        ...baseTask,
+                        dueDate: '2026-06-09',
+                        recurrence: {
+                            rule: 'monthly',
+                            strategy: 'strict',
+                            byMonthDay: [9],
+                            rrule: 'FREQ=MONTHLY;BYMONTHDAY=9',
+                        },
+                        showFutureRecurrence: true,
+                    }}
+                    language="en"
+                    selectionMode={false}
+                    isViewOpen
+                    actions={{
+                        onToggleView: vi.fn(),
+                        onEdit: vi.fn(),
+                        onDelete: vi.fn(),
+                        onDuplicate: vi.fn(),
+                        onStatusChange: vi.fn(),
+                        openAttachment: vi.fn(),
+                    }}
+                    visibleAttachments={[]}
+                    recurrenceRule="monthly"
+                    recurrenceStrategy="strict"
+                    prioritiesEnabled={false}
+                    timeEstimatesEnabled={false}
+                    isStagnant={false}
+                    showQuickDone={false}
+                    readOnly={false}
+                    t={(key: string) => ({
+                        'recurrence.monthly': 'Monthly',
+                        'recurrence.nextCalendarPreview': 'Next calendar preview',
+                    }[key] ?? key)}
+                />
+            </LanguageProvider>
+        );
+
+        expect(getByText('Monthly · Next calendar preview: Jul 9, 2026')).toBeInTheDocument();
+    });
+
     it('wraps long task titles instead of truncating them', () => {
         const longTitle = 'This is a task for a project in a narrow split-screen workspace';
 
@@ -175,6 +470,44 @@ describe('TaskItemDisplay', () => {
         expect(getByText(longTitle)).toHaveClass('task-item-display__title');
         expect(getByText(longTitle)).toHaveClass('break-words');
         expect(getByText(longTitle)).not.toHaveClass('truncate');
+    });
+
+    it('renders a one-line markdown description preview in collapsed rows', () => {
+        const { getByText, queryByText, container } = render(
+            <LanguageProvider>
+                <TaskItemDisplay
+                    task={{ ...baseTask, description: '- [ ] **Call** the vendor\nSecond line' }}
+                    language="en"
+                    selectionMode={false}
+                    isViewOpen={false}
+                    actions={{
+                        onToggleView: vi.fn(),
+                        onEdit: vi.fn(),
+                        onDelete: vi.fn(),
+                        onDuplicate: vi.fn(),
+                        onStatusChange: vi.fn(),
+                        openAttachment: vi.fn(),
+                    }}
+                    visibleAttachments={[]}
+                    recurrenceRule=""
+                    recurrenceStrategy="strict"
+                    prioritiesEnabled={false}
+                    timeEstimatesEnabled={false}
+                    isStagnant={false}
+                    showQuickDone={false}
+                    readOnly={false}
+                    t={(key: string) => key}
+                />
+            </LanguageProvider>
+        );
+
+        const preview = container.querySelector('.task-item-display__description-preview');
+        expect(preview).not.toBeNull();
+        expect(preview).toHaveClass('truncate');
+        expect(getByText('Call').tagName).toBe('STRONG');
+        expect(queryByText(/\*\*Call\*\*/)).toBeNull();
+        expect(queryByText(/\[ \]/)).toBeNull();
+        expect(queryByText('Second line')).toBeNull();
     });
 
     it('shows the completion date and time for completed tasks when compact details are off', () => {
@@ -529,13 +862,13 @@ describe('TaskItemDisplay', () => {
         );
     });
 
-    it('only renders the task description when the row is expanded', () => {
+    it('shows a truncated description preview collapsed and the full description expanded', () => {
         const taskWithDescription: Task = {
             ...baseTask,
-            description: 'Expanded task note',
+            description: 'Expanded task note\nSecond note line',
         };
 
-        const { queryByText, rerender } = render(
+        const { container, queryByText, rerender } = render(
             <LanguageProvider>
                 <TaskItemDisplay
                     task={taskWithDescription}
@@ -563,7 +896,9 @@ describe('TaskItemDisplay', () => {
             </LanguageProvider>
         );
 
-        expect(queryByText('Expanded task note')).not.toBeInTheDocument();
+        expect(queryByText(/Expanded task note/)).toBeInTheDocument();
+        expect(container.querySelector('.task-item-display__description-preview')).toHaveClass('truncate');
+        expect(queryByText(/Second note line/)).not.toBeInTheDocument();
 
         rerender(
             <LanguageProvider>
@@ -593,7 +928,8 @@ describe('TaskItemDisplay', () => {
             </LanguageProvider>
         );
 
-        expect(queryByText('Expanded task note')).toBeInTheDocument();
+        expect(queryByText(/Expanded task note/)).toBeInTheDocument();
+        expect(queryByText(/Second note line/)).toBeInTheDocument();
     });
 
     it('renders internal markdown task links in expanded details', () => {
@@ -684,6 +1020,45 @@ describe('TaskItemDisplay', () => {
         expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
         expect(trigger).toHaveAttribute('aria-expanded', 'false');
         expect(trigger).toHaveClass('focus-visible:ring-2');
+    });
+
+    it('keeps quick actions above expanded task details', () => {
+        const { getByRole } = render(
+            <LanguageProvider>
+                <TaskItemDisplay
+                    task={{
+                        ...baseTask,
+                        description: 'Expanded task note',
+                    }}
+                    language="en"
+                    selectionMode={false}
+                    isViewOpen
+                    quickActionsOpen={false}
+                    actions={{
+                        onToggleView: vi.fn(),
+                        onEdit: vi.fn(),
+                        onDelete: vi.fn(),
+                        onDuplicate: vi.fn(),
+                        onStatusChange: vi.fn(),
+                        onOpenQuickActions: vi.fn(),
+                        openAttachment: vi.fn(),
+                    }}
+                    visibleAttachments={[]}
+                    recurrenceRule=""
+                    recurrenceStrategy="strict"
+                    prioritiesEnabled={false}
+                    timeEstimatesEnabled={false}
+                    isStagnant={false}
+                    showQuickDone={false}
+                    readOnly={false}
+                    t={(key: string) => key}
+                />
+            </LanguageProvider>
+        );
+
+        const actions = getByRole('button', { name: 'More options' }).closest('.task-item-display__actions');
+
+        expect(actions).toHaveClass('z-20');
     });
 
     it('keeps secondary active task actions off the row', () => {
@@ -850,5 +1225,48 @@ describe('TaskItemDisplay', () => {
 
         expect(queryByText('0/1')).not.toBeInTheDocument();
         expect(queryByText('Reference step')).not.toBeInTheDocument();
+    });
+
+    it('keeps the completion timestamp clickable on read-only done rows', () => {
+        const onEditCompletedAt = vi.fn();
+        const doneTask: Task = {
+            ...baseTask,
+            title: 'Finished task',
+            status: 'done',
+            completedAt: '2026-01-02T10:00:00.000Z',
+        };
+
+        const { getByLabelText } = render(
+            <LanguageProvider>
+                <TaskItemDisplay
+                    task={doneTask}
+                    language="en"
+                    selectionMode={false}
+                    isViewOpen={false}
+                    actions={{
+                        onToggleView: vi.fn(),
+                        onEdit: vi.fn(),
+                        onDelete: vi.fn(),
+                        onDuplicate: vi.fn(),
+                        onStatusChange: vi.fn(),
+                        openAttachment: vi.fn(),
+                        onEditCompletedAt,
+                    }}
+                    visibleAttachments={[]}
+                    recurrenceRule=""
+                    recurrenceStrategy="strict"
+                    prioritiesEnabled={false}
+                    timeEstimatesEnabled={false}
+                    isStagnant={false}
+                    showQuickDone={false}
+                    readOnly
+                    t={(key: string) => key}
+                />
+            </LanguageProvider>
+        );
+
+        fireEvent.click(getByLabelText('Edit completion time'));
+
+        expect(onEditCompletedAt).toHaveBeenCalled();
     });
 });

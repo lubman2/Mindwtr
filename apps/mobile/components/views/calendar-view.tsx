@@ -12,17 +12,25 @@ import {
   useWindowDimensions,
   View,
   type GestureResponderEvent,
+  type ViewStyle,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import { CALENDAR_TIME_ESTIMATE_OPTIONS, getCalendarDayOfMonth, isProjectedRecurringTask, safeFormatDate, safeParseDate, type Task } from '@mindwtr/core';
+import { CALENDAR_TIME_ESTIMATE_OPTIONS, getCalendarDayOfMonth, getTaskCalendarOccurrenceDate, isProjectedRecurringTask, safeFormatDate, safeParseDate, type Task } from '@mindwtr/core';
 import { Gesture, GestureDetector, ScrollView } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withSequence, withSpring, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { TaskEditModal } from '@/components/task-edit-modal';
 import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigation';
+import { useAndroidKeyboardInset } from '@/lib/use-android-keyboard-inset';
 import { styles } from './calendar/calendar-view.styles';
-import { isAllDayScheduledTask, isTimedScheduledTask } from './calendar/calendar-task-items';
+import {
+  buildTimedCalendarLayouts,
+  type CalendarTimedLayout,
+  type CalendarTimedLayoutInput,
+  isAllDayScheduledTask,
+  isTimedScheduledTask,
+} from './calendar/calendar-task-items';
 import {
   CALENDAR_WEEK_VISIBLE_DAYS_MAX,
   CALENDAR_WEEK_VISIBLE_DAYS_MIN,
@@ -41,6 +49,7 @@ const MONTH_DETAILS_MID_SNAP = 0.58;
 const MONTH_DETAILS_EXPANDED_SNAP = 0.9;
 const MONTH_DETAILS_HIDE_THRESHOLD = 0.2;
 const MONTH_DETAILS_MIN_HEIGHT = 176;
+const TIMED_BLOCK_COLUMN_GAP = 2;
 const WEEK_TIME_GUTTER_WIDTH = 56;
 const WEEK_DENSITY_VALUES = Array.from(
   { length: CALENDAR_WEEK_VISIBLE_DAYS_MAX - CALENDAR_WEEK_VISIBLE_DAYS_MIN + 1 },
@@ -48,6 +57,35 @@ const WEEK_DENSITY_VALUES = Array.from(
 );
 
 type CalendarNavigationMode = 'month' | 'day';
+
+type TimedBlockInsetStyle = Pick<ViewStyle, 'left' | 'right' | 'marginLeft' | 'marginRight'>;
+
+const percentDimension = (value: number): `${number}%` => {
+  const clamped = Math.max(0, Math.min(100, value));
+  return `${Number(clamped.toFixed(4))}%` as `${number}%`;
+};
+
+const getTimedBlockInsetStyle = (layout?: CalendarTimedLayout): TimedBlockInsetStyle => {
+  const leftPercent = layout?.leftPercent ?? 0;
+  const widthPercent = layout?.widthPercent ?? 100;
+  const rightPercent = 100 - leftPercent - widthPercent;
+  return {
+    left: percentDimension(leftPercent),
+    right: percentDimension(rightPercent),
+    marginLeft: layout && layout.columnIndex > 0 ? TIMED_BLOCK_COLUMN_GAP : 0,
+    marginRight: layout && layout.columnIndex < layout.columnCount - 1 ? TIMED_BLOCK_COLUMN_GAP : 0,
+  };
+};
+
+const PROJECTED_RECURRENCE_LABEL_DATE_FORMAT = 'MMM d';
+
+const getProjectedRecurrenceDisplayLabel = (task: Task, projectedLabel: string): string => {
+  const occurrenceDateLabel = safeFormatDate(
+    getTaskCalendarOccurrenceDate(task),
+    PROJECTED_RECURRENCE_LABEL_DATE_FORMAT
+  );
+  return occurrenceDateLabel ? `${projectedLabel} · ${occurrenceDateLabel}` : projectedLabel;
+};
 
 type ScheduledTaskBlockProps = {
   DAY_END_HOUR: number;
@@ -60,6 +98,7 @@ type ScheduledTaskBlockProps = {
   formatTimeRange: (start: Date, durationMinutes: number) => string;
   height: number;
   isDark: boolean;
+  layoutStyle: TimedBlockInsetStyle;
   openTaskActions: (taskId: string) => void;
   projectedLabel: string;
   setTimelineScrollEnabled: (enabled: boolean) => void;
@@ -69,6 +108,66 @@ type ScheduledTaskBlockProps = {
   top: number;
   triggerDragHaptic: () => void;
 };
+
+type PlanningTaskListProps = {
+  getScheduleSlotLabel: (date: Date | null, task: Task) => string | null;
+  planningTasks: Task[];
+  scheduleTaskOnSelectedDate: (taskId: string) => void;
+  selectedDate: Date | null;
+  selectedDatePlanningLabel: string;
+  t: ReturnType<typeof useCalendarViewController>['t'];
+  tc: ReturnType<typeof useCalendarViewController>['tc'];
+  tr: ReturnType<typeof useCalendarViewController>['tr'];
+  variant?: 'results' | 'section';
+};
+
+function PlanningTaskList({
+  getScheduleSlotLabel,
+  planningTasks,
+  scheduleTaskOnSelectedDate,
+  selectedDate,
+  selectedDatePlanningLabel,
+  t,
+  tc,
+  tr,
+  variant = 'results',
+}: PlanningTaskListProps) {
+  const isSection = variant === 'section';
+  const items = planningTasks.map((task) => {
+    const slotLabel = getScheduleSlotLabel(selectedDate, task);
+    const taskContent = (
+      <>
+        <Text style={[styles.taskItemTitle, { color: tc.text }]} numberOfLines={1}>
+          {task.title}
+        </Text>
+        <Text style={[styles.taskItemTime, { color: tc.secondaryText }]}>
+          {slotLabel ? `${t('calendar.scheduleAction')} · ${slotLabel}` : t('calendar.scheduleAction')}
+        </Text>
+      </>
+    );
+    return (
+      <Pressable
+        key={task.id}
+        style={[styles.taskItem, { backgroundColor: tc.inputBg, borderLeftColor: tc.tint }]}
+        onPress={() => scheduleTaskOnSelectedDate(task.id)}
+      >
+        {isSection ? <View style={styles.taskItemMain}>{taskContent}</View> : taskContent}
+      </Pressable>
+    );
+  });
+
+  return (
+    <View style={isSection ? styles.scheduleSection : styles.scheduleResults}>
+      <Text style={[isSection ? styles.scheduleDate : styles.scheduleResultsTitle, { color: tc.secondaryText }]}>
+        {tr('calendar.planningTitle')}
+      </Text>
+      <Text style={[styles.scheduleResultsSubtitle, { color: tc.secondaryText }]}>
+        {selectedDatePlanningLabel}
+      </Text>
+      {isSection ? <View style={styles.scheduleItems}>{items}</View> : items}
+    </View>
+  );
+}
 
 function ScheduledTaskBlock({
   DAY_END_HOUR,
@@ -81,6 +180,7 @@ function ScheduledTaskBlock({
   formatTimeRange,
   height,
   isDark,
+  layoutStyle,
   openTaskActions,
   projectedLabel,
   setTimelineScrollEnabled,
@@ -133,6 +233,7 @@ function ScheduledTaskBlock({
   const label = start ? formatTimeRange(start, durationMinutes) : '';
   const compact = height < 48;
   const showTime = height >= 44;
+  const projectedDisplayLabel = projected ? getProjectedRecurrenceDisplayLabel(task, projectedLabel) : projectedLabel;
 
   const blockContent = (
     <>
@@ -144,7 +245,7 @@ function ScheduledTaskBlock({
       </Text>
       {showTime && (
         <Text style={[styles.taskBlockTime, projected && { color: tc.secondaryText }]} numberOfLines={1}>
-          {projected ? `${label} · ${projectedLabel}` : label}
+          {projected ? `${label} · ${projectedDisplayLabel}` : label}
         </Text>
       )}
     </>
@@ -164,6 +265,7 @@ function ScheduledTaskBlock({
             borderColor: toRgba(tc.tint, isDark ? 0.7 : 0.45),
             borderStyle: 'dashed',
           },
+          layoutStyle,
           animatedStyle,
         ]}
       >
@@ -185,6 +287,7 @@ function ScheduledTaskBlock({
             backgroundColor: isDark ? toRgba(tc.tint, 0.85) : tc.tint,
             borderColor: toRgba(tc.tint, isDark ? 0.6 : 0.3),
           },
+          layoutStyle,
           animatedStyle,
         ]}
       >
@@ -233,7 +336,7 @@ export function CalendarView() {
     tr,
     markTaskDone,
     monthLabel,
-    nextQuickScheduleCandidates,
+    planningTasks,
     openQuickAddForDate,
     openQuickAddAtDateTime,
     openExternalEvent,
@@ -250,6 +353,7 @@ export function CalendarView() {
     selectedDateDeadlines,
     selectedDateExternalEvents,
     selectedDateLongLabel,
+    selectedDatePlanningLabel,
     selectedDateScheduled,
     selectedDateTimedEvents,
     selectedDayModeLabel,
@@ -283,6 +387,7 @@ export function CalendarView() {
   } = useCalendarViewController();
   const { height: screenHeight, width: screenWidth } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  const composerKeyboardInset = useAndroidKeyboardInset(Boolean(calendarComposer));
   const collapsedSheetSnap = Math.max(
     MONTH_DETAILS_COLLAPSED_SNAP,
     Math.min(MONTH_DETAILS_MID_SNAP, MONTH_DETAILS_MIN_HEIGHT / Math.max(screenHeight, 1))
@@ -303,6 +408,44 @@ export function CalendarView() {
     / (CALENDAR_WEEK_VISIBLE_DAYS_MAX - CALENDAR_WEEK_VISIBLE_DAYS_MIN);
   const composerStartTimePlaceholder = safeFormatDate(new Date(2000, 0, 1, 9, 0), 'p', '09:00');
   const composerEndTimePlaceholder = safeFormatDate(new Date(2000, 0, 1, 9, 30), 'p', '09:30');
+  const selectedDayTimedLayouts = useMemo(() => {
+    if (!selectedDayStart || !selectedDayEnd) return new Map<string, CalendarTimedLayout>();
+
+    const dayStartMs = selectedDayStart.getTime();
+    const dayEndMs = selectedDayEnd.getTime();
+    const layoutItems: CalendarTimedLayoutInput[] = [];
+
+    for (const event of selectedDateTimedEvents) {
+      const start = safeParseDate(event.start);
+      const end = safeParseDate(event.end);
+      if (!start || !end) continue;
+      const clampedStartMs = Math.max(start.getTime(), dayStartMs);
+      const clampedEndMs = Math.min(end.getTime(), dayEndMs);
+      if (clampedEndMs <= clampedStartMs) continue;
+      layoutItems.push({
+        id: `event:${event.id}`,
+        startMinutes: (clampedStartMs - dayStartMs) / 60_000,
+        endMinutes: (clampedEndMs - dayStartMs) / 60_000,
+      });
+    }
+
+    for (const task of selectedDayScheduledTasks) {
+      const start = task.startTime ? safeParseDate(task.startTime) : null;
+      if (!start) continue;
+      const durationMinutes = timeEstimateToMinutes(task.timeEstimate);
+      const endMs = start.getTime() + durationMinutes * 60_000;
+      const clampedStartMs = Math.max(start.getTime(), dayStartMs);
+      const clampedEndMs = Math.min(endMs, dayEndMs);
+      if (clampedEndMs <= clampedStartMs) continue;
+      layoutItems.push({
+        id: `task:${task.id}`,
+        startMinutes: (clampedStartMs - dayStartMs) / 60_000,
+        endMinutes: (clampedEndMs - dayStartMs) / 60_000,
+      });
+    }
+
+    return buildTimedCalendarLayouts(layoutItems);
+  }, [selectedDateTimedEvents, selectedDayEnd, selectedDayScheduledTasks, selectedDayStart, timeEstimateToMinutes]);
 
   const closeMonthDetailsPane = () => {
     setSelectedDate(null);
@@ -537,6 +680,9 @@ export function CalendarView() {
           <Pressable
             key={option.value}
             onPress={() => setViewMode(option.value)}
+            accessibilityRole="button"
+            accessibilityLabel={option.label}
+            accessibilityState={{ selected: active }}
             style={[styles.modeToggleButton, active && { backgroundColor: tc.tint }]}
           >
             <Text style={[styles.modeToggleText, { color: active ? tc.onTint : tc.secondaryText }]}>
@@ -555,7 +701,12 @@ export function CalendarView() {
       animationType="fade"
       onRequestClose={closeCalendarComposer}
     >
-      <Pressable style={styles.composerBackdrop} onPress={closeCalendarComposer}>
+      <Pressable
+        style={composerKeyboardInset > 0
+          ? [styles.composerBackdrop, { paddingBottom: composerKeyboardInset }]
+          : styles.composerBackdrop}
+        onPress={closeCalendarComposer}
+      >
         {calendarComposer && (
           <View
             style={[
@@ -754,18 +905,33 @@ export function CalendarView() {
       <View style={[styles.container, { backgroundColor: tc.bg }]}>
         <View style={[styles.dayModeHeader, { backgroundColor: tc.cardBg, borderBottomColor: tc.border }]}>
           <View style={styles.headerTopRow}>
-            <Pressable onPress={() => shiftSelectedDate(-1)} style={styles.navButton}>
+            <Pressable
+              onPress={() => shiftSelectedDate(-1)}
+              accessibilityRole="button"
+              accessibilityLabel="Previous day"
+              style={styles.navButton}
+            >
               <Text style={[styles.navButtonText, { color: tc.text }]}>‹</Text>
             </Pressable>
             <View style={styles.dayModeTitleWrap}>
               <Text style={[styles.dayModeTitle, { color: tc.text }]} numberOfLines={1}>
                 {selectedDayModeLabel}
               </Text>
-              <Pressable onPress={handleToday} style={[styles.todayButton, { borderColor: tc.border }]}>
+              <Pressable
+                onPress={handleToday}
+                accessibilityRole="button"
+                accessibilityLabel={tr('filters.datePreset.today')}
+                style={[styles.todayButton, { borderColor: tc.border }]}
+              >
                 <Text style={[styles.todayButtonText, { color: tc.tint }]}>{tr('filters.datePreset.today')}</Text>
               </Pressable>
             </View>
-            <Pressable onPress={() => shiftSelectedDate(1)} style={styles.navButton}>
+            <Pressable
+              onPress={() => shiftSelectedDate(1)}
+              accessibilityRole="button"
+              accessibilityLabel="Next day"
+              style={styles.navButton}
+            >
               <Text style={[styles.navButtonText, { color: tc.text }]}>›</Text>
             </Pressable>
           </View>
@@ -786,10 +952,13 @@ export function CalendarView() {
                 <Text style={[styles.sectionLabel, { color: tc.secondaryText }]}>{t('calendar.allDay')}</Text>
                 {selectedDateAllDayScheduledTasks.slice(0, 6).map((task) => {
                   const projected = isProjectedRecurringTask(task);
+                  const projectedDisplayLabel = projected
+                    ? getProjectedRecurrenceDisplayLabel(task, tr('calendar.projectedRecurrence'))
+                    : '';
                   return (
                     <Pressable key={task.id} onPress={() => openTaskActions(task.id)} style={styles.allDayPressable}>
                       <Text style={[styles.allDayItem, { color: projected ? tc.tint : tc.text }]} numberOfLines={1}>
-                        {projected ? `${task.title} · ${tr('calendar.projectedRecurrence')}` : task.title}
+                        {projected ? `${task.title} · ${projectedDisplayLabel}` : task.title}
                       </Text>
                     </Pressable>
                   );
@@ -830,110 +999,104 @@ export function CalendarView() {
                   </View>
                 )}
 
-                {selectedDateTimedEvents.map((event) => {
-                  const start = safeParseDate(event.start);
-                  const end = safeParseDate(event.end);
-                  if (!start || !end) return null;
-                  const clampedStart = new Date(Math.max(start.getTime(), selectedDayStart.getTime()));
-                  const clampedEnd = new Date(Math.min(end.getTime(), selectedDayEnd.getTime()));
-                  const startMinutes = (clampedStart.getTime() - selectedDayStart.getTime()) / 60_000;
-                  const endMinutes = (clampedEnd.getTime() - selectedDayStart.getTime()) / 60_000;
-                  const top = Math.max(0, startMinutes) * PIXELS_PER_MINUTE;
-                  const height = Math.max(16, (endMinutes - startMinutes) * PIXELS_PER_MINUTE);
-                  const timeLabel = formatTimeRange(clampedStart, Math.max(1, Math.round(endMinutes - startMinutes)));
-                  const eventStyle = [
-                    styles.eventBlock,
-                    {
-                      top,
-                      height,
-                      backgroundColor: toRgba(tc.secondaryText, isDark ? 0.35 : 0.18),
-                      borderColor: sourceColorForId(event.sourceId),
-                    },
-                  ];
-                  const eventContent = (
-                    <>
-                      <Text style={[styles.eventBlockTitle, { color: tc.text }]} numberOfLines={1}>
-                        {event.title}
-                      </Text>
-                      <Text style={[styles.eventBlockTime, { color: tc.secondaryText }]} numberOfLines={1}>
-                        {timeLabel}
-                      </Text>
-                    </>
-                  );
-                  return (
-                    <Pressable
-                      key={event.id}
-                      onPress={(pressEvent) => {
-                        pressEvent.stopPropagation();
-                        openExternalEvent(event);
-                      }}
-                      style={eventStyle}
-                    >
-                      {eventContent}
-                    </Pressable>
-                  );
-                })}
+                <View pointerEvents="box-none" style={styles.timelineItemsLayer}>
+                  {selectedDateTimedEvents.map((event) => {
+                    const start = safeParseDate(event.start);
+                    const end = safeParseDate(event.end);
+                    if (!start || !end) return null;
+                    const clampedStart = new Date(Math.max(start.getTime(), selectedDayStart.getTime()));
+                    const clampedEnd = new Date(Math.min(end.getTime(), selectedDayEnd.getTime()));
+                    const startMinutes = (clampedStart.getTime() - selectedDayStart.getTime()) / 60_000;
+                    const endMinutes = (clampedEnd.getTime() - selectedDayStart.getTime()) / 60_000;
+                    const top = Math.max(0, startMinutes) * PIXELS_PER_MINUTE;
+                    const height = Math.max(16, (endMinutes - startMinutes) * PIXELS_PER_MINUTE);
+                    const timeLabel = formatTimeRange(clampedStart, Math.max(1, Math.round(endMinutes - startMinutes)));
+                    const eventStyle = [
+                      styles.eventBlock,
+                      {
+                        top,
+                        height,
+                        backgroundColor: toRgba(tc.secondaryText, isDark ? 0.35 : 0.18),
+                        borderColor: sourceColorForId(event.sourceId),
+                      },
+                      getTimedBlockInsetStyle(selectedDayTimedLayouts.get(`event:${event.id}`)),
+                    ];
+                    const eventContent = (
+                      <>
+                        <Text style={[styles.eventBlockTitle, { color: tc.text }]} numberOfLines={1}>
+                          {event.title}
+                        </Text>
+                        <Text style={[styles.eventBlockTime, { color: tc.secondaryText }]} numberOfLines={1}>
+                          {timeLabel}
+                        </Text>
+                      </>
+                    );
+                    return (
+                      <Pressable
+                        key={event.id}
+                        onPress={(pressEvent) => {
+                          pressEvent.stopPropagation();
+                          openExternalEvent(event);
+                        }}
+                        style={eventStyle}
+                      >
+                        {eventContent}
+                      </Pressable>
+                    );
+                  })}
 
-                {selectedDayScheduledTasks.map((task) => {
-                  const start = task.startTime ? safeParseDate(task.startTime) : null;
-                  if (!start) return null;
-                  const durationMinutes = timeEstimateToMinutes(task.timeEstimate);
-                  const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
-                  const clampedStart = new Date(Math.max(start.getTime(), selectedDayStart.getTime()));
-                  const clampedEnd = new Date(Math.min(end.getTime(), selectedDayEnd.getTime()));
-                  const startMinutes = (clampedStart.getTime() - selectedDayStart.getTime()) / 60_000;
-                  const endMinutes = (clampedEnd.getTime() - selectedDayStart.getTime()) / 60_000;
-                  const top = Math.max(0, startMinutes) * PIXELS_PER_MINUTE;
-                  const height = Math.max(24, (endMinutes - startMinutes) * PIXELS_PER_MINUTE);
-                  return (
-                    <ScheduledTaskBlock
-                      key={task.id}
-                      DAY_END_HOUR={DAY_END_HOUR}
-                      DAY_START_HOUR={DAY_START_HOUR}
-                      PIXELS_PER_MINUTE={PIXELS_PER_MINUTE}
-                      SNAP_MINUTES={SNAP_MINUTES}
-                      commitTaskDrag={commitTaskDrag}
-                      task={task}
-                      dayStartMs={selectedDayStart.getTime()}
-                      top={top}
-                      height={height}
-                      durationMinutes={durationMinutes}
-                      formatTimeRange={formatTimeRange}
-                      isDark={isDark}
-                      openTaskActions={openTaskActions}
-                      projectedLabel={tr('calendar.projectedRecurrence')}
-                      setTimelineScrollEnabled={setTimelineScrollEnabled}
-                      tc={tc}
-                      toRgba={toRgba}
-                      triggerDragHaptic={triggerDragHaptic}
-                    />
-                  );
-                })}
+                  {selectedDayScheduledTasks.map((task) => {
+                    const start = task.startTime ? safeParseDate(task.startTime) : null;
+                    if (!start) return null;
+                    const durationMinutes = timeEstimateToMinutes(task.timeEstimate);
+                    const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
+                    const clampedStart = new Date(Math.max(start.getTime(), selectedDayStart.getTime()));
+                    const clampedEnd = new Date(Math.min(end.getTime(), selectedDayEnd.getTime()));
+                    const startMinutes = (clampedStart.getTime() - selectedDayStart.getTime()) / 60_000;
+                    const endMinutes = (clampedEnd.getTime() - selectedDayStart.getTime()) / 60_000;
+                    const top = Math.max(0, startMinutes) * PIXELS_PER_MINUTE;
+                    const height = Math.max(24, (endMinutes - startMinutes) * PIXELS_PER_MINUTE);
+                    return (
+                      <ScheduledTaskBlock
+                        key={task.id}
+                        DAY_END_HOUR={DAY_END_HOUR}
+                        DAY_START_HOUR={DAY_START_HOUR}
+                        PIXELS_PER_MINUTE={PIXELS_PER_MINUTE}
+                        SNAP_MINUTES={SNAP_MINUTES}
+                        commitTaskDrag={commitTaskDrag}
+                        task={task}
+                        dayStartMs={selectedDayStart.getTime()}
+                        top={top}
+                        height={height}
+                        durationMinutes={durationMinutes}
+                        formatTimeRange={formatTimeRange}
+                        isDark={isDark}
+                        layoutStyle={getTimedBlockInsetStyle(selectedDayTimedLayouts.get(`task:${task.id}`))}
+                        openTaskActions={openTaskActions}
+                        projectedLabel={tr('calendar.projectedRecurrence')}
+                        setTimelineScrollEnabled={setTimelineScrollEnabled}
+                        tc={tc}
+                        toRgba={toRgba}
+                        triggerDragHaptic={triggerDragHaptic}
+                      />
+                    );
+                  })}
+                </View>
               </View>
             </View>
 
             <View style={[styles.dayScheduleCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
-              {nextQuickScheduleCandidates.length > 0 && (
-                <View style={styles.scheduleResults}>
-                  <Text style={[styles.scheduleResultsTitle, { color: tc.secondaryText }]}>{t('nav.next')}</Text>
-                  {nextQuickScheduleCandidates.map((task) => {
-                    const slotLabel = getScheduleSlotLabel(selectedDate, task);
-                    return (
-                      <Pressable
-                        key={task.id}
-                        style={[styles.taskItem, { backgroundColor: tc.inputBg, borderLeftColor: tc.tint }]}
-                        onPress={() => scheduleTaskOnSelectedDate(task.id)}
-                      >
-                        <Text style={[styles.taskItemTitle, { color: tc.text }]} numberOfLines={1}>
-                          {task.title}
-                        </Text>
-                        <Text style={[styles.taskItemTime, { color: tc.secondaryText }]}>
-                          {slotLabel ? `${t('calendar.scheduleAction')} · ${slotLabel}` : t('calendar.scheduleAction')}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
+              {planningTasks.length > 0 && (
+                <PlanningTaskList
+                  getScheduleSlotLabel={getScheduleSlotLabel}
+                  planningTasks={planningTasks}
+                  scheduleTaskOnSelectedDate={scheduleTaskOnSelectedDate}
+                  selectedDate={selectedDate}
+                  selectedDatePlanningLabel={selectedDatePlanningLabel}
+                  t={t}
+                  tc={tc}
+                  tr={tr}
+                />
               )}
 
               <View style={styles.addTaskForm}>
@@ -1060,6 +1223,9 @@ export function CalendarView() {
                     {allDayItems.map((item) => {
                       const isEvent = item.kind === 'event';
                       const projected = item.kind !== 'event' && isProjectedRecurringTask(item.task);
+                      const projectedDisplayLabel = projected
+                        ? getProjectedRecurrenceDisplayLabel(item.task, tr('calendar.projectedRecurrence'))
+                        : '';
                       return (
                         <Pressable
                           key={item.id}
@@ -1084,7 +1250,7 @@ export function CalendarView() {
                           ]}
                         >
                           <Text style={[styles.weekAllDayText, compactWeekColumns && styles.weekAllDayTextCompact, { color: tc.text }]} numberOfLines={1}>
-                            {projected ? `${item.title} · ${tr('calendar.projectedRecurrence')}` : item.title}
+                            {projected ? `${item.title} · ${projectedDisplayLabel}` : item.title}
                           </Text>
                         </Pressable>
                       );
@@ -1115,11 +1281,48 @@ export function CalendarView() {
                   const now = new Date();
                   const nowMinutes = (now.getHours() - DAY_START_HOUR) * 60 + now.getMinutes();
                   const showNow = isToday(day) && nowMinutes >= 0 && nowMinutes <= (DAY_END_HOUR - DAY_START_HOUR) * 60;
+                  const dayStart = new Date(day);
+                  dayStart.setHours(DAY_START_HOUR, 0, 0, 0);
+                  const dayEnd = new Date(day);
+                  dayEnd.setHours(DAY_END_HOUR, 0, 0, 0);
+                  const dayStartMs = dayStart.getTime();
+                  const dayEndMs = dayEnd.getTime();
                   const timedItems = getCalendarItemsForDate(day)
                     .filter((item) =>
                       (item.kind === 'scheduled' && isTimedScheduledTask(item.task))
                       || (item.kind === 'event' && !item.event.allDay)
                     );
+                  const timedLayoutInputs: CalendarTimedLayoutInput[] = [];
+                  for (const item of timedItems) {
+                    if (item.kind === 'event') {
+                      const start = safeParseDate(item.event.start);
+                      const end = safeParseDate(item.event.end);
+                      if (!start || !end) continue;
+                      const clampedStartMs = Math.max(start.getTime(), dayStartMs);
+                      const clampedEndMs = Math.min(end.getTime(), dayEndMs);
+                      if (clampedEndMs <= clampedStartMs) continue;
+                      timedLayoutInputs.push({
+                        id: `event:${item.event.id}`,
+                        startMinutes: (clampedStartMs - dayStartMs) / 60_000,
+                        endMinutes: (clampedEndMs - dayStartMs) / 60_000,
+                      });
+                      continue;
+                    }
+
+                    const start = item.task.startTime ? safeParseDate(item.task.startTime) : null;
+                    if (!start) continue;
+                    const durationMinutes = timeEstimateToMinutes(item.task.timeEstimate);
+                    const endMs = start.getTime() + durationMinutes * 60_000;
+                    const clampedStartMs = Math.max(start.getTime(), dayStartMs);
+                    const clampedEndMs = Math.min(endMs, dayEndMs);
+                    if (clampedEndMs <= clampedStartMs) continue;
+                    timedLayoutInputs.push({
+                      id: `task:${item.task.id}`,
+                      startMinutes: (clampedStartMs - dayStartMs) / 60_000,
+                      endMinutes: (clampedEndMs - dayStartMs) / 60_000,
+                    });
+                  }
+                  const timedLayouts = buildTimedCalendarLayouts(timedLayoutInputs);
                   return (
                     <Pressable
                       key={`grid-${day.toISOString()}`}
@@ -1135,93 +1338,105 @@ export function CalendarView() {
                           <View style={styles.nowRule} />
                         </View>
                       )}
-                      {timedItems.map((item) => {
-                        if (item.kind === 'event') {
-                          const start = safeParseDate(item.event.start);
-                          const end = safeParseDate(item.event.end);
-                          if (!start || !end) return null;
-                          const clampedStart = new Date(day);
-                          clampedStart.setHours(DAY_START_HOUR, 0, 0, 0);
-                          const clampedEnd = new Date(day);
-                          clampedEnd.setHours(DAY_END_HOUR, 0, 0, 0);
-                          const displayStart = new Date(Math.max(start.getTime(), clampedStart.getTime()));
-                          const displayEnd = new Date(Math.min(end.getTime(), clampedEnd.getTime()));
-                          const top = ((displayStart.getHours() - DAY_START_HOUR) * 60 + displayStart.getMinutes()) * PIXELS_PER_MINUTE;
-                          const height = Math.max(24, ((displayEnd.getTime() - displayStart.getTime()) / 60_000) * PIXELS_PER_MINUTE);
-                          const eventStyle = [
-                            styles.weekBlock,
-                            compactWeekColumns && styles.weekBlockCompact,
-                            ultraCompactWeekColumns && styles.weekBlockUltraCompact,
-                            {
-                              top,
-                              height,
-                              backgroundColor: toRgba(tc.secondaryText, isDark ? 0.32 : 0.16),
-                              borderLeftColor: sourceColorForId(item.event.sourceId),
-                            },
-                          ];
-                          const eventContent = (
-                            <>
-                              <Text style={[styles.weekBlockTitle, compactWeekColumns && styles.weekBlockTitleCompact, { color: tc.text }]} numberOfLines={compactWeekColumns ? 2 : 1}>{item.title}</Text>
-                              {!compactWeekColumns && (
-                                <Text style={[styles.weekBlockTime, { color: tc.secondaryText }]} numberOfLines={1}>
-                                  {`${safeFormatDate(displayStart, 'p')}-${safeFormatDate(displayEnd, 'p')}`}
-                                </Text>
-                              )}
-                            </>
-                          );
-                          return (
-                            <Pressable
-                              key={item.id}
-                              onPress={(pressEvent) => {
-                                pressEvent.stopPropagation();
-                                openExternalEvent(item.event);
-                              }}
-                              style={eventStyle}
-                            >
-                              {eventContent}
-                            </Pressable>
-                          );
-                        }
-
-                        const projected = isProjectedRecurringTask(item.task);
-                        const start = item.task.startTime ? safeParseDate(item.task.startTime) : null;
-                        if (!start) return null;
-                        const durationMinutes = timeEstimateToMinutes(item.task.timeEstimate);
-                        const top = ((start.getHours() - DAY_START_HOUR) * 60 + start.getMinutes()) * PIXELS_PER_MINUTE;
-                        const height = Math.max(24, durationMinutes * PIXELS_PER_MINUTE);
-                        return (
-                          <Pressable
-                            key={item.id}
-                            disabled={projected}
-                            onPress={(event) => {
-                              event.stopPropagation();
-                              if (projected) return;
-                              openTaskActions(item.task.id);
-                            }}
-                            style={[
+                      <View
+                        pointerEvents="box-none"
+                        style={[
+                          styles.weekTimedItemsLayer,
+                          compactWeekColumns && styles.weekTimedItemsLayerCompact,
+                          ultraCompactWeekColumns && styles.weekTimedItemsLayerUltraCompact,
+                        ]}
+                      >
+                        {timedItems.map((item) => {
+                          if (item.kind === 'event') {
+                            const start = safeParseDate(item.event.start);
+                            const end = safeParseDate(item.event.end);
+                            if (!start || !end) return null;
+                            const displayStart = new Date(Math.max(start.getTime(), dayStartMs));
+                            const displayEnd = new Date(Math.min(end.getTime(), dayEndMs));
+                            const top = ((displayStart.getTime() - dayStartMs) / 60_000) * PIXELS_PER_MINUTE;
+                            const height = Math.max(24, ((displayEnd.getTime() - displayStart.getTime()) / 60_000) * PIXELS_PER_MINUTE);
+                            const eventStyle = [
                               styles.weekBlock,
                               compactWeekColumns && styles.weekBlockCompact,
                               ultraCompactWeekColumns && styles.weekBlockUltraCompact,
                               {
                                 top,
                                 height,
-                                backgroundColor: projected
-                                  ? toRgba(tc.tint, isDark ? 0.18 : 0.1)
-                                  : isDark ? toRgba(tc.tint, 0.85) : tc.tint,
-                                borderLeftColor: tc.tint,
-                                borderStyle: projected ? 'dashed' : 'solid',
+                                backgroundColor: toRgba(tc.secondaryText, isDark ? 0.32 : 0.16),
+                                borderLeftColor: sourceColorForId(item.event.sourceId),
                               },
-                            ]}
-                          >
-                            <Text style={[styles.weekTaskBlockTitle, compactWeekColumns && styles.weekTaskBlockTitleCompact, projected && { color: tc.tint }]} numberOfLines={compactWeekColumns ? 2 : 1}>{item.title}</Text>
-                            {!compactWeekColumns && (
-                              <Text style={[styles.weekTaskBlockTime, projected && { color: tc.secondaryText }]} numberOfLines={1}>
-                                {projected ? `${formatTimeRange(start, durationMinutes)} · ${tr('calendar.projectedRecurrence')}` : formatTimeRange(start, durationMinutes)}
-                              </Text>
-                            )}
-                          </Pressable>
-                        );
-                      })}
+                              getTimedBlockInsetStyle(timedLayouts.get(`event:${item.event.id}`)),
+                            ];
+                            const eventContent = (
+                              <>
+                                <Text style={[styles.weekBlockTitle, compactWeekColumns && styles.weekBlockTitleCompact, { color: tc.text }]} numberOfLines={compactWeekColumns ? 2 : 1}>{item.title}</Text>
+                                {!compactWeekColumns && (
+                                  <Text style={[styles.weekBlockTime, { color: tc.secondaryText }]} numberOfLines={1}>
+                                    {`${safeFormatDate(displayStart, 'p')}-${safeFormatDate(displayEnd, 'p')}`}
+                                  </Text>
+                                )}
+                              </>
+                            );
+                            return (
+                              <Pressable
+                                key={item.id}
+                                onPress={(pressEvent) => {
+                                  pressEvent.stopPropagation();
+                                  openExternalEvent(item.event);
+                                }}
+                                style={eventStyle}
+                              >
+                                {eventContent}
+                              </Pressable>
+                            );
+                          }
+
+                          const projected = isProjectedRecurringTask(item.task);
+                          const start = item.task.startTime ? safeParseDate(item.task.startTime) : null;
+                          if (!start) return null;
+                          const projectedDisplayLabel = projected
+                            ? getProjectedRecurrenceDisplayLabel(item.task, tr('calendar.projectedRecurrence'))
+                            : '';
+                          const durationMinutes = timeEstimateToMinutes(item.task.timeEstimate);
+                          const displayStartMs = Math.max(start.getTime(), dayStartMs);
+                          const displayEndMs = Math.min(start.getTime() + durationMinutes * 60_000, dayEndMs);
+                          const top = ((displayStartMs - dayStartMs) / 60_000) * PIXELS_PER_MINUTE;
+                          const height = Math.max(24, ((displayEndMs - displayStartMs) / 60_000) * PIXELS_PER_MINUTE);
+                          return (
+                            <Pressable
+                              key={item.id}
+                              disabled={projected}
+                              onPress={(event) => {
+                                event.stopPropagation();
+                                if (projected) return;
+                                openTaskActions(item.task.id);
+                              }}
+                              style={[
+                                styles.weekBlock,
+                                compactWeekColumns && styles.weekBlockCompact,
+                                ultraCompactWeekColumns && styles.weekBlockUltraCompact,
+                                {
+                                  top,
+                                  height,
+                                  backgroundColor: projected
+                                    ? toRgba(tc.tint, isDark ? 0.18 : 0.1)
+                                    : isDark ? toRgba(tc.tint, 0.85) : tc.tint,
+                                  borderLeftColor: tc.tint,
+                                  borderStyle: projected ? 'dashed' : 'solid',
+                                },
+                                getTimedBlockInsetStyle(timedLayouts.get(`task:${item.task.id}`)),
+                              ]}
+                            >
+                              <Text style={[styles.weekTaskBlockTitle, compactWeekColumns && styles.weekTaskBlockTitleCompact, projected && { color: tc.tint }]} numberOfLines={compactWeekColumns ? 2 : 1}>{item.title}</Text>
+                              {!compactWeekColumns && (
+                                <Text style={[styles.weekTaskBlockTime, projected && { color: tc.secondaryText }]} numberOfLines={1}>
+                                  {projected ? `${formatTimeRange(start, durationMinutes)} · ${projectedDisplayLabel}` : formatTimeRange(start, durationMinutes)}
+                                </Text>
+                              )}
+                            </Pressable>
+                          );
+                        })}
+                      </View>
                     </Pressable>
                   );
                 })}
@@ -1313,7 +1528,12 @@ export function CalendarView() {
           <View style={styles.headerTopRow}>
             <View style={styles.monthTitleWrap}>
               <Text style={[styles.title, { color: tc.text }]}>{tr('calendar.scheduleResults')}</Text>
-              <Pressable onPress={handleScheduleToday} style={[styles.todayButton, { borderColor: tc.border }]}>
+              <Pressable
+                onPress={handleScheduleToday}
+                accessibilityRole="button"
+                accessibilityLabel={tr('filters.datePreset.today')}
+                style={[styles.todayButton, { borderColor: tc.border }]}
+              >
                 <Text style={[styles.todayButtonText, { color: tc.tint }]}>{tr('filters.datePreset.today')}</Text>
               </Pressable>
             </View>
@@ -1327,6 +1547,19 @@ export function CalendarView() {
           style={styles.scheduleScroll}
           contentContainerStyle={styles.scheduleContent}
           keyExtractor={(section) => section.id}
+          ListHeaderComponent={selectedDate && planningTasks.length > 0 ? (
+            <PlanningTaskList
+              getScheduleSlotLabel={getScheduleSlotLabel}
+              planningTasks={planningTasks}
+              scheduleTaskOnSelectedDate={scheduleTaskOnSelectedDate}
+              selectedDate={selectedDate}
+              selectedDatePlanningLabel={selectedDatePlanningLabel}
+              t={t}
+              tc={tc}
+              tr={tr}
+              variant="section"
+            />
+          ) : null}
           renderItem={({ item: section }) => (
             <View style={styles.scheduleSection}>
               <Text style={[styles.scheduleDate, { color: tc.secondaryText }]}>
@@ -1366,6 +1599,8 @@ export function CalendarView() {
                       <Pressable
                         key={item.id}
                         onPress={() => openExternalEvent(item.event)}
+                        accessibilityRole="button"
+                        accessibilityLabel={sourceName ? `${item.title}. ${timeLabel}. ${sourceName}` : `${item.title}. ${timeLabel}`}
                         style={eventStyle}
                       >
                         {eventContent}
@@ -1378,10 +1613,16 @@ export function CalendarView() {
                   const timeLabel = start
                     ? formatTimeRange(start, timeEstimateToMinutes(item.task.timeEstimate))
                     : t('calendar.deadline');
+                  const projectedDisplayLabel = projected
+                    ? getProjectedRecurrenceDisplayLabel(item.task, tr('calendar.projectedRecurrence'))
+                    : '';
                   return (
                     <Pressable
                       key={item.id}
                       disabled={projected}
+                      accessibilityRole="button"
+                      accessibilityLabel={projected ? `${item.title}. ${timeLabel}. ${projectedDisplayLabel}` : `${item.title}. ${timeLabel}`}
+                      accessibilityState={{ disabled: projected }}
                       style={[
                         styles.scheduleItem,
                         {
@@ -1399,7 +1640,7 @@ export function CalendarView() {
                           {item.title}
                         </Text>
                         <Text style={[styles.taskItemTime, { color: tc.secondaryText }]}>
-                          {projected ? `${timeLabel} · ${tr('calendar.projectedRecurrence')}` : timeLabel}
+                          {projected ? `${timeLabel} · ${projectedDisplayLabel}` : timeLabel}
                         </Text>
                       </View>
                     </Pressable>
@@ -1408,10 +1649,10 @@ export function CalendarView() {
               </View>
             </View>
           )}
-          ListEmptyComponent={(
+          ListEmptyComponent={planningTasks.length > 0 ? null : (
             <Text style={[styles.noTasks, { color: tc.secondaryText }]}>{t('calendar.noTasks')}</Text>
           )}
-          removeClippedSubviews
+          removeClippedSubviews={false}
         />
 
         {renderCalendarComposer()}
@@ -1434,7 +1675,12 @@ export function CalendarView() {
     <View style={[styles.container, { backgroundColor: tc.bg }]}>
       <View style={[styles.header, { backgroundColor: tc.cardBg, borderBottomColor: tc.border }]}>
         <View style={styles.headerTopRow}>
-          <Pressable onPress={handlePrevMonth} style={styles.navButton}>
+          <Pressable
+            onPress={handlePrevMonth}
+            accessibilityRole="button"
+            accessibilityLabel={tr('calendar.prevMonth')}
+            style={styles.navButton}
+          >
             <Text style={[styles.navButtonText, { color: tc.text }]}>‹</Text>
           </Pressable>
           <View style={styles.monthTitleWrap}>
@@ -1445,7 +1691,12 @@ export function CalendarView() {
               <Text style={[styles.todayButtonText, { color: tc.tint }]}>{tr('filters.datePreset.today')}</Text>
             </Pressable>
           </View>
-          <Pressable onPress={handleNextMonth} style={styles.navButton}>
+          <Pressable
+            onPress={handleNextMonth}
+            accessibilityRole="button"
+            accessibilityLabel={tr('calendar.nextMonth')}
+            style={styles.navButton}
+          >
             <Text style={[styles.navButtonText, { color: tc.text }]}>›</Text>
           </Pressable>
         </View>
@@ -1478,6 +1729,11 @@ export function CalendarView() {
               const isSelected = selectedDate && isSameDay(date, selectedDate);
               const todayCellBg = toRgba(tc.tint, isDark ? 0.12 : 0.08);
               const selectedCellBg = toRgba(tc.tint, isDark ? 0.2 : 0.16);
+              const dayAccessibilityParts = [
+                date.toLocaleDateString(locale, { weekday: 'long', month: 'long', day: 'numeric' }),
+                taskCount > 0 ? `${taskCount} ${t('common.tasks')}` : '',
+                eventCount > 0 ? `${eventCount} ${tr('calendar.events')}` : '',
+              ].filter(Boolean);
 
               return (
                 <Pressable
@@ -1489,6 +1745,9 @@ export function CalendarView() {
                     isSelected && { backgroundColor: selectedCellBg },
                   ]}
                   onPress={() => handleMonthDayPress(date)}
+                  accessibilityRole="button"
+                  accessibilityLabel={dayAccessibilityParts.join('. ')}
+                  accessibilityState={{ selected: Boolean(isSelected) }}
                 >
                   <View
                     style={[
@@ -1515,6 +1774,9 @@ export function CalendarView() {
                       {visibleItems.map((item) => {
                         const isEvent = item.kind === 'event';
                         const projected = item.kind !== 'event' && isProjectedRecurringTask(item.task);
+                        const projectedDisplayLabel = projected
+                          ? getProjectedRecurrenceDisplayLabel(item.task, tr('calendar.projectedRecurrence'))
+                          : '';
                         return (
                           <View
                             key={item.id}
@@ -1541,7 +1803,7 @@ export function CalendarView() {
                               style={[styles.monthPreviewText, { color: item.kind === 'scheduled' || projected ? tc.tint : tc.text }]}
                               numberOfLines={1}
                             >
-                              {projected ? `${item.title} · ${tr('calendar.projectedRecurrence')}` : item.title}
+                              {projected ? `${item.title} · ${projectedDisplayLabel}` : item.title}
                             </Text>
                           </View>
                         );
@@ -1586,32 +1848,27 @@ export function CalendarView() {
               <Text style={[styles.selectedDateTitle, { color: tc.text }]}>
                 {selectedDateLongLabel}
               </Text>
-              <Pressable onPress={() => openQuickAddForDate(selectedDate)} style={styles.addTaskButton}>
+              <Pressable
+                onPress={() => openQuickAddForDate(selectedDate)}
+                accessibilityRole="button"
+                accessibilityLabel={t('calendar.addTask')}
+                style={styles.addTaskButton}
+              >
                 <Text style={[styles.addTaskButtonText, { color: tc.tint }]}>{t('calendar.addTask')}</Text>
               </Pressable>
             </View>
 
-            {nextQuickScheduleCandidates.length > 0 && (
-              <View style={styles.scheduleResults}>
-                <Text style={[styles.scheduleResultsTitle, { color: tc.secondaryText }]}>{t('nav.next')}</Text>
-                {nextQuickScheduleCandidates.map((task) => {
-                  const slotLabel = getScheduleSlotLabel(selectedDate, task);
-                  return (
-                    <Pressable
-                      key={task.id}
-                      style={[styles.taskItem, { backgroundColor: tc.inputBg, borderLeftColor: tc.tint }]}
-                      onPress={() => scheduleTaskOnSelectedDate(task.id)}
-                    >
-                      <Text style={[styles.taskItemTitle, { color: tc.text }]} numberOfLines={1}>
-                        {task.title}
-                      </Text>
-                      <Text style={[styles.taskItemTime, { color: tc.secondaryText }]}>
-                        {slotLabel ? `${t('calendar.scheduleAction')} · ${slotLabel}` : t('calendar.scheduleAction')}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+            {planningTasks.length > 0 && (
+              <PlanningTaskList
+                getScheduleSlotLabel={getScheduleSlotLabel}
+                planningTasks={planningTasks}
+                scheduleTaskOnSelectedDate={scheduleTaskOnSelectedDate}
+                selectedDate={selectedDate}
+                selectedDatePlanningLabel={selectedDatePlanningLabel}
+                t={t}
+                tc={tc}
+                tr={tr}
+              />
             )}
 
             <View style={styles.addTaskForm}>
@@ -1700,6 +1957,9 @@ export function CalendarView() {
 
               {selectedDateDeadlines.map((task) => {
                 const projected = isProjectedRecurringTask(task);
+                const projectedDisplayLabel = projected
+                  ? getProjectedRecurrenceDisplayLabel(task, tr('calendar.projectedRecurrence'))
+                  : '';
                 return (
                   <View
                     key={task.id}
@@ -1723,7 +1983,7 @@ export function CalendarView() {
                         {task.title}
                       </Text>
                       <Text style={[styles.taskItemTime, { color: tc.secondaryText }]}>
-                        {projected ? `${t('calendar.deadline')} · ${tr('calendar.projectedRecurrence')}` : t('calendar.deadline')}
+                        {projected ? `${t('calendar.deadline')} · ${projectedDisplayLabel}` : t('calendar.deadline')}
                       </Text>
                     </Pressable>
                     {!projected && task.status !== 'done' && task.status !== 'archived' && (
@@ -1740,6 +2000,9 @@ export function CalendarView() {
 
               {selectedDateScheduled.map((task) => {
                 const projected = isProjectedRecurringTask(task);
+                const projectedDisplayLabel = projected
+                  ? getProjectedRecurrenceDisplayLabel(task, tr('calendar.projectedRecurrence'))
+                  : '';
                 return (
                   <Pressable
                     key={task.id}
@@ -1769,7 +2032,7 @@ export function CalendarView() {
                           const label = !isTimedScheduledTask(task)
                             ? t('calendar.allDay')
                             : `${safeFormatDate(start, 'p')}-${safeFormatDate(end, 'p')}`;
-                          return projected ? `${label} · ${tr('calendar.projectedRecurrence')}` : label;
+                          return projected ? `${label} · ${projectedDisplayLabel}` : label;
                         })()}
                       </Text>
                     </View>

@@ -88,12 +88,15 @@ function TaskEditModalInner({
         projects,
         sections,
         areas,
+        people,
         settings,
         duplicateTask,
+        promoteTaskToProject,
         resetTaskChecklist,
         addProject,
         addSection,
         addArea,
+        addPerson,
         deleteTask,
         restoreTask,
         allContexts = [],
@@ -107,12 +110,15 @@ function TaskEditModalInner({
             projects: state.projects,
             sections: state.sections,
             areas: state.areas,
+            people: state.people,
             settings: state.settings,
             duplicateTask: state.duplicateTask,
+            promoteTaskToProject: state.promoteTaskToProject,
             resetTaskChecklist: state.resetTaskChecklist,
             addProject: state.addProject,
             addSection: state.addSection,
             addArea: state.addArea,
+            addPerson: state.addPerson,
             deleteTask: state.deleteTask,
             restoreTask: state.restoreTask,
             allContexts: derived.allContexts,
@@ -122,27 +128,22 @@ function TaskEditModalInner({
         };
     }, shallow);
     const { t, language } = useLanguage();
-    const rawThemeColors = useThemeColors();
-    const tc = useMemo(() => rawThemeColors, [
-        rawThemeColors.bg,
-        rawThemeColors.border,
-        rawThemeColors.cardBg,
-        rawThemeColors.danger,
-        rawThemeColors.filterBg,
-        rawThemeColors.icon,
-        rawThemeColors.inputBg,
-        rawThemeColors.onTint,
-        rawThemeColors.secondaryText,
-        rawThemeColors.success,
-        rawThemeColors.tabIconDefault,
-        rawThemeColors.tabIconSelected,
-        rawThemeColors.taskItemBg,
-        rawThemeColors.text,
-        rawThemeColors.tint,
-        rawThemeColors.warning,
+    // useThemeColors returns a fresh object per render; rebuild from the color values so
+    // tc keeps a stable identity until an actual color changes (ThemeColors is exactly these fields).
+    const {
+        bg, border, cardBg, danger, filterBg, icon, inputBg, onTint,
+        secondaryText, success, tabIconDefault, tabIconSelected, taskItemBg, text, tint, warning,
+    } = useThemeColors();
+    const tc = useMemo(() => ({
+        bg, border, cardBg, danger, filterBg, icon, inputBg, onTint,
+        secondaryText, success, tabIconDefault, tabIconSelected, taskItemBg, text, tint, warning,
+    }), [
+        bg, border, cardBg, danger, filterBg, icon, inputBg, onTint,
+        secondaryText, success, tabIconDefault, tabIconSelected, taskItemBg, text, tint, warning,
     ]);
     const prioritiesEnabled = settings.features?.priorities !== false;
     const timeEstimatesEnabled = settings.features?.timeEstimates !== false;
+    const timeSpentEnabled = settings.features?.pomodoro === true && settings.gtd?.pomodoro?.linkTask === true;
     const resetCopilotStateRef = useRef<() => void>(() => {});
     const descriptionToolbarInteractionUntilRef = useRef(0);
     const {
@@ -304,8 +305,8 @@ function TaskEditModalInner({
         tagTokenUsage,
     });
     const assignedToSuggestions = useMemo(
-        () => getAssignedToSuggestions(tasks, String(editedTask.assignedTo ?? ''), MAX_VISIBLE_SUGGESTIONS),
-        [editedTask.assignedTo, tasks]
+        () => getAssignedToSuggestions(tasks, String(editedTask.assignedTo ?? ''), MAX_VISIBLE_SUGGESTIONS, people),
+        [editedTask.assignedTo, people, tasks]
     );
 
     const closeAIModal = () => setAiModal(null);
@@ -317,7 +318,7 @@ function TaskEditModalInner({
         titleDraftRef.current = text;
         setTitleDraft(text);
         setEditedTask((prev) => ({ ...prev, title: text }));
-    }, [setEditedTask]);
+    }, [setEditedTask, setTitleDraft, titleDebounceRef, titleDraftRef]);
     const handleTitleDraftChange = useCallback((text: string) => {
         titleDraftRef.current = text;
         setTitleDraft(text);
@@ -328,7 +329,7 @@ function TaskEditModalInner({
         titleDebounceRef.current = setTimeout(() => {
             setEditedTask((prev) => ({ ...prev, title: text }));
         }, 250);
-    }, [resetCopilotDraft, setEditedTask]);
+    }, [resetCopilotDraft, setEditedTask, setTitleDraft, titleDebounceRef, titleDraftRef]);
     const {
         activeProjectId,
         availableStatusOptions,
@@ -369,25 +370,25 @@ function TaskEditModalInner({
     });
     const isReference = (editedTask.status ?? task?.status) === 'reference';
 
+    const editedTaskProjectId = getEditedTaskValue(editedTask, task, 'projectId');
+    const editedTaskSectionId = getEditedTaskValue(editedTask, task, 'sectionId');
     useEffect(() => {
-        const projectId = getEditedTaskValue(editedTask, task, 'projectId');
-        const sectionId = getEditedTaskValue(editedTask, task, 'sectionId');
-        if (!sectionId) return;
-        if (!projectId) {
+        if (!editedTaskSectionId) return;
+        if (!editedTaskProjectId) {
             setEditedTask(prev => ({ ...prev, sectionId: undefined }));
             return;
         }
-        const isValid = sections.some((section) => section.id === sectionId && section.projectId === projectId && !section.deletedAt);
+        const isValid = sections.some((section) => section.id === editedTaskSectionId && section.projectId === editedTaskProjectId && !section.deletedAt);
         if (!isValid) {
             setEditedTask(prev => ({ ...prev, sectionId: undefined }));
         }
-    }, [editedTask.projectId, editedTask.sectionId, sections, setEditedTask, task?.projectId, task?.sectionId]);
+    }, [editedTaskProjectId, editedTaskSectionId, sections, setEditedTask]);
 
     useEffect(() => {
         if (!activeProjectId) {
             setShowSectionPicker(false);
         }
-    }, [activeProjectId]);
+    }, [activeProjectId, setShowSectionPicker]);
 
     const {
         applyQuickDate,
@@ -419,6 +420,8 @@ function TaskEditModalInner({
     const [customOrdinal, setCustomOrdinal] = useState<'1' | '2' | '3' | '4' | '-1'>('1');
     const [customWeekday, setCustomWeekday] = useState<RecurrenceWeekday>(monthlyWeekdayCode);
     const [customMonthDay, setCustomMonthDay] = useState<number>(monthlyAnchorDate.getDate());
+    const [waitingAssignmentModalVisible, setWaitingAssignmentModalVisible] = useState(false);
+    const [waitingAssignmentInput, setWaitingAssignmentInput] = useState('');
     const [isTitleInputFocused, setIsTitleInputFocused] = useState(false);
 
     const openCustomRecurrence = useCallback(() => {
@@ -515,11 +518,11 @@ function TaskEditModalInner({
     const updateContextInput = useCallback((text: string) => {
         setContextInputDraft(text);
         setEditedTask((prev) => ({ ...prev, contexts: parseTokenList(text, '@') }));
-    }, [setEditedTask]);
+    }, [setContextInputDraft, setEditedTask]);
     const updateTagInput = useCallback((text: string) => {
         setTagInputDraft(text);
         setEditedTask((prev) => ({ ...prev, tags: parseTokenList(text, '#') }));
-    }, [setEditedTask]);
+    }, [setEditedTask, setTagInputDraft]);
     const applyContextSuggestion = useCallback((token: string) => {
         updateContextInput(replaceTrailingToken(contextInputDraft, token));
     }, [contextInputDraft, updateContextInput]);
@@ -529,6 +532,30 @@ function TaskEditModalInner({
     const applyAssignedToSuggestion = useCallback((assignedTo: string) => {
         setEditedTask((prev) => ({ ...prev, assignedTo }));
     }, [setEditedTask]);
+    const createAssignedToPerson = useCallback(async (name: string) => {
+        const created = await addPerson(name);
+        if (created) {
+            setEditedTask((prev) => ({ ...prev, assignedTo: created.name }));
+        }
+        return created;
+    }, [addPerson, setEditedTask]);
+    const closeWaitingAssignmentModal = useCallback(() => {
+        setWaitingAssignmentModalVisible(false);
+    }, []);
+    const confirmWaitingAssignment = useCallback(() => {
+        const assignedTo = waitingAssignmentInput.trim() || undefined;
+        setEditedTask((prev) => ({ ...prev, status: 'waiting', assignedTo }));
+        setWaitingAssignmentModalVisible(false);
+    }, [setEditedTask, waitingAssignmentInput]);
+    const requestStatusChange = useCallback((status: TaskStatus) => {
+        const currentStatus = editedTask.status ?? task?.status;
+        if (status === 'waiting' && currentStatus !== 'waiting') {
+            setWaitingAssignmentInput(String(editedTask.assignedTo ?? task?.assignedTo ?? ''));
+            setWaitingAssignmentModalVisible(true);
+            return;
+        }
+        setEditedTask((prev) => ({ ...prev, status }));
+    }, [editedTask.assignedTo, editedTask.status, setEditedTask, task?.assignedTo, task?.status]);
     const toggleQuickContextToken = useCallback((token: string) => {
         const next = new Set(parseTokenList(contextInputDraft, '@'));
         if (next.has(token)) {
@@ -550,11 +577,11 @@ function TaskEditModalInner({
     const commitContextDraft = useCallback(() => {
         setIsContextInputFocused(false);
         updateContextInput(parseTokenList(contextInputDraft, '@').join(', '));
-    }, [contextInputDraft, updateContextInput]);
+    }, [contextInputDraft, setIsContextInputFocused, updateContextInput]);
     const commitTagDraft = useCallback(() => {
         setIsTagInputFocused(false);
         updateTagInput(parseTokenList(tagInputDraft, '#').join(', '));
-    }, [tagInputDraft, updateTagInput]);
+    }, [setIsTagInputFocused, tagInputDraft, updateTagInput]);
 
     const {
         applyChecklistUpdate,
@@ -565,12 +592,11 @@ function TaskEditModalInner({
         handleDeleteTask,
         handleDone,
         handleDuplicateTask,
+        handlePromoteTaskToProject,
         handleResetChecklist,
         handleShare,
     } = useTaskEditActions({
-        addProject,
         aiEnabled,
-        areas,
         baseTaskRef,
         closeAIModal,
         contextInputDraft,
@@ -580,6 +606,7 @@ function TaskEditModalInner({
         descriptionDraft,
         descriptionDraftRef,
         duplicateTask,
+        promoteTaskToProject,
         editedTask,
         formatDate,
         formatDueDate,
@@ -591,8 +618,6 @@ function TaskEditModalInner({
         onSave,
         prioritiesEnabled,
         projectContext,
-        projectFilterAreaId,
-        projects,
         recurrenceRuleValue,
         recurrenceRRuleValue,
         recurrenceStrategyValue,
@@ -600,7 +625,6 @@ function TaskEditModalInner({
         restoreTask,
         sections,
         setAiModal,
-        setDescriptionDraft,
         setEditedTask,
         setIsAIWorking,
         setTitleImmediate,
@@ -650,6 +674,7 @@ function TaskEditModalInner({
         commitTagDraft,
         contextInputDraft,
         contextTokenSuggestions,
+        createAssignedToPerson,
         customWeekdays,
         dailyInterval,
         descriptionDraft,
@@ -694,6 +719,7 @@ function TaskEditModalInner({
         recurrenceRuleValue,
         recurrenceStrategyValue,
         recurrenceWeekdayButtons,
+        requestStatusChange,
         removeAttachment,
         selectedContextTokens,
         selectedTagTokens,
@@ -718,6 +744,7 @@ function TaskEditModalInner({
         tc,
         timeEstimateOptions,
         timeEstimatesEnabled,
+        timeSpentEnabled,
         titleDraft,
         toggleQuickContextToken,
         toggleQuickTagToken,
@@ -729,6 +756,7 @@ function TaskEditModalInner({
         addImageAttachment,
         applyAssignedToSuggestion,
         applyContextSuggestion,
+        applyQuickDate,
         applyTagSuggestion,
         areas,
         assignedToSuggestions,
@@ -737,6 +765,7 @@ function TaskEditModalInner({
         commitTagDraft,
         contextInputDraft,
         contextTokenSuggestions,
+        createAssignedToPerson,
         customWeekdays,
         dailyInterval,
         descriptionDraft,
@@ -780,6 +809,7 @@ function TaskEditModalInner({
         recurrenceRuleValue,
         recurrenceStrategyValue,
         recurrenceWeekdayButtons,
+        requestStatusChange,
         removeAttachment,
         selectedContextTokens,
         selectedTagTokens,
@@ -796,7 +826,6 @@ function TaskEditModalInner({
         setShowSectionPicker,
         showDatePicker,
         showDescriptionPreview,
-        styles,
         tagInputDraft,
         tagTokenSuggestions,
         task,
@@ -804,6 +833,7 @@ function TaskEditModalInner({
         tc,
         timeEstimateOptions,
         timeEstimatesEnabled,
+        timeSpentEnabled,
         titleDraft,
         toggleQuickContextToken,
         toggleQuickTagToken,
@@ -815,8 +845,8 @@ function TaskEditModalInner({
         <TaskEditFieldRenderer fieldId={fieldId} {...fieldRendererProps} />
     ), [fieldRendererProps]);
     const handleViewStatusUpdate = useCallback((status: TaskStatus) => {
-        setEditedTask((prev) => ({ ...prev, status }));
-    }, [setEditedTask]);
+        requestStatusChange(status);
+    }, [requestStatusChange]);
     const isTaskFormTextInputFocused = isTitleInputFocused
         || descriptionEditor.isDescriptionInputFocused
         || isContextInputFocused
@@ -839,10 +869,10 @@ function TaskEditModalInner({
                     edges={['top']}
                 >
                     <TaskEditHeader
-                        title={String(titleDraft || editedTask.title || '').trim() || t('taskEdit.title')}
                         onDone={handleDone}
                         onShare={handleShare}
                         onDuplicate={handleDuplicateTask}
+                        onPromoteToProject={handlePromoteTaskToProject}
                         onDelete={handleDeleteTask}
                         onConvertToReference={handleConvertToReference}
                         showConvertToReference={!isReference}
@@ -997,10 +1027,16 @@ function TaskEditModalInner({
                         showProjectPicker={showProjectPicker}
                         showSectionPicker={showSectionPicker}
                         styles={styles}
+                        task={task}
                         t={t}
                         tc={tc}
                         retryAudioTranscription={retryAudioTranscription}
                         toggleAudioPlayback={toggleAudioPlayback}
+                        waitingAssignmentInput={waitingAssignmentInput}
+                        waitingAssignmentModalVisible={waitingAssignmentModalVisible}
+                        closeWaitingAssignmentModal={closeWaitingAssignmentModal}
+                        confirmWaitingAssignment={confirmWaitingAssignment}
+                        setWaitingAssignmentInput={setWaitingAssignmentInput}
                         DEFAULT_PROJECT_COLOR={DEFAULT_PROJECT_COLOR}
                     />
                     <MarkdownFormatToolbar

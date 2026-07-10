@@ -4,6 +4,14 @@ import { ClipboardCheck, X } from 'lucide-react-native';
 import { tFallback, type TaskStatus } from '@mindwtr/core';
 
 import { styles } from './task-list.styles';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
+
+export const BULK_MOVE_STATUS_ORDER: TaskStatus[] = ['inbox', 'next', 'waiting', 'someday', 'done', 'reference'];
+
+export function getBulkMoveStatusOptions(currentStatus?: TaskStatus | 'all'): TaskStatus[] {
+  if (!currentStatus || currentStatus === 'all') return BULK_MOVE_STATUS_ORDER;
+  return BULK_MOVE_STATUS_ORDER.filter((status) => status !== currentStatus);
+}
 
 type ThemeColors = {
   border: string;
@@ -15,7 +23,7 @@ type ThemeColors = {
   tint: string;
 };
 
-type TaskListBulkBarProps = {
+export type TaskListBulkBarProps = {
   bulkActionLabel: string;
   bulkActionLoading: boolean;
   handleBatchDelete: () => void;
@@ -27,6 +35,7 @@ type TaskListBulkBarProps = {
   onOpenTagModal: () => void;
   rangeSelectMode: boolean;
   selectedCount: number;
+  statusOptions?: readonly TaskStatus[];
   t: (key: string) => string;
   themeColors: ThemeColors;
 };
@@ -43,13 +52,17 @@ export function TaskListBulkBar({
   onOpenTagModal,
   rangeSelectMode,
   selectedCount,
+  statusOptions,
   t,
   themeColors,
 }: TaskListBulkBarProps) {
+  const filledButton = useFilledButtonColors();
   const rangeLabel = rangeSelectMode
     ? tFallback(t, 'bulk.selectRangeActive', 'Pick end')
     : tFallback(t, 'bulk.selectRange', 'Range');
   const canSelectRange = hasSelection && !bulkActionLoading;
+  const moveStatusOptions = statusOptions ?? BULK_MOVE_STATUS_ORDER;
+  const deleteLabel = tFallback(t, 'common.delete', 'Delete');
 
   return (
     <View style={[styles.bulkBar, { backgroundColor: themeColors.cardBg, borderBottomColor: themeColors.border }]}>
@@ -81,7 +94,7 @@ export function TaskListBulkBar({
         </View>
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bulkMoveRow}>
-        {(['inbox', 'next', 'waiting', 'someday', 'reference', 'done'] as TaskStatus[]).map((status) => (
+        {moveStatusOptions.map((status) => (
           <TouchableOpacity
             key={status}
             onPress={() => handleBatchMove(status)}
@@ -99,12 +112,12 @@ export function TaskListBulkBar({
           <TouchableOpacity
             onPress={onOpenOrganize}
             disabled={!hasSelection || bulkActionLoading}
-            style={[styles.bulkActionButton, { backgroundColor: themeColors.tint, opacity: hasSelection && !bulkActionLoading ? 1 : 0.5 }]}
+            style={[styles.bulkActionButton, { backgroundColor: filledButton.backgroundColor, opacity: hasSelection && !bulkActionLoading ? 1 : 0.5 }]}
             accessibilityRole="button"
-            accessibilityLabel={tFallback(t, 'bulk.organizeInbox', 'Bulk organize Inbox')}
+            accessibilityLabel={tFallback(t, 'bulk.organize', 'Bulk organize')}
           >
-            <ClipboardCheck size={14} color={themeColors.onTint} />
-            <Text style={[styles.bulkActionText, { color: themeColors.onTint }]}>
+            <ClipboardCheck size={14} color={filledButton.textColor ?? themeColors.onTint} />
+            <Text style={[styles.bulkActionText, { color: filledButton.textColor ?? themeColors.onTint }]}>
               {tFallback(t, 'bulk.organize', 'Bulk organize')}
             </Text>
           </TouchableOpacity>
@@ -142,9 +155,9 @@ export function TaskListBulkBar({
           disabled={!hasSelection || bulkActionLoading}
           style={[styles.bulkActionButton, { backgroundColor: themeColors.filterBg, opacity: hasSelection && !bulkActionLoading ? 1 : 0.5 }]}
           accessibilityRole="button"
-          accessibilityLabel={t('bulk.delete')}
+          accessibilityLabel={deleteLabel}
         >
-          <Text style={[styles.bulkActionText, { color: themeColors.text }]}>{t('bulk.delete')}</Text>
+          <Text style={[styles.bulkActionText, { color: themeColors.text }]}>{deleteLabel}</Text>
         </TouchableOpacity>
       </View>
     </View>

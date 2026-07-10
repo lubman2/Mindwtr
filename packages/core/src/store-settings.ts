@@ -3,8 +3,10 @@ import { logWarn } from './logger';
 import { purgeExpiredTombstones } from './sync';
 import { markCoreStartupPhase, measureCoreStartupPhase } from './startup-profiler';
 import { normalizeTaskForLoad } from './task-status';
+import { dedupeLiveAreasByName } from './area-utils';
 import type { StorageAdapter } from './storage';
 import type { AppData, Area, MigrationSettings, Project, Task, TaskEditorFieldId } from './types';
+import { normalizePeopleForLoad } from './people';
 import type { DerivedCache, StoreActionResult, TaskStore } from './store-types';
 import {
     buildSaveSnapshot,
@@ -20,6 +22,7 @@ import {
     reconcileEntityCollection,
     reuseArrayIfShallowEqual,
     selectVisibleAreas,
+    selectVisiblePeople,
     selectVisibleProjects,
     selectVisibleSections,
     selectVisibleTasks,
@@ -33,6 +36,7 @@ const MIGRATION_VERSION = 1;
 const AUTO_ARCHIVE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const TOMBSTONE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const TASK_EDITOR_DEFAULTS_VERSION = 5;
+const FOCUS_GROUP_BY_DEFAULTS_VERSION = 1;
 const TASK_EDITOR_LEAN_DEFAULT_HIDDEN: TaskEditorFieldId[] = [
     'section',
     'priority',
@@ -68,6 +72,64 @@ export const clearDerivedCache = () => {
 };
 
 const settingsValueChanged = (left: unknown, right: unknown): boolean => JSON.stringify(left ?? null) !== JSON.stringify(right ?? null);
+
+const getAutoArchiveDays = (settings: AppData['settings']): number => {
+    const configuredArchiveDays = settings.gtd?.autoArchiveDays;
+    return Number.isFinite(configuredArchiveDays)
+        ? Math.max(0, Math.floor(configuredArchiveDays as number))
+        : 7;
+};
+
+const autoArchiveStaleCompletedTasks = (
+    tasks: Task[],
+    settings: AppData['settings'],
+    context: { nowIso: string; nowMs: number; deviceId: string; enabled?: boolean }
+): { tasks: Task[]; didAutoArchive: boolean } => {
+    const archiveDays = getAutoArchiveDays(settings);
+    if (context.enabled === false || archiveDays <= 0) {
+        return { tasks, didAutoArchive: false };
+    }
+
+    const cutoffMs = context.nowMs - archiveDays * 24 * 60 * 60 * 1000;
+    let didAutoArchive = false;
+    const archivedTasks = tasks.map((task): Task => {
+        if (task.deletedAt) return task;
+        if (task.status !== 'done') return task;
+        const completedAt = safeParseDate(task.completedAt)?.getTime() ?? NaN;
+        const updatedAt = safeParseDate(task.updatedAt)?.getTime() ?? NaN;
+        const resolvedCompletedAt = Number.isFinite(completedAt) ? completedAt : updatedAt;
+        if (!Number.isFinite(resolvedCompletedAt) || resolvedCompletedAt <= 0) return task;
+        if (resolvedCompletedAt >= cutoffMs) return task;
+        didAutoArchive = true;
+        return {
+            ...task,
+            status: 'archived' as const,
+            completedAt: Number.isFinite(completedAt) ? task.completedAt : task.updatedAt || context.nowIso,
+            isFocusedToday: false,
+            updatedAt: context.nowIso,
+            rev: nextRevision(task.rev),
+            revBy: context.deviceId,
+        };
+    });
+
+    return {
+        tasks: didAutoArchive ? archivedTasks : tasks,
+        didAutoArchive,
+    };
+};
+
+const runAutoArchive = (
+    tasks: Task[],
+    settings: AppData['settings'],
+    context: { nowIso: string; nowMs: number; deviceId: string; enabled?: boolean }
+): { allTasks: Task[]; visibleTasks?: Task[]; didAutoArchive: boolean } => {
+    const result = autoArchiveStaleCompletedTasks(tasks, settings, context);
+    return {
+        allTasks: result.tasks,
+        visibleTasks: result.didAutoArchive ? selectVisibleTasks(result.tasks) : undefined,
+        didAutoArchive: result.didAutoArchive,
+    };
+};
 
 const mergeSettingsUpdates = (
     settings: AppData['settings'],
@@ -542,16 +604,21 @@ export const createSettingsActions = ({
         }
         const fetchStartedAt = get().lastDataChangeAt;
         try {
-            const storage = getStorage();
-            const data = await measureCoreStartupPhase('core.fetch_data.storage_get_data', async () =>
-                withTimeout(storage.getData(), STORAGE_TIMEOUT_MS, 'Storage request timed out')
-            );
+            // A preloaded snapshot must already be durably persisted (e.g. the merged
+            // document sync just wrote); it skips the storage read but runs the exact
+            // same load pipeline, and the lastDataChangeAt guard below still discards
+            // it if local edits landed in the meantime.
+            const data = options?.preloadedData
+                ?? await measureCoreStartupPhase('core.fetch_data.storage_get_data', async () =>
+                    withTimeout(getStorage().getData(), STORAGE_TIMEOUT_MS, 'Storage request timed out')
+                );
             const postProcessStartedAt = Date.now();
             markCoreStartupPhase('core.fetch_data.post_process:start');
             const rawTasks = Array.isArray(data.tasks) ? data.tasks : [];
             const rawProjects = Array.isArray(data.projects) ? data.projects : [];
             const rawSettings = data.settings && typeof data.settings === 'object' ? data.settings : {};
             const rawSections = Array.isArray((data as AppData).sections) ? (data as AppData).sections : [];
+            const rawPeople = Array.isArray((data as AppData).people) ? (data as AppData).people ?? [] : [];
             // Store ALL data including tombstones for persistence
             const nowIso = new Date().toISOString();
             let didNormalizeAreaTimestamps = false;
@@ -569,6 +636,7 @@ export const createSettingsActions = ({
                 rawProjects.length === 0 &&
                 rawSections.length === 0 &&
                 rawAreas.length === 0 &&
+                rawPeople.length === 0 &&
                 Object.keys(settings).length === 0;
             const migrations: MigrationSettings = settings.migrations ?? {};
             const shouldRunMigrations = (migrations.version ?? 0) < MIGRATION_VERSION;
@@ -637,6 +705,31 @@ export const createSettingsActions = ({
                 didSettingsUpdate = true;
             }
 
+            const focusGroupByDefaultsVersion = nextSettings.gtd?.focusGroupByDefaultsVersion ?? 0;
+            if (focusGroupByDefaultsVersion < FOCUS_GROUP_BY_DEFAULTS_VERSION) {
+                const nextGtd = {
+                    ...(nextSettings.gtd ?? {}),
+                    focusGroupByDefaultsVersion: FOCUS_GROUP_BY_DEFAULTS_VERSION,
+                };
+                const didMigrateLegacyContextDefault = nextGtd.focusGroupBy === 'context';
+                if (didMigrateLegacyContextDefault) {
+                    nextGtd.focusGroupBy = 'none';
+                }
+                nextSettings = {
+                    ...nextSettings,
+                    gtd: nextGtd,
+                    ...(didMigrateLegacyContextDefault
+                        ? {
+                            syncPreferencesUpdatedAt: {
+                                ...(nextSettings.syncPreferencesUpdatedAt ?? {}),
+                                gtd: nowIso,
+                            },
+                        }
+                        : {}),
+                };
+                didSettingsUpdate = true;
+            }
+
             let didClearDeletedProjectArchiveMetadata = false;
             let allTasks = rawTasks
                 .map((task) => normalizeTaskForLoad(task, nowIso))
@@ -662,40 +755,76 @@ export const createSettingsActions = ({
             });
 
             // Auto-archive stale completed items to keep day-to-day UI fast/clean.
-            const configuredArchiveDays = settings.gtd?.autoArchiveDays;
-            const archiveDays = Number.isFinite(configuredArchiveDays)
-                ? Math.max(0, Math.floor(configuredArchiveDays as number))
-                : 7;
-            const shouldAutoArchive = archiveDays > 0;
-            const cutoffMs = shouldAutoArchive ? Date.now() - archiveDays * 24 * 60 * 60 * 1000 : 0;
-            let didAutoArchive = false;
-            if (shouldAutoArchive && shouldRunAutoArchive) {
+            const autoArchiveResult = runAutoArchive(allTasks, settings, {
+                nowIso,
+                nowMs,
+                deviceId: deviceState.deviceId,
+                enabled: shouldRunAutoArchive,
+            });
+            allTasks = autoArchiveResult.allTasks;
+            const didAutoArchive = autoArchiveResult.didAutoArchive;
+            const peopleLoadResult = normalizePeopleForLoad(rawPeople, allTasks, nowIso, nextSettings.deviceId);
+            let allPeople = peopleLoadResult.people;
+            const didPeopleMigration = peopleLoadResult.didChange;
+            let didProjectOrderMigration = false;
+            let didAreaMigration = didNormalizeAreaTimestamps;
+            let allProjects = rawProjects;
+            let allSections = rawSections;
+            let allAreas = rawAreas;
+
+            const remapAreaReferences = (areaIdRemap: Map<string, string>) => {
+                if (areaIdRemap.size === 0) return;
+                const liveAreaById = new Map(
+                    allAreas
+                        .filter((area) => !area.deletedAt)
+                        .map((area) => [area.id, area] as const)
+                );
+                allProjects = allProjects.map((project) => {
+                    const remappedAreaId = project.areaId ? areaIdRemap.get(project.areaId) : undefined;
+                    if (!remappedAreaId || remappedAreaId === project.areaId) return project;
+                    const remappedArea = liveAreaById.get(remappedAreaId);
+                    didAreaMigration = true;
+                    return {
+                        ...project,
+                        areaId: remappedAreaId,
+                        areaTitle: remappedArea?.name ?? project.areaTitle,
+                        updatedAt: nowIso,
+                        rev: nextRevision(project.rev),
+                        revBy: nextSettings.deviceId,
+                    };
+                });
                 allTasks = allTasks.map((task) => {
-                    if (task.deletedAt) return task;
-                    if (task.status !== 'done') return task;
-                    const completedAt = safeParseDate(task.completedAt)?.getTime() ?? NaN;
-                    const updatedAt = safeParseDate(task.updatedAt)?.getTime() ?? NaN;
-                    const resolvedCompletedAt = Number.isFinite(completedAt) ? completedAt : updatedAt;
-                    if (!Number.isFinite(resolvedCompletedAt) || resolvedCompletedAt <= 0) return task;
-                    if (resolvedCompletedAt >= cutoffMs) return task;
-                    didAutoArchive = true;
+                    const remappedAreaId = task.areaId ? areaIdRemap.get(task.areaId) : undefined;
+                    if (!remappedAreaId || remappedAreaId === task.areaId) return task;
+                    didAreaMigration = true;
                     return {
                         ...task,
-                        status: 'archived',
-                        completedAt: Number.isFinite(completedAt) ? task.completedAt : task.updatedAt || nowIso,
-                        isFocusedToday: false,
+                        areaId: task.projectId ? undefined : remappedAreaId,
                         updatedAt: nowIso,
                         rev: nextRevision(task.rev),
                         revBy: nextSettings.deviceId,
                     };
                 });
-            }
-            let didProjectOrderMigration = false;
-            let didAreaMigration = didNormalizeAreaTimestamps;
-            let didRunAreaDedupePass = false;
-            let allProjects = rawProjects;
-            let allSections = rawSections;
-            let allAreas = rawAreas;
+                const configuredDefaultAreaId = nextSettings.gtd?.defaultAreaId;
+                const remappedDefaultAreaId = typeof configuredDefaultAreaId === 'string'
+                    ? areaIdRemap.get(configuredDefaultAreaId)
+                    : undefined;
+                if (remappedDefaultAreaId && remappedDefaultAreaId !== configuredDefaultAreaId) {
+                    nextSettings = {
+                        ...nextSettings,
+                        gtd: {
+                            ...(nextSettings.gtd ?? {}),
+                            defaultAreaId: remappedDefaultAreaId,
+                        },
+                        syncPreferencesUpdatedAt: {
+                            ...(nextSettings.syncPreferencesUpdatedAt ?? {}),
+                            gtd: nowIso,
+                        },
+                    };
+                    didAreaMigration = true;
+                    didSettingsUpdate = true;
+                }
+            };
 
             if (shouldRunMigrations) {
                 allProjects = rawProjects.map((project) => {
@@ -743,49 +872,14 @@ export const createSettingsActions = ({
                     }
                     if (hasLegacyAreaTitle && hasMissingAreaId) break;
                 }
-                const nameSet = new Set<string>();
-                let hasDuplicateNames = false;
-                for (const area of allAreas) {
-                    if (area.deletedAt) continue;
-                    const normalizedName = typeof area?.name === 'string' ? area.name.trim().toLowerCase() : '';
-                    if (!normalizedName) continue;
-                    if (nameSet.has(normalizedName)) {
-                        hasDuplicateNames = true;
-                        break;
-                    }
-                    nameSet.add(normalizedName);
-                }
-                const shouldRunAreaMigration = hasLegacyAreaTitle || hasMissingAreaId || hasDuplicateNames;
+                const shouldRunAreaMigration = hasLegacyAreaTitle || hasMissingAreaId;
                 if (shouldRunAreaMigration) {
-                    didRunAreaDedupePass = true;
                     const areaByName = new Map<string, string>();
-                    const areaIdRemap = new Map<string, string>();
-                    const uniqueAreas: Area[] = [];
                     allAreas.forEach((area) => {
-                        if (area.deletedAt) {
-                            uniqueAreas.push(area);
-                            return;
-                        }
+                        if (area.deletedAt) return;
                         const normalizedName = typeof area?.name === 'string' ? area.name.trim().toLowerCase() : '';
-                        if (!normalizedName) {
-                            uniqueAreas.push(area);
-                            return;
-                        }
-                        const existingId = areaByName.get(normalizedName);
-                        if (existingId) {
-                            areaIdRemap.set(area.id, existingId);
-                            didAreaMigration = true;
-                            return;
-                        }
-                        areaByName.set(normalizedName, area.id);
-                        uniqueAreas.push(area);
+                        if (normalizedName && !areaByName.has(normalizedName)) areaByName.set(normalizedName, area.id);
                     });
-                    allAreas = uniqueAreas
-                        .map((area, index) => ({
-                            ...area,
-                            order: Number.isFinite(area.order) ? area.order : index,
-                        }))
-                        .sort((a, b) => a.order - b.order);
                     const ensureAreaForTitle = (title: string) => {
                         const trimmed = title.trim();
                         if (!trimmed) return undefined;
@@ -803,11 +897,6 @@ export const createSettingsActions = ({
                     const areaIdExists = (areaId?: string) =>
                         Boolean(areaId && allAreas.some((area) => area.id === areaId && !area.deletedAt));
                     allProjects = allProjects.map((project) => {
-                        const remappedAreaId = project.areaId ? areaIdRemap.get(project.areaId) : undefined;
-                        if (remappedAreaId && remappedAreaId !== project.areaId) {
-                            didAreaMigration = true;
-                            return { ...project, areaId: remappedAreaId };
-                        }
                         if (areaIdExists(project.areaId)) return project;
                         const areaTitle = typeof project.areaTitle === 'string' ? project.areaTitle : '';
                         if (!areaTitle) return project;
@@ -816,14 +905,6 @@ export const createSettingsActions = ({
                         didAreaMigration = true;
                         return { ...project, areaId: derivedId };
                     });
-                    if (areaIdRemap.size > 0) {
-                        allTasks = allTasks.map((task) => {
-                            const remappedAreaId = task.areaId ? areaIdRemap.get(task.areaId) : undefined;
-                            if (!remappedAreaId || remappedAreaId === task.areaId) return task;
-                            didAreaMigration = true;
-                            return { ...task, areaId: remappedAreaId };
-                        });
-                    }
                     allAreas = allAreas
                         .map((area, index) => ({
                             ...area,
@@ -832,47 +913,19 @@ export const createSettingsActions = ({
                         .sort((a, b) => a.order - b.order);
                 }
             }
-            if (!didRunAreaDedupePass) {
-                const areaByName = new Map<string, string>();
-                const areaIdRemap = new Map<string, string>();
-                const uniqueAreas: Area[] = [];
-                allAreas.forEach((area) => {
-                    if (area.deletedAt) {
-                        uniqueAreas.push(area);
-                        return;
-                    }
-                    const normalizedName = typeof area?.name === 'string' ? area.name.trim().toLowerCase() : '';
-                    if (!normalizedName) {
-                        uniqueAreas.push(area);
-                        return;
-                    }
-                    const existingId = areaByName.get(normalizedName);
-                    if (existingId) {
-                        areaIdRemap.set(area.id, existingId);
-                        return;
-                    }
-                    areaByName.set(normalizedName, area.id);
-                    uniqueAreas.push(area);
-                });
-                if (areaIdRemap.size > 0) {
-                    didAreaMigration = true;
-                    allAreas = uniqueAreas
-                        .map((area, index) => ({
-                            ...area,
-                            order: Number.isFinite(area.order) ? area.order : index,
-                        }))
-                        .sort((a, b) => a.order - b.order);
-                    allProjects = allProjects.map((project) => {
-                        const remappedAreaId = project.areaId ? areaIdRemap.get(project.areaId) : undefined;
-                        if (!remappedAreaId || remappedAreaId === project.areaId) return project;
-                        return { ...project, areaId: remappedAreaId };
-                    });
-                    allTasks = allTasks.map((task) => {
-                        const remappedAreaId = task.areaId ? areaIdRemap.get(task.areaId) : undefined;
-                        if (!remappedAreaId || remappedAreaId === task.areaId) return task;
-                        return { ...task, areaId: remappedAreaId };
-                    });
-                }
+            const dedupedAreas = dedupeLiveAreasByName(allAreas, {
+                nowIso,
+                revBy: nextSettings.deviceId,
+            });
+            if (dedupedAreas.changed) {
+                allAreas = dedupedAreas.areas
+                    .map((area, index) => ({
+                        ...area,
+                        order: Number.isFinite(area.order) ? area.order : index,
+                    }))
+                    .sort((a, b) => a.order - b.order);
+                didAreaMigration = true;
+                remapAreaReferences(dedupedAreas.areaIdRemap);
             }
             let didCompleteTasksForArchivedProjects = false;
             let didArchiveSectionsForArchivedProjects = false;
@@ -977,6 +1030,7 @@ export const createSettingsActions = ({
                         projects: allProjects,
                         sections: allSections,
                         areas: allAreas,
+                        people: allPeople,
                         settings: nextSettings,
                     },
                     nowIso
@@ -985,12 +1039,14 @@ export const createSettingsActions = ({
                 allProjects = cleanup.data.projects;
                 allSections = cleanup.data.sections;
                 allAreas = cleanup.data.areas;
+                allPeople = cleanup.data.people ?? [];
                 nextSettings = cleanup.data.settings;
                 if (
                     cleanup.removedTaskTombstones > 0
                     || cleanup.removedProjectTombstones > 0
                     || cleanup.removedSectionTombstones > 0
                     || cleanup.removedAreaTombstones > 0
+                    || cleanup.removedPersonTombstones > 0
                     || cleanup.removedAttachmentTombstones > 0
                     || cleanup.removedSavedFilterTombstones > 0
                 ) {
@@ -1003,6 +1059,7 @@ export const createSettingsActions = ({
                             removedProjectTombstones: cleanup.removedProjectTombstones,
                             removedSectionTombstones: cleanup.removedSectionTombstones,
                             removedAreaTombstones: cleanup.removedAreaTombstones,
+                            removedPersonTombstones: cleanup.removedPersonTombstones,
                             removedAttachmentTombstones: cleanup.removedAttachmentTombstones,
                             removedSavedFilterTombstones: cleanup.removedSavedFilterTombstones,
                         },
@@ -1021,24 +1078,29 @@ export const createSettingsActions = ({
                     const nextProjects = reconcileEntityCollection(state._allProjects, state._projectsById, allProjects);
                     const nextSections = reconcileEntityCollection(state._allSections, state._sectionsById, allSections);
                     const nextAreas = reconcileEntityCollection(state._allAreas, state._areasById, allAreas);
+                    const nextPeople = reconcileEntityCollection(state._allPeople, state._peopleById, allPeople);
                     const visibleTasks = reuseArrayIfShallowEqual(state.tasks, selectVisibleTasks(nextTasks.items));
                     const visibleProjects = reuseArrayIfShallowEqual(state.projects, selectVisibleProjects(nextProjects.items));
                     const visibleSections = reuseArrayIfShallowEqual(state.sections, selectVisibleSections(nextSections.items));
                     const visibleAreas = reuseArrayIfShallowEqual(state.areas, selectVisibleAreas(nextAreas.items));
+                    const visiblePeople = reuseArrayIfShallowEqual(state.people, selectVisiblePeople(nextPeople.items));
                     return {
                         tasks: visibleTasks,
                         projects: visibleProjects,
                         sections: visibleSections,
                         areas: visibleAreas,
+                        people: visiblePeople,
                         settings: nextSettings,
                         _allTasks: nextTasks.items,
                         _allProjects: nextProjects.items,
                         _allSections: nextSections.items,
                         _allAreas: nextAreas.items,
+                        _allPeople: nextPeople.items,
                         _tasksById: nextTasks.byId,
                         _projectsById: nextProjects.byId,
                         _sectionsById: nextSections.byId,
                         _areasById: nextAreas.byId,
+                        _peopleById: nextPeople.byId,
                         isLoading: false,
                         lastDataChangeAt:
                             didAutoArchive
@@ -1048,6 +1110,7 @@ export const createSettingsActions = ({
                                 || didClearDeletedProjectArchiveMetadata
                                 || didRepairEntityReferences
                                 || didTombstoneCleanup
+                                || didPeopleMigration
                                 ? getNextDataChangeAt(state.lastDataChangeAt)
                                 : state.lastDataChangeAt,
                     };
@@ -1075,12 +1138,13 @@ export const createSettingsActions = ({
                 || didRepairEntityReferences
                 || didTombstoneCleanup
                 || didAreaMigration
+                || didPeopleMigration
                 || didProjectOrderMigration
                 || didSettingsUpdate
             ) {
                 markCoreStartupPhase('core.fetch_data.debounced_save_enqueued');
                 debouncedSave(
-                    { tasks: allTasks, projects: allProjects, sections: allSections, areas: allAreas, settings: nextSettings },
+                    { tasks: allTasks, projects: allProjects, sections: allSections, areas: allAreas, people: allPeople, settings: nextSettings },
                     (msg) => set({ error: msg })
                 );
             }
@@ -1121,6 +1185,12 @@ export const createSettingsActions = ({
             const defaultScheduleTimeUpdate = updates.gtd
                 ? Object.prototype.hasOwnProperty.call(updates.gtd, 'defaultScheduleTime')
                 : false;
+            const defaultAreaIdUpdate = updates.gtd
+                ? Object.prototype.hasOwnProperty.call(updates.gtd, 'defaultAreaId')
+                : false;
+            const defaultAreaModeUpdate = updates.gtd
+                ? Object.prototype.hasOwnProperty.call(updates.gtd, 'defaultAreaMode')
+                : false;
             const focusTaskLimitUpdate = updates.gtd
                 ? Object.prototype.hasOwnProperty.call(updates.gtd, 'focusTaskLimit')
                 : false;
@@ -1135,7 +1205,7 @@ export const createSettingsActions = ({
                 markSyncUpdated('language');
             }
 
-            if (defaultScheduleTimeUpdate || focusTaskLimitUpdate || focusGroupByUpdate || defaultProjectFlowModeUpdate) {
+            if (defaultScheduleTimeUpdate || defaultAreaIdUpdate || defaultAreaModeUpdate || focusTaskLimitUpdate || focusGroupByUpdate || defaultProjectFlowModeUpdate) {
                 markSyncUpdated('gtd');
             }
 
@@ -1158,43 +1228,17 @@ export const createSettingsActions = ({
             const newSettings = syncUpdated ? { ...nextSettings, syncPreferencesUpdatedAt: nextSyncUpdatedAt } : nextSettings;
             const shouldTrackChange = shouldTrackSettingsChange(state.settings, newSettings, updates);
             if (archiveDaysUpdate) {
-                const configuredArchiveDays = newSettings.gtd?.autoArchiveDays;
-                const archiveDays = Number.isFinite(configuredArchiveDays)
-                    ? Math.max(0, Math.floor(configuredArchiveDays as number))
-                    : 7;
-                const shouldAutoArchive = archiveDays > 0;
-                const cutoffMs = shouldAutoArchive ? Date.now() - archiveDays * 24 * 60 * 60 * 1000 : 0;
-                let didAutoArchive = false;
+                const autoArchiveResult = runAutoArchive(state._allTasks, newSettings, {
+                    nowIso,
+                    nowMs: Date.now(),
+                    deviceId: deviceState.deviceId,
+                });
 
-                let newAllTasks = state._allTasks;
-                if (shouldAutoArchive) {
-                    newAllTasks = newAllTasks.map((task) => {
-                        if (task.deletedAt) return task;
-                        if (task.status !== 'done') return task;
-                        const completedAt = safeParseDate(task.completedAt)?.getTime() ?? NaN;
-                        const updatedAt = safeParseDate(task.updatedAt)?.getTime() ?? NaN;
-                        const resolvedCompletedAt = Number.isFinite(completedAt) ? completedAt : updatedAt;
-                        if (!Number.isFinite(resolvedCompletedAt) || resolvedCompletedAt <= 0) return task;
-                        if (resolvedCompletedAt >= cutoffMs) return task;
-                        didAutoArchive = true;
-                        return {
-                            ...task,
-                            status: 'archived',
-                            isFocusedToday: false,
-                            updatedAt: nowIso,
-                            completedAt: Number.isFinite(completedAt) ? task.completedAt : task.updatedAt || nowIso,
-                            rev: nextRevision(task.rev),
-                            revBy: deviceState.deviceId,
-                        };
-                    });
-                }
-
-                if (didAutoArchive) {
-                    const newVisibleTasks = selectVisibleTasks(newAllTasks);
-                    snapshot = buildSaveSnapshot(state, { tasks: newAllTasks, settings: newSettings });
+                if (autoArchiveResult.didAutoArchive) {
+                    snapshot = buildSaveSnapshot(state, { tasks: autoArchiveResult.allTasks, settings: newSettings });
                     return {
-                        tasks: newVisibleTasks,
-                        _allTasks: newAllTasks,
+                        tasks: autoArchiveResult.visibleTasks ?? selectVisibleTasks(autoArchiveResult.allTasks),
+                        _allTasks: autoArchiveResult.allTasks,
                         settings: newSettings,
                         lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt),
                     };

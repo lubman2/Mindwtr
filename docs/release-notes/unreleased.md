@@ -1,11 +1,136 @@
 # Mindwtr Unreleased
 
-Changes collected after `v0.9.9` and before the next version tag.
+Changes collected after `v1.0.5` and before the next version tag.
 
 ## Highlights
 
-- No unreleased changes yet.
+- Permanently delete projects from Trash while keeping sync tombstones stable across desktop, CloudKit, and other synced devices.
+- Capture tasks faster with `/energy:` quick-add syntax, default schedule times, clearer creation affordances, and restored desktop quick-add focus.
+- Use refreshed AI providers with stricter structured outputs, bounded retries, and updated default models.
+- Work more predictably with board cross-column drops, filter visibility cleanup, mobile capture-area modes, and focused list polish.
 
 ## Full Change List
 
-- No unreleased changes yet.
+- fix(desktop): inbox processing scrolls back to the top of the card when advancing to the next task, so the new task's title is immediately visible.
+- fix(inbox): processing keeps an area that was assigned while the task sat in the inbox — the area field starts on the task's own area (and filters the project picker from there) instead of resetting to none.
+- feat(desktop): scrollbars follow the active theme's palette — a slim rounded thumb in the theme's border color replaces the engine's default gray bars.
+- fix(tasks): Bulk organize now defaults to "Keep status" — applying no longer resets every selected task's status to Next, and an all-keep apply changes nothing.
+- fix(desktop): attachments added in the task editor are no longer silently discarded when the editor closes without saving — attachment edits now count as unsaved changes (click-outside keeps the editor open, Esc asks to confirm), and a stale editor draft can no longer wipe stored attachments on save.
+- feat(tasks): adjust a task's completion timestamp — tap or click the Completed time in Done/Archived views to correct it, or right-click Done (desktop) / long-press Done in the status menu (mobile) to complete a task as of an earlier time; backdated completions anchor "repeat after completion" recurrence to the actual completion time.
+- feat(review): surface stale tasks and projects as a Weekly Review step without requiring AI, and add a "Review in 1 week" action beside "Mark reviewed".
+- feat(tasks): render Markdown consistently in description displays — desktop rows show a rendered first-line preview, and mobile Trash/Archived previews no longer show raw Markdown source.
+- fix(mobile): keep the task description field visible when the Android keyboard opens.
+- fix(mobile): keep full task titles visible in inbox and task lists after editing.
+- fix(desktop): preserve relative start offsets and repeat reminder minutes through desktop SQLite restarts and sync cycles.
+- fix(cloudkit): sync project archive restore metadata for tasks and sections across Apple CloudKit clients.
+- fix(mobile): apply SQLite WAL/foreign-key/busy-timeout pragmas outside legacy transactions and reject stale JSON backup fallbacks after stalled writes.
+- fix(recurrence): stamp recurring follow-up tasks with revision metadata and preserve task text direction.
+- fix(sync): build task content signatures from an explicit allowlist and drop unknown legacy fields during sync normalization.
+- fix(cloud): accept energy level, assignee, and reminder suppression fields through task REST create/patch calls.
+- fix(mcp): remove unused raw-SQL task write helpers so MCP writes stay on the core-backed service path.
+- fix(mobile): narrow mounted screen store subscriptions and align inline capture with Inbox-first capture.
+- ci(android): publish profileable builds to Google Play internal testing while keeping production/beta on the normal release build.
+- fix(desktop): preserve purged project tombstones across SQLite save/load cycles.
+- fix(cloudkit): sync purged project tombstones on Apple devices.
+- fix(trash): show deleted projects in Trash and support deleting them forever.
+- fix(desktop): snap board drops to the nearest card for consistent cross-column moves.
+- feat(quick-add): parse `/energy:` values and apply default schedule times.
+- feat(tasks): improve add controls, entity creation affordances, list grouping, and quick-add focus handling.
+- fix(desktop): restore focus to quick-add after adding a task.
+- fix(desktop): keep inline capture limited to Inbox.
+- fix(desktop): use the Windows native certificate trust path for WebDAV sync.
+- fix(filters): hide unused metadata filters and keep hidden criteria from affecting visible task lists.
+- fix(mobile): expose priority in the task editor default view and show status chips on review-due focus rows.
+- fix(mobile): add active-area capture mode copy, split context/tag filters, show filter-only search results, and reduce project swipe sensitivity.
+- feat(donations): refine in-app donation prompts and routing.
+- feat(ai): modernize OpenAI, Anthropic, and Gemini provider handling with stricter structured output parsing and bounded retries.
+- fix(mobile): tolerate missing RNFS, avoid native module crashes, and improve SQLite read/write diagnostics.
+- fix(release): check out requested tags in platform workflows and fail closed on untracked Android versionCode overrides.
+- fix(i18n): localize new active-area and desktop search-scope strings.
+- ci(release): publish RC Play uploads to internal testing and open testing by default, and run Android FOSS in parallel from the same versionCode preflight.
+- fix(checklist): stop task checklist items from being silently lost when the description contains markdown checkbox lines, and keep in-progress checklist typing safe during background refreshes.
+- feat(checklist): paste multi-line text into a checklist item to create one item per line, recognizing bullets, numbering, and `[x]` completion markers.
+- feat(review): review Waiting For before choosing today's focus in the Daily Review, so items that unblocked can be promoted to Next and picked up in the focus step.
+- feat(checklist)!: the checklist and description are now fully independent — markdown checkbox lines in notes no longer populate or update the task checklist, and checklist edits no longer rewrite the notes (ADR 0022). To bulk-add items, paste the lines into the checklist field.
+- fix(mobile): keep the Calendar "add task" sheet above the Android keyboard.
+- fix(recurrence): always show a recurring task's next occurrence date in task previews — newly created unscheduled recurring tasks no longer hide their date until the first completion.
+- fix(recurrence): completing a date-less recurring task now defers the next instance with a date-only start instead of inheriting the completion's time of day (app and local API).
+- feat(desktop): the quick action on Waiting and Someday rows now promotes the task to Next in one click (matching the mobile swipe action), including inside the review flows.
+- feat(mobile): search no longer hides Done and Archived matches silently — a tappable "N more in Done and Archived" hint includes them in one tap.
+- feat(projects): pick a project's area directly in the create form on desktop and mobile, defaulting to the active area filter.
+- fix(desktop): quick add and capture fields keep the caret visible after accepting a suggestion, and long suggestion lists scroll to keep the highlighted entry in view.
+- fix(quick-add): `+project` and `!area` shortcuts now match existing multi-word names without swallowing the rest of the title, an unrecognized `!area` token no longer silently disappears, and quoted names (`+"New Project Name"`) delimit multi-word project creation mid-sentence.
+- feat(desktop): rename a task title in place via the row's ••• menu (Enter saves, Esc cancels); double-clicking a task keeps opening the full editor everywhere. (An rc.2 iteration bound rename to title double-click, which left most list views with no mouse path to the editor.)
+- feat(desktop): dragging a project now works onto collapsed area headers, and areas without projects appear as dashed drop targets while dragging, so a project can be moved into any area (or out to No area) by drag.
+- fix(desktop): text in an expanded task description can now be selected and copied with the mouse (expanded rows no longer double as calendar drag sources; collapse the row to drag it onto the calendar).
+- fix(mobile): description text in the task view tab can now be selected and copied with a long-press.
+- fix(desktop): guided inbox processing buttons now use one font weight throughout, "No project needed" is neutral instead of completion-green, and text arrows/checkmarks were replaced with proper icons.
+- fix(mobile): inbox processing, board, and capture labels keep their emoji AND their text on Samsung devices — non-stock Samsung fonts dropped the text that followed an emoji, leaving icon-only buttons.
+- feat(desktop): drag a task from the open project's list onto another project in the sidebar to move it there (it lands after the target's existing tasks), or onto an area header to make it a direct area task; a "Moved to …" toast offers one-click Undo. Works in every sort mode; archived projects don't accept drops (ADR 0023).
+- feat(tasks): relative start dates now accept 0 (start on the due date itself), so a task like "Wheel trash cans to curb" can stay hidden until the day it is due.
+- feat(mobile): task rows, the swipe Done/Delete buttons, and the task editor's ••• menu items now darken while pressed on every theme (Material 3 keeps its ripple), so common taps give visible feedback.
+- fix(desktop): a manual "Sync now" always reads the remote data instead of trusting the unchanged-check cache, so tasks added on another device can no longer be missed by a forced sync.
+- fix(desktop): undoing a completed task restores its Today star along with its status (completing clears the star, and Undo used to bring the task back unstarred).
+- fix(mobile): pull-to-refresh sync now works on short task lists (Inbox with a few tasks no longer refuses the pull gesture on iOS; it previously only worked on scrollable screens like Focus).
+- fix(mcp): `npm i -g mindwtr-mcp` no longer needs a C++ compiler on Windows — better-sqlite3 is now ^12 with prebuilt binaries for Node 22+ (mindwtr-mcp 1.1.1; Node 20 still works but needs build tools).
+- feat(mobile): optional persistent "Quick add" notification on Android (Settings → Notifications) — one swipe from anywhere, including the lock screen, opens Quick Capture.
+- fix(mobile): pull-to-refresh and Settings "Sync now" always read the remote data instead of trusting the unchanged-check cache, matching the desktop manual-sync fix.
+- fix(mobile): the persistent "Quick add" notification channel name in Android system settings now follows the app language instead of staying in the language active when it was first created.
+- fix(sync): the default area for new tasks (fixed area and follow-active-area modes) now syncs between devices — the setting was merged correctly when received but was never included in the uploaded sync document.
+- ci(release): desktop builds use the prebuilt `@tauri-apps/cli` npm package pinned in the lockfile instead of compiling tauri-cli from source, cutting up to 9 minutes from cold release builds.
+- fix(mobile): tapping the persistent "Quick add" notification now opens Quick Capture directly instead of just bringing the app to the foreground (it now uses the same launch path as the quick-settings tile).
+- fix(mobile): the persistent "Quick add" notification re-pins itself when swiped away — Android 14 lets users dismiss ongoing notifications, so a swipe no longer silently removes the capture handle; turn the setting off in Settings → Notifications to remove it.
+- feat(ios): lock screen widgets (iOS 16+) showing the current focused task — a rectangular widget with the top Today's Focus task, an inline one-liner above the clock, and a circular focused-task counter; tapping opens Focus.
+- fix(release): app version bump tooling no longer overwrites the independently published `mindwtr-mcp` package version, and existing MCP npm versions now skip publish cleanly.
+- feat(desktop): star a task for Today's Focus from the task editor header, and the Quick Add star is now a compact icon toggle beside the input instead of a full-width labeled button.
+- fix(capture): quick-add captures now follow one policy on desktop and mobile — a `+Project` naming an archived project creates a fresh project instead of silently dropping the project (or, on the mobile in-list add, the whole capture), a `+Project` matching an existing active project reuses it instead of creating a duplicate, and natural-language dates now work in the mobile in-list quick add too.
+- fix(tasks): the Today's Focus star now behaves identically on every surface (desktop rows, quick-action menu, editor, daily review, mobile swipe): deferred and sequential-blocked tasks can't be starred anywhere (the reason is shown), and starring a review-due Waiting/Someday task keeps its status instead of silently promoting it to Next on some surfaces.
+- feat(desktop): the Contexts & Tags view and the Review tab both gained the standard Group control — group the list by status, tag, context, area, or project (grouping by tag with "All" selected gives a cross-status big picture of one topic).
+- feat(desktop): clicking outside an untouched task editor now closes it; once any field was changed, closing still requires Save, Cancel, or Esc.
+- fix(desktop): the Review tab header is calmer — Daily/Weekly Review stay on top, and the sort/group/select/details utilities moved down beside the status chips as compact labeled controls.
+- fix(android): task reminder notifications are now marked sensitive, so Android's lock screen "hide sensitive notification content" setting redacts task titles until the phone is unlocked (the persistent Quick add notification stays visible — it contains no task data).
+- fix(windows): "Launch at startup" now works in the Microsoft Store build — the Store package declares a Windows startup task and the toggle drives it directly, instead of writing a registry entry that MSIX silently virtualizes away. If startup was turned off for Mindwtr in Windows Settings, the toggle now says so instead of pretending to succeed.
+- feat(tasks): the Today's Focus star and task status now keep each other consistent — starring an Inbox task promotes it to Next (quick-add captures already did this), and moving a starred task back to Inbox removes the star. In the desktop task editor the star is part of the draft and applies on Save, so starring no longer yanks the row (and its open editor) out of the current list mid-edit.
+- fix(desktop): opening the inline editor or expanding details in the Contexts, Archive, and Search lists no longer paints the following rows over the expanded content — virtualized rows now re-measure when their size changes.
+- fix(mobile): the Focus list no longer oscillates or stutters during long scrolls on Android — it now reports measured row heights instead of letting the list estimate them from a running average.
+- feat(inbox): converting a capture into a project can now split it into several actions — extra actions typed in the split step return to the Inbox with the project attached for their own clarify pass, while the original capture becomes the project's first next action.
+- fix(mobile): task and Focus lists keep a row's measured height when the row's content revision changes (edit, sync update), instead of falling back to an estimated height until the next re-measure.
+- fix(widgets): starred (Today's Focus) tasks now lead the widget task list on iOS and Android, so the lock screen "current focused task" is the task you actually starred, and the circular lock widget counts starred tasks instead of showing the truncated list size (which made it read "2" with nothing starred and capped it at 3).
+- feat(ios): the rectangular lock screen widget shows up to two focus tasks (one line each) when more than one is starred; a single task keeps its two-line title.
+- fix(mobile): in the split step, pressing Enter after typing an action now opens the next action input directly with the keyboard staying up — no more tapping "Add another action" per action, and no more visible scroll jump from the keyboard closing and reopening.
+- fix(mobile): the persistent "Quick capture" notification comes back on its own when Android removes it — some devices drop an app's notifications when the app is closed from recents, which used to leave the capture handle gone until the setting was toggled; the app now re-pins it every time it returns to the foreground.
+- perf(core): saving a large library no longer re-serializes every task on every save — unchanged tasks reuse their serialized rows, cutting multi-second background saves on Android down to the rows that actually changed.
+- perf(mobile): home screen and lock screen widgets only re-render when something they show actually changed — previously every save and sync cycle re-rendered the widgets (several seconds on mid-range Android devices), stalling task actions behind background work.
+- fix(mobile): the Quick Capture "Add another" switch is now sticky — turn it on once and every Enter saves the task and keeps the sheet open for the next capture, across sheet opens, until you turn it off.
+- fix(mobile): entering Task order in a project without sections no longer shows an empty list — the reorder list's container had zero height, so the tasks were invisible; dragging by the handle works again.
+- fix(mobile): the project Task order toolbar button now shows drag-handle grip dots instead of a hamburger-style icon, matching the handles you drag in reorder mode (the up-down arrows stay reserved for Sort).
+- fix(mobile): status badges (Next, Waiting, Someday, Done) now follow the active theme instead of always using the light-theme palette — on Nord they use the theme's frost/aurora hues, on dark and OLED themes they use lighter readable shades, and the status picker opened from a task's preview badge is no longer a white sheet on dark themes.
+- fix(desktop): dark-mode text and background accents now follow the selected app theme instead of the OS color scheme — picking Nord or Dark on a machine whose OS is in light mode no longer leaves unreadable light-theme colors (like the navy status pill) on dark backgrounds.
+- feat(mobile): dragging a task by its handle in a project's Task order mode can now move it into another section — drop it under a different section header and it re-homes there (dropping above the first header un-sections it). Sectioned and section-less projects now share the same single reorder list, which also keeps long sectioned lists smooth while dragging.
+- fix(mobile): task lists no longer do a small jump when you lift your finger after scrolling on Android — rows are measured natively instead of being positioned from height estimates that got corrected mid-scroll, so the list stays exactly where you left it (matching the Projects list).
+- fix(sync): dragging a task to a new position no longer gets undone by the next sync on desktop — the reorder could produce a fractional sort value that the desktop database silently stored as empty, so the task dropped to the bottom of the list once sync reloaded it. Reorders now always write whole-number positions, and desktop storage preserves fractional ones written by other devices or older versions.
+- feat(desktop): update checks are now channel-aware for every install channel — Scoop and Chocolatey installs are detected (no more GitHub download prompts fighting your package manager), winget/Chocolatey/Homebrew/AUR users get the update reminder only when their own channel has published the new version and are routed to that channel's update path, Scoop installs make no automatic update checks at all (any bucket can carry the manifest, so Scoop owns updates; the manual check in Settings → About still works and points at `scoop update mindwtr`), and Flatpak/Snap/App Store builds stay quiet because those update automatically. (#829)
+- fix(desktop): the global quick add shortcut picker no longer recommends Ctrl+Shift+A on Windows — that combo belongs to Chrome tab search, Word, and Excel, and a global hotkey overrides them system-wide. Ctrl+Alt+M is now the recommended choice on every platform (the Windows default stays off so no keys are taken silently), and Ctrl+Shift+A is labeled legacy everywhere. (#832)
+- feat: tasks can now track time spent — each completed Pomodoro focus session with a linked task adds its focus minutes to a new Time Spent value shown next to the Time Estimate in the task editor (manually editable, synced across devices, and visible as a badge on task rows). Fully opt-in: the field, badge, and quick-start only appear while the Pomodoro timer and "Link timer to task" are both enabled (off by default), so nothing changes for anyone who doesn't use the timer. No stopwatch and no per-session log: it's one total per task. (#833)
+- feat(desktop): hovering a task row now shows a play button when the Pomodoro timer and "Link timer to task" are enabled — one click links the task and starts a focus session, and the button shows how many focus sessions that task has accumulated (previously recorded but invisible). (#833)
+- feat: the calendar week now starts on the day your locale expects (Monday in most of Europe, Sunday in the US/Japan, Saturday in much of MENA) without touching a setting — a new "System default" option is the default, and explicit Monday/Saturday/Sunday overrides still work. (#834)
+- feat: deleting a task no longer asks for confirmation — the task moves to Trash immediately and an Undo button appears in a toast, on both desktop and mobile. Emptying Trash (permanent delete) still confirms. (#834)
+- feat(desktop): the Obsidian integration now detects vaults from Obsidian's own vault list and offers them one-click when picking a vault folder; the Browse button remains for custom locations. (#834)
+- perf(mobile): finishing a sync no longer re-reads the entire database to refresh the app — the app applies the merged result it already has in memory, cutting several seconds off every sync cycle on large libraries and removing a read that could push storage into its slower fallback mode. (#766)
+- perf(mobile): reminder rescheduling no longer re-scans all tasks after app updates that cannot affect reminders (sync status changes, loading states) — during active use with background sync this removes most of the repeated full-library scans. (#766)
+- fix(mobile): leaving a project's Task order mode no longer shows an empty task list until you scroll — the list now comes back at the position you left it. (#784)
+- fix(mobile): a project's task list no longer hiccups or shifts when you lift your finger after scrolling — the list now scrolls natively like the Projects list, staying exactly where you leave it, with the project details header scrolling along naturally. (#831)
+- fix(mobile): entering Select mode in a project no longer jumps the task list back to the top — selection starts on the tasks you were looking at. (#765)
+- fix(desktop): the Area dropdown in the Inbox Processor no longer renders as the operating system's native select (metallic shading, different arrow, narrower bar on macOS) — it now uses the same searchable dropdown as the Project picker, in both quick and guided processing. (#840)
+- fix: Dropbox sync no longer reports "No internet connection. Sync skipped." when a single request fails while the connection is fine — transient failures (a stale connection after the app wakes up, Dropbox dropping a request while another device syncs at the same time) are now retried up to three times with backoff on both mobile and desktop, and the sync log records the actual error behind any offline skip.
+- fix(desktop): clicking the Completed timestamp on a task in the Done list now opens the completion-time editor as intended — the click did nothing before because done rows are read-only. (#835)
+- fix(desktop): opening Settings no longer contacts GitHub for an update check before the install channel is detected — on quiet channels like Scoop the background check could fire during that brief window; it now waits for detection to finish. (#829)
+- feat: reopening the app within 25 minutes (one Pomodoro block) now resumes on the screen you left — including the project you had open — so an interruption (Android reclaiming memory, an app restart) no longer dumps you back at the start; after a longer break the app still opens fresh on its home view. (#842)
+- feat(attachments): attaching a file now stores a real copy inside the app's own storage on desktop (mobile already did this), so an attachment no longer breaks when the original file is moved, renamed, or deleted — and attaching from unusual locations like a RAM drive works. To reference a file without copying it, paste its path into "Add link" instead. If the copy fails, both platforms now say so immediately instead of silently adding an attachment that can never be opened; existing attachments are unaffected. (#836)
+- feat(desktop): the Add link dialog gained a "Link to file…" button to browse for a local file to point at without copying it, and each attachment row now shows an honest icon — a paperclip when the app owns a copy of the file, a link icon for pointers (URLs, path links, and file attachments from before copy-on-attach), with the full path in the pointer's tooltip. (#836)
+- fix(mobile): the Undo toast after deleting a task or project now always appears on the phone — a hidden leftover value (for example restored from a desktop backup) could suppress it with no way to turn it back on, since the "Undo notifications" switch only exists in desktop Settings. That switch now applies to desktop only. (#834)
+- fix(ios): the "Open Mindwtr List" shortcut now opens the chosen list — every destination previously landed on an "Unmatched Route" error screen. (#755)
+- fix(mobile): the capture sheet's keyboard-dismiss button is now a chevron icon instead of a "Done" label that read like a save or status control — captured tasks always land in the Inbox, no status picker needed. (#755)
+- feat(ios): new "Add to Mindwtr Inbox" Shortcuts action creates a task without opening the app — usable in unattended Shortcuts Automations (time, calendar, or location triggers); the task appears in the Inbox the next time Mindwtr opens, with optional note, tags, and project. (#845)
+- fix: completing a recurring task that only has a due date now makes it leave Focus and Next actions until the next occurrence's date arrives — the freshly created next instance no longer sits in the list looking identical to the one just completed, which made completion look like it silently failed and invited repeated done-swipes. The "N hidden (future start)" notice and its Show toggle cover these deferred instances too. (#843)
+- fix(web): the self-hosted web app no longer breaks with "Something went wrong — Importing a module script failed" when opening a lazily loaded page like Settings > GTD. The service worker previously cached every response forever — including the HTML fallback the server returned for a missing script after a redeploy — permanently poisoning that page; it now serves pages network-first, only caches static assets (never API/sync responses on same-origin setups), refuses to cache HTML under a script URL, and clears the old poisoned cache on update. The Docker web server now returns a real 404 for missing build assets and tells browsers to revalidate index.html, and the app reloads itself once when a stale page shell requests chunks from an older build. (#844)

@@ -46,6 +46,8 @@ const recurrenceText: Record<string, string> = {
     'keybindings.section.global': 'Global',
     'keybindings.section.taskList': 'Task list',
     'keybindings.quickAdd': 'Quick add',
+    'keybindings.globalQuickAdd': 'Global quick add',
+    'keybindings.inAppQuickAdd': 'In-app quick add',
     'keybindings.openSettings': 'Open settings',
     'keybindings.toggleSidebar': 'Toggle sidebar',
     'keybindings.toggleFocusMode': 'Toggle focus mode',

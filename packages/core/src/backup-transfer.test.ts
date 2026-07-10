@@ -38,6 +38,7 @@ const buildAppData = (): AppData => {
         ],
         sections: [],
         areas: [],
+        people: [],
         settings: {},
     };
 };
@@ -78,6 +79,16 @@ describe('backup transfer', () => {
             id: 'area-1',
             name: 'Area',
             order: 0,
+            createdAt: '2026-03-30T12:00:00.000Z',
+            updatedAt: '2026-03-30T12:00:00.000Z',
+            rev: 4,
+            revBy: 'old-device',
+        }];
+        data.people = [{
+            id: 'person-1',
+            name: 'Alex',
+            note: 'Design lead',
+            referenceLink: 'https://example.com/alex',
             createdAt: '2026-03-30T12:00:00.000Z',
             updatedAt: '2026-03-30T12:00:00.000Z',
             rev: 4,
@@ -141,6 +152,11 @@ describe('backup transfer', () => {
             rev: 5,
             revBy: SYNC_BACKUP_RESTORE_REV_BY,
         });
+        expect(restored.people?.[0]).toMatchObject({
+            updatedAt: restoredAt,
+            rev: 5,
+            revBy: SYNC_BACKUP_RESTORE_REV_BY,
+        });
         expect(restored.tasks.find((task) => task.id === 'deleted-task')).toMatchObject({
             updatedAt: '2026-03-31T00:00:00.000Z',
             rev: 8,
@@ -177,6 +193,16 @@ describe('backup transfer', () => {
             id: 'area-1',
             name: 'Area',
             order: 0,
+            createdAt: '2026-03-30T12:00:00.000Z',
+            updatedAt: '2026-03-30T12:00:00.000Z',
+            rev: 4,
+            revBy: 'old-device',
+        }];
+        backup.people = [{
+            id: 'person-1',
+            name: 'Alex',
+            note: 'Design lead',
+            referenceLink: 'https://example.com/alex',
             createdAt: '2026-03-30T12:00:00.000Z',
             updatedAt: '2026-03-30T12:00:00.000Z',
             rev: 4,
@@ -239,6 +265,13 @@ describe('backup transfer', () => {
                 rev: 99,
                 revBy: 'remote-delete',
             }],
+            people: [{
+                ...backup.people![0],
+                updatedAt: deletedAt,
+                deletedAt,
+                rev: 99,
+                revBy: 'remote-delete',
+            }],
             settings: {},
         };
 
@@ -266,6 +299,11 @@ describe('backup transfer', () => {
                 revBy: SYNC_BACKUP_RESTORE_REV_BY,
             });
             expect(merged.areas[0].deletedAt).toBeUndefined();
+            expect(merged.people?.[0]).toMatchObject({
+                updatedAt: restoredAt,
+                revBy: SYNC_BACKUP_RESTORE_REV_BY,
+            });
+            expect(merged.people?.[0].deletedAt).toBeUndefined();
         }
     });
 });

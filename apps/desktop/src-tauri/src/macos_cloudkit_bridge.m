@@ -122,6 +122,7 @@ static const MWFieldSpec kTaskFields[] = {
     {"assignedTo",     "assignedTo",      MWFieldKindString},
     {"taskMode",       "taskMode",        MWFieldKindString},
     {"startTime",      "startTime",       MWFieldKindDate},
+    {"relativeStartOffset", "relativeStartOffset", MWFieldKindJsonString},
     {"dueDate",        "dueDate",         MWFieldKindDate},
     {"recurrence",     "recurrence",      MWFieldKindJsonString},
     {"showFutureRecurrence", "showFutureRecurrence", MWFieldKindBool},
@@ -138,9 +139,15 @@ static const MWFieldSpec kTaskFields[] = {
     {"areaId",         "areaId",          MWFieldKindString},
     {"isFocusedToday", "isFocusedToday",  MWFieldKindBool},
     {"timeEstimate",   "timeEstimate",    MWFieldKindString},
+    {"timeSpentMinutes", "timeSpentMinutes", MWFieldKindInt},
     {"suppressMindwtrReminders", "suppressMindwtrReminders", MWFieldKindBool},
+    {"repeatReminderMinutes", "repeatReminderMinutes", MWFieldKindInt},
     {"reviewAt",       "reviewAt",        MWFieldKindDate},
     {"completedAt",    "completedAt",     MWFieldKindDate},
+    {"statusBeforeProjectArchive", "statusBeforeProjectArchive", MWFieldKindString},
+    {"completedAtBeforeProjectArchive", "completedAtBeforeProjectArchive", MWFieldKindDate},
+    {"isFocusedTodayBeforeProjectArchive", "isFocusedTodayBeforeProjectArchive", MWFieldKindBool},
+    {"projectArchivedAt", "projectArchivedAt", MWFieldKindDate},
     {"rev",            "rev",             MWFieldKindInt},
     {"revBy",          "revBy",           MWFieldKindString},
     {"createdAt",      "createdAt",       MWFieldKindDate},
@@ -172,6 +179,7 @@ static const MWFieldSpec kProjectFields[] = {
     {"createdAt",    "createdAt",    MWFieldKindDate},
     {"updatedAt",    "updatedAt",    MWFieldKindDate},
     {"deletedAt",    "deletedAt",    MWFieldKindDate},
+    {"purgedAt",     "purgedAt",     MWFieldKindDate},
 };
 static const size_t kProjectFieldsCount = sizeof(kProjectFields) / sizeof(kProjectFields[0]);
 
@@ -186,6 +194,8 @@ static const MWFieldSpec kSectionFields[] = {
     {"createdAt",   "createdAt",          MWFieldKindDate},
     {"updatedAt",   "updatedAt",          MWFieldKindDate},
     {"deletedAt",   "deletedAt",          MWFieldKindDate},
+    {"deletedAtBeforeProjectArchive", "deletedAtBeforeProjectArchive", MWFieldKindDate},
+    {"projectArchivedAt", "projectArchivedAt", MWFieldKindDate},
 };
 static const size_t kSectionFieldsCount = sizeof(kSectionFields) / sizeof(kSectionFields[0]);
 
@@ -201,6 +211,18 @@ static const MWFieldSpec kAreaFields[] = {
     {"deletedAt", "deletedAt", MWFieldKindDate},
 };
 static const size_t kAreaFieldsCount = sizeof(kAreaFields) / sizeof(kAreaFields[0]);
+
+static const MWFieldSpec kPersonFields[] = {
+    {"name",          "name",          MWFieldKindString},
+    {"note",          "note",          MWFieldKindString},
+    {"referenceLink", "referenceLink", MWFieldKindString},
+    {"rev",           "rev",           MWFieldKindInt},
+    {"revBy",         "revBy",         MWFieldKindString},
+    {"createdAt",     "createdAt",     MWFieldKindDate},
+    {"updatedAt",     "updatedAt",     MWFieldKindDate},
+    {"deletedAt",     "deletedAt",     MWFieldKindDate},
+};
+static const size_t kPersonFieldsCount = sizeof(kPersonFields) / sizeof(kPersonFields[0]);
 
 static const MWFieldSpec kSettingsFields[] = {
     {"payload",   "payload",   MWFieldKindJsonString},
@@ -219,6 +241,8 @@ static void ck_get_field_specs(NSString *recordType,
         *outSpecs = kSectionFields; *outCount = kSectionFieldsCount;
     } else if ([recordType isEqualToString:@"MindwtrArea"]) {
         *outSpecs = kAreaFields; *outCount = kAreaFieldsCount;
+    } else if ([recordType isEqualToString:@"MindwtrPerson"]) {
+        *outSpecs = kPersonFields; *outCount = kPersonFieldsCount;
     } else if ([recordType isEqualToString:@"MindwtrSettings"]) {
         *outSpecs = kSettingsFields; *outCount = kSettingsFieldsCount;
     } else {

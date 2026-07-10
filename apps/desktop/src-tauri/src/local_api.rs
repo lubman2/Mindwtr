@@ -651,13 +651,31 @@ fn route_api_request(
         let _guard = write_lock.lock().map_err(|e| e.to_string())?;
         let mut data = load_data_snapshot(app)?;
         let device_id = device_id_from_data(&data);
+        let mut recurring_follow_up: Option<Map<String, Value>> = None;
         let task = update_task_in_data(&mut data, &segments[1], |task| {
             let now = now_iso();
+            let previous_task = task.clone();
+            let previous_status = task
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("inbox")
+                .to_string();
             if action == "complete" {
                 task.insert("status".to_string(), Value::String("done".to_string()));
                 task.insert("completedAt".to_string(), Value::String(now.clone()));
+                task.insert("isFocusedToday".to_string(), Value::Bool(false));
+                if should_create_recurring_follow_up(action, &previous_status) {
+                    recurring_follow_up = create_next_recurring_task_for_local_api(
+                        &previous_task,
+                        &now,
+                        &previous_status,
+                    );
+                }
             } else if action == "archive" {
                 task.insert("status".to_string(), Value::String("archived".to_string()));
+                task.entry("completedAt".to_string())
+                    .or_insert_with(|| Value::String(now.clone()));
+                task.insert("isFocusedToday".to_string(), Value::Bool(false));
             } else {
                 task.remove("deletedAt");
                 task.remove("purgedAt");
@@ -666,6 +684,9 @@ fn route_api_request(
             bump_task_revision(task, &device_id);
             Ok(())
         })?;
+        if let Some(next_task) = recurring_follow_up {
+            ensure_array_mut(&mut data, "tasks")?.push(Value::Object(next_task));
+        }
         persist_data_snapshot_with_retries(app, &data)?;
         return Ok(ApiResponse::ok(json!({ "task": task })));
     }
@@ -864,6 +885,521 @@ fn bump_task_revision(task: &mut Map<String, Value>, device_id: &str) {
     task.insert("revBy".to_string(), Value::String(device_id.to_string()));
 }
 
+fn create_next_recurring_task_for_local_api(
+    task: &Map<String, Value>,
+    completed_at: &str,
+    previous_status: &str,
+) -> Option<Map<String, Value>> {
+    let rule = recurrence_rule(task)?;
+    let interval = recurrence_interval(task);
+    let strategy = recurrence_strategy(task);
+    let completed_occurrences = recurrence_completed_occurrences(task).unwrap_or(0);
+    if let Some(count) = recurrence_count(task) {
+        if completed_occurrences + 1 >= count {
+            return None;
+        }
+    }
+
+    let strict_anchors = strategy != "fluid";
+    let due_anchor_day = strict_anchors
+        .then(|| recurrence_anchor_day_for_field(task, "dueAnchorDay", "dueDate"))
+        .flatten();
+    let start_anchor_day = strict_anchors
+        .then(|| recurrence_anchor_day_for_field(task, "startAnchorDay", "startTime"))
+        .flatten();
+    let review_anchor_day = strict_anchors
+        .then(|| recurrence_anchor_day_for_field(task, "reviewAnchorDay", "reviewAt"))
+        .flatten();
+    let next_due_date = task
+        .get("dueDate")
+        .and_then(|value| value.as_str())
+        .and_then(|value| {
+            next_recurring_iso(
+                value,
+                completed_at,
+                rule,
+                strategy,
+                interval,
+                due_anchor_day,
+            )
+        });
+    let mut next_start_time = task
+        .get("startTime")
+        .and_then(|value| value.as_str())
+        .and_then(|value| {
+            next_recurring_iso(
+                value,
+                completed_at,
+                rule,
+                strategy,
+                interval,
+                start_anchor_day,
+            )
+        });
+    let next_review_at = task
+        .get("reviewAt")
+        .and_then(|value| value.as_str())
+        .and_then(|value| {
+            next_recurring_iso(
+                value,
+                completed_at,
+                rule,
+                strategy,
+                interval,
+                review_anchor_day,
+            )
+        });
+
+    if next_start_time.is_none() && next_due_date.is_none() && next_review_at.is_none() {
+        // Date-only deferral: an unscheduled task must not inherit the completion's
+        // time of day. Mirrors the core TypeScript behavior (ISO date prefix).
+        let completed_at_date = completed_at.get(..10).unwrap_or(completed_at);
+        next_start_time = next_recurring_iso(
+            completed_at,
+            completed_at_date,
+            rule,
+            "fluid",
+            interval,
+            None,
+        );
+    }
+
+    let next_occurrence_anchor = next_due_date
+        .as_deref()
+        .or(next_start_time.as_deref())
+        .or(next_review_at.as_deref());
+    if recurrence_until(task)
+        .as_deref()
+        .is_some_and(|until| should_stop_at_until(next_occurrence_anchor, until))
+    {
+        return None;
+    }
+
+    let mut next_task = Map::new();
+    next_task.insert("id".to_string(), Value::String(generate_uuid_v4()));
+    next_task.insert(
+        "title".to_string(),
+        task.get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Untitled")
+            .to_string()
+            .into(),
+    );
+    let next_status = if previous_status == "done" || previous_status == "archived" {
+        "next"
+    } else {
+        previous_status
+    };
+    next_task.insert("status".to_string(), Value::String(next_status.to_string()));
+    copy_task_fields(
+        task,
+        &mut next_task,
+        &[
+            "priority",
+            "energyLevel",
+            "assignedTo",
+            "description",
+            "location",
+            "projectId",
+            "sectionId",
+            "areaId",
+            "timeEstimate",
+        ],
+    );
+    if let Some(value) = next_start_time {
+        next_task.insert("startTime".to_string(), Value::String(value));
+    }
+    if let Some(value) = next_due_date {
+        next_task.insert("dueDate".to_string(), Value::String(value));
+    }
+    if let Some(value) = next_review_at {
+        next_task.insert("reviewAt".to_string(), Value::String(value));
+    }
+    if let Some(recurrence) = next_recurrence_value(task, completed_occurrences + 1, rule) {
+        next_task.insert("recurrence".to_string(), recurrence);
+    }
+    if task
+        .get("showFutureRecurrence")
+        .and_then(|value| value.as_bool())
+        == Some(true)
+    {
+        next_task.insert("showFutureRecurrence".to_string(), Value::Bool(true));
+    }
+    if task
+        .get("suppressMindwtrReminders")
+        .and_then(|value| value.as_bool())
+        == Some(true)
+    {
+        next_task.insert("suppressMindwtrReminders".to_string(), Value::Bool(true));
+    }
+    next_task.insert(
+        "tags".to_string(),
+        task.get("tags")
+            .filter(|value| value.is_array())
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    );
+    next_task.insert(
+        "contexts".to_string(),
+        task.get("contexts")
+            .filter(|value| value.is_array())
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    );
+    if let Some(checklist) = reset_checklist_value(task.get("checklist")) {
+        next_task.insert("checklist".to_string(), checklist);
+    }
+    if let Some(attachments) = duplicate_attachment_value(task.get("attachments"), completed_at) {
+        next_task.insert("attachments".to_string(), attachments);
+    }
+    next_task.insert("isFocusedToday".to_string(), Value::Bool(false));
+    next_task.insert(
+        "createdAt".to_string(),
+        Value::String(completed_at.to_string()),
+    );
+    next_task.insert(
+        "updatedAt".to_string(),
+        Value::String(completed_at.to_string()),
+    );
+    Some(next_task)
+}
+
+fn should_create_recurring_follow_up(action: &str, previous_status: &str) -> bool {
+    action == "complete" && previous_status != "done"
+}
+
+fn recurrence_value(task: &Map<String, Value>) -> Option<&Value> {
+    task.get("recurrence")
+}
+
+fn recurrence_rule(task: &Map<String, Value>) -> Option<&str> {
+    match recurrence_value(task)? {
+        Value::String(value) if is_recurrence_rule(value) => Some(value.as_str()),
+        Value::Object(value) => value
+            .get("rule")
+            .and_then(|rule| rule.as_str())
+            .filter(|rule| is_recurrence_rule(rule)),
+        _ => None,
+    }
+}
+
+fn is_recurrence_rule(value: &str) -> bool {
+    matches!(value, "daily" | "weekly" | "monthly" | "yearly")
+}
+
+fn recurrence_strategy(task: &Map<String, Value>) -> &str {
+    match recurrence_value(task) {
+        Some(Value::Object(value)) => value
+            .get("strategy")
+            .and_then(|strategy| strategy.as_str())
+            .filter(|strategy| *strategy == "fluid")
+            .unwrap_or("strict"),
+        _ => "strict",
+    }
+}
+
+fn recurrence_interval(task: &Map<String, Value>) -> i64 {
+    match recurrence_value(task) {
+        Some(Value::Object(value)) => value
+            .get("interval")
+            .and_then(|interval| interval.as_i64())
+            .filter(|interval| *interval > 0)
+            .unwrap_or(1),
+        _ => 1,
+    }
+}
+
+fn recurrence_count(task: &Map<String, Value>) -> Option<i64> {
+    match recurrence_value(task) {
+        Some(Value::Object(value)) => value
+            .get("count")
+            .and_then(|count| count.as_i64())
+            .filter(|count| *count > 0),
+        _ => None,
+    }
+}
+
+fn recurrence_completed_occurrences(task: &Map<String, Value>) -> Option<i64> {
+    match recurrence_value(task) {
+        Some(Value::Object(value)) => value
+            .get("completedOccurrences")
+            .and_then(|count| count.as_i64())
+            .filter(|count| *count >= 0),
+        _ => None,
+    }
+}
+
+fn recurrence_until(task: &Map<String, Value>) -> Option<String> {
+    match recurrence_value(task) {
+        Some(Value::Object(value)) => value
+            .get("until")
+            .and_then(|until| until.as_str())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn normalized_anchor_day(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(|value| value.as_i64())
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| (1..=31).contains(value))
+}
+
+fn recurrence_anchor_day_value(task: &Map<String, Value>, key: &str) -> Option<u32> {
+    match recurrence_value(task) {
+        Some(Value::Object(value)) => normalized_anchor_day(value.get(key)),
+        _ => None,
+    }
+}
+
+fn iso_day(value: &str) -> Option<u32> {
+    parse_iso_prefix(value).map(|(_, _, day, _)| day)
+}
+
+fn recurrence_anchor_day_for_field(
+    task: &Map<String, Value>,
+    field_anchor_key: &str,
+    field_key: &str,
+) -> Option<u32> {
+    recurrence_anchor_day_value(task, field_anchor_key)
+        .or_else(|| recurrence_anchor_day_value(task, "anchorDay"))
+        .or_else(|| {
+            task.get(field_key)
+                .and_then(|value| value.as_str())
+                .and_then(iso_day)
+        })
+}
+
+fn next_recurrence_anchor_days(task: &Map<String, Value>, rule: &str) -> Map<String, Value> {
+    let mut anchors = Map::new();
+    if rule != "monthly" && rule != "yearly" {
+        return anchors;
+    }
+
+    let start_anchor_day = recurrence_anchor_day_for_field(task, "startAnchorDay", "startTime");
+    let due_anchor_day = recurrence_anchor_day_for_field(task, "dueAnchorDay", "dueDate");
+    let review_anchor_day = recurrence_anchor_day_for_field(task, "reviewAnchorDay", "reviewAt");
+    let anchor_day = recurrence_anchor_day_value(task, "anchorDay")
+        .or(due_anchor_day)
+        .or(start_anchor_day)
+        .or(review_anchor_day);
+
+    if let Some(value) = anchor_day {
+        anchors.insert("anchorDay".to_string(), Value::Number(value.into()));
+    }
+    if let Some(value) = start_anchor_day {
+        anchors.insert("startAnchorDay".to_string(), Value::Number(value.into()));
+    }
+    if let Some(value) = due_anchor_day {
+        anchors.insert("dueAnchorDay".to_string(), Value::Number(value.into()));
+    }
+    if let Some(value) = review_anchor_day {
+        anchors.insert("reviewAnchorDay".to_string(), Value::Number(value.into()));
+    }
+    anchors
+}
+
+fn next_recurrence_value(
+    task: &Map<String, Value>,
+    completed_occurrences: i64,
+    rule: &str,
+) -> Option<Value> {
+    let anchor_days = next_recurrence_anchor_days(task, rule);
+    match recurrence_value(task)? {
+        Value::Object(value) => {
+            let mut next = value.clone();
+            for (key, value) in anchor_days {
+                next.insert(key, value);
+            }
+            if value
+                .get("count")
+                .and_then(|count| count.as_i64())
+                .is_some()
+            {
+                next.insert(
+                    "completedOccurrences".to_string(),
+                    Value::Number(serde_json::Number::from(completed_occurrences)),
+                );
+            }
+            Some(Value::Object(next))
+        }
+        Value::String(value) if !anchor_days.is_empty() => {
+            let mut next = anchor_days;
+            next.insert("rule".to_string(), Value::String(value.clone()));
+            Some(Value::Object(next))
+        }
+        value => Some(value.clone()),
+    }
+}
+
+fn next_recurring_iso(
+    source_iso: &str,
+    completed_at: &str,
+    rule: &str,
+    strategy: &str,
+    interval: i64,
+    anchor_day: Option<u32>,
+) -> Option<String> {
+    let base_iso = if strategy == "fluid" {
+        completed_at
+    } else {
+        source_iso
+    };
+    let (year, month, day, suffix) = parse_iso_prefix(base_iso)?;
+    let (next_year, next_month, next_day) = match rule {
+        "daily" => add_days(year, month, day, interval),
+        "weekly" => add_days(year, month, day, interval.saturating_mul(7)),
+        "monthly" => add_months(year, month, anchor_day.unwrap_or(day), interval),
+        "yearly" => add_months(
+            year,
+            month,
+            anchor_day.unwrap_or(day),
+            interval.saturating_mul(12),
+        ),
+        _ => return None,
+    };
+    Some(format!(
+        "{next_year:04}-{next_month:02}-{next_day:02}{suffix}"
+    ))
+}
+
+fn parse_iso_prefix(value: &str) -> Option<(i32, u32, u32, &str)> {
+    if value.len() < 10 || &value[4..5] != "-" || &value[7..8] != "-" {
+        return None;
+    }
+    let year = value[0..4].parse::<i32>().ok()?;
+    let month = value[5..7].parse::<u32>().ok()?;
+    let day = value[8..10].parse::<u32>().ok()?;
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some((year, month, day, &value[10..]))
+}
+
+fn add_days(year: i32, month: u32, day: u32, days: i64) -> (i32, u32, u32) {
+    civil_from_days(days_from_civil(year, month, day).saturating_add(days))
+}
+
+fn add_months(year: i32, month: u32, day: u32, months: i64) -> (i32, u32, u32) {
+    let total_months = i64::from(year)
+        .saturating_mul(12)
+        .saturating_add(i64::from(month) - 1)
+        .saturating_add(months);
+    let next_year = total_months.div_euclid(12) as i32;
+    let next_month = total_months.rem_euclid(12) as u32 + 1;
+    let next_day = day.min(days_in_month(next_year, next_month));
+    (next_year, next_month, next_day)
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 30,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let mut y = i64::from(year);
+    let m = i64::from(month);
+    let d = i64::from(day);
+    y -= if m <= 2 { 1 } else { 0 };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let month_adjusted = m + if m > 2 { -3 } else { 9 };
+    let doy = (153 * month_adjusted + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
+}
+
+fn should_stop_at_until(next_iso: Option<&str>, until: &str) -> bool {
+    let Some(next_iso) = next_iso else {
+        return false;
+    };
+    if until.len() == 10 {
+        return next_iso
+            .get(0..10)
+            .is_some_and(|next_date| next_date > until);
+    }
+    next_iso > until
+}
+
+fn copy_task_fields(source: &Map<String, Value>, target: &mut Map<String, Value>, keys: &[&str]) {
+    for key in keys {
+        if let Some(value) = source.get(*key).filter(|value| !value.is_null()) {
+            target.insert((*key).to_string(), value.clone());
+        }
+    }
+}
+
+fn reset_checklist_value(value: Option<&Value>) -> Option<Value> {
+    let checklist = value?.as_array()?;
+    if checklist.is_empty() {
+        return None;
+    }
+    Some(Value::Array(
+        checklist
+            .iter()
+            .filter_map(|item| {
+                let mut item = item.as_object()?.clone();
+                item.insert("id".to_string(), Value::String(generate_uuid_v4()));
+                item.insert("isCompleted".to_string(), Value::Bool(false));
+                Some(Value::Object(item))
+            })
+            .collect(),
+    ))
+}
+
+fn duplicate_attachment_value(value: Option<&Value>, timestamp: &str) -> Option<Value> {
+    let attachments = value?.as_array()?;
+    let duplicated = attachments
+        .iter()
+        .filter_map(|attachment| {
+            if has_string_field(attachment, "deletedAt") {
+                return None;
+            }
+            let mut attachment = attachment.as_object()?.clone();
+            attachment.insert("id".to_string(), Value::String(generate_uuid_v4()));
+            attachment.insert(
+                "createdAt".to_string(),
+                Value::String(timestamp.to_string()),
+            );
+            attachment.insert(
+                "updatedAt".to_string(),
+                Value::String(timestamp.to_string()),
+            );
+            attachment.remove("deletedAt");
+            Some(Value::Object(attachment))
+        })
+        .collect::<Vec<_>>();
+    if duplicated.is_empty() {
+        None
+    } else {
+        Some(Value::Array(duplicated))
+    }
+}
+
 fn create_task_from_body(
     body: &Map<String, Value>,
     device_id: &str,
@@ -1058,5 +1594,139 @@ mod tests {
             task.get("revBy").and_then(|value| value.as_str()),
             Some("device-a")
         );
+    }
+
+    fn comparable_local_api_recurring_task(task: Option<Map<String, Value>>) -> Value {
+        let Some(task) = task else {
+            return Value::Null;
+        };
+        let mut comparable = Map::new();
+        for key in ["status", "startTime", "dueDate", "reviewAt", "recurrence"] {
+            if let Some(value) = task.get(key) {
+                comparable.insert(key.to_string(), value.clone());
+            }
+        }
+        Value::Object(comparable)
+    }
+
+    #[test]
+    fn local_api_recurring_task_matches_core_golden_fixture() {
+        let cases: Value = serde_json::from_str(include_str!(
+            "../../../../packages/core/src/recurrence-local-api-parity.fixtures.json"
+        ))
+        .expect("valid recurrence parity fixture");
+        let cases = cases.as_array().expect("fixture array");
+
+        for test_case in cases {
+            let name = test_case
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unnamed recurrence parity case");
+            let task = test_case
+                .get("task")
+                .and_then(|value| value.as_object())
+                .unwrap_or_else(|| panic!("missing task object for {name}"));
+            let completed_at = test_case
+                .get("completedAt")
+                .and_then(|value| value.as_str())
+                .unwrap_or_else(|| panic!("missing completedAt for {name}"));
+            let previous_status = test_case
+                .get("previousStatus")
+                .and_then(|value| value.as_str())
+                .unwrap_or_else(|| panic!("missing previousStatus for {name}"));
+            let expected = test_case
+                .get("expected")
+                .unwrap_or_else(|| panic!("missing expected snapshot for {name}"));
+
+            let actual = comparable_local_api_recurring_task(
+                create_next_recurring_task_for_local_api(task, completed_at, previous_status),
+            );
+            assert_eq!(&actual, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn local_api_complete_creates_next_recurring_task_payload() {
+        let task = json!({
+            "id": "task-1",
+            "title": "Water plants",
+            "status": "next",
+            "dueDate": "2026-06-14",
+            "recurrence": { "rule": "daily", "count": 3, "completedOccurrences": 0 },
+            "tags": ["#home"],
+            "contexts": ["@home"],
+            "checklist": [
+                { "id": "item-1", "title": "Kitchen", "isCompleted": true }
+            ],
+            "createdAt": "2026-06-01T00:00:00Z",
+            "updatedAt": "2026-06-01T00:00:00Z"
+        });
+        let next = create_next_recurring_task_for_local_api(
+            task.as_object().expect("task object"),
+            "2026-06-14T12:00:00Z",
+            "next",
+        )
+        .expect("next recurring task");
+
+        assert_ne!(
+            next.get("id").and_then(|value| value.as_str()),
+            Some("task-1")
+        );
+        assert_eq!(
+            next.get("status").and_then(|value| value.as_str()),
+            Some("next")
+        );
+        assert_eq!(
+            next.get("dueDate").and_then(|value| value.as_str()),
+            Some("2026-06-15")
+        );
+        assert_eq!(
+            next.get("recurrence")
+                .and_then(|value| value.get("completedOccurrences"))
+                .and_then(|value| value.as_i64()),
+            Some(1)
+        );
+        let checklist = next
+            .get("checklist")
+            .and_then(|value| value.as_array())
+            .expect("checklist");
+        assert_eq!(
+            checklist[0]
+                .get("isCompleted")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_ne!(
+            checklist[0].get("id").and_then(|value| value.as_str()),
+            Some("item-1")
+        );
+    }
+
+    #[test]
+    fn local_api_complete_does_not_repeat_done_recurring_tasks() {
+        assert!(should_create_recurring_follow_up("complete", "next"));
+        assert!(should_create_recurring_follow_up("complete", "archived"));
+        assert!(!should_create_recurring_follow_up("complete", "done"));
+        assert!(!should_create_recurring_follow_up("archive", "next"));
+    }
+
+    #[test]
+    fn local_api_recurring_task_stops_when_count_is_exhausted() {
+        let task = json!({
+            "id": "task-1",
+            "title": "Water plants",
+            "status": "next",
+            "dueDate": "2026-06-14",
+            "recurrence": { "rule": "daily", "count": 1, "completedOccurrences": 0 },
+            "tags": [],
+            "contexts": []
+        });
+
+        assert!(create_next_recurring_task_for_local_api(
+            task.as_object().expect("task object"),
+            "2026-06-14T12:00:00Z",
+            "next",
+        )
+        .is_none());
     }
 }

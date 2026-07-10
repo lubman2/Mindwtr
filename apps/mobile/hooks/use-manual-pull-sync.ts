@@ -3,6 +3,7 @@ import { tFallback } from '@mindwtr/core';
 
 import { useLanguage } from '@/contexts/language-context';
 import { useToast } from '@/contexts/toast-context';
+import { getMobileSyncConfigurationStatus, performMobileSync } from '@/lib/sync-service';
 import type { PullSyncIndicatorState } from '@/components/PullSyncIndicator';
 import {
   getSyncConflictCount,
@@ -72,9 +73,7 @@ export function useManualPullSync() {
     setIndicatorState('syncing');
 
     try {
-      const { getMobileSyncConfigurationStatus, performMobileSync } = await import('@/lib/sync-service');
       const status = await getMobileSyncConfigurationStatus();
-
       if (!status.configured || status.backend === 'off') {
         finishIndicator('error');
         showToast({
@@ -86,8 +85,7 @@ export function useManualPullSync() {
         return;
       }
 
-      const result = await performMobileSync();
-
+      const result = await performMobileSync(undefined, { manual: true });
       if (result.skipped === 'offline' || isLikelyOfflineSyncError(result.error)) {
         finishIndicator('error');
         showToast({

@@ -3,7 +3,9 @@ import { TextInput } from 'react-native';
 import {
   applyMarkdownToolbarAction,
   continueMarkdownOnTextChange,
+  isMarkdownEditorAssistEnabled,
   resolveAutoTextDirection,
+  useTaskStore,
   type MarkdownSelection,
   type MarkdownToolbarActionId,
   type MarkdownToolbarResult,
@@ -59,6 +61,9 @@ export function useProjectNotesEditor({
     pendingSelectedProjectNotesSelectionRef.current = null;
     selectedProjectNotesSelectionRef.current = { start: selectionEnd, end: selectionEnd };
     setSelectedProjectNotesSelection({ start: selectionEnd, end: selectionEnd });
+    // supportNotes is a one-time snapshot for the newly selected project; keying this
+    // reset on it would wipe the undo stack and selection on every notes keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProject?.id]);
 
   const pushSelectedProjectNotesUndoEntry = useCallback((value: string, selection: MarkdownSelection) => {
@@ -131,10 +136,12 @@ export function useProjectNotesEditor({
   }, []);
 
   const handleSelectedProjectNotesChange = useCallback((text: string) => {
+    const assistEnabled = isMarkdownEditorAssistEnabled(useTaskStore.getState().settings);
     const continued = continueMarkdownOnTextChange(
       selectedProjectNotesRef.current,
       text,
       selectedProjectNotesSelectionRef.current,
+      { assist: assistEnabled },
     );
     if (continued) {
       applySelectedProjectNotesValue(continued.value, {
@@ -195,13 +202,14 @@ export function useProjectNotesEditor({
     return next;
   }, [applySelectedProjectNotesValue]);
 
+  const selectedProjectIdForCommit = selectedProject?.id;
   const commitSelectedProjectNotes = useCallback(() => {
-    if (!selectedProject) return;
+    if (!selectedProjectIdForCommit) return;
     const nextNotes = selectedProjectNotesRef.current;
     if (nextNotes === committedProjectNotesRef.current) return;
     committedProjectNotesRef.current = nextNotes;
-    updateProject(selectedProject.id, { supportNotes: nextNotes });
-  }, [selectedProject?.id, updateProject]);
+    updateProject(selectedProjectIdForCommit, { supportNotes: nextNotes });
+  }, [selectedProjectIdForCommit, updateProject]);
 
   const handleSelectedProjectNotesApplyAutocomplete = useCallback((next: { value: string; selection: MarkdownSelection }) => {
     applySelectedProjectNotesValue(next.value, {

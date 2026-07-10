@@ -16,7 +16,7 @@ type SectionDropZoneProps = {
 };
 
 export function SectionDropZone({ id, className, children }: SectionDropZoneProps) {
-    const { setNodeRef, isOver } = useDroppable({ id });
+    const { setNodeRef, isOver } = useDroppable({ id, data: { zone: 'section' } });
     return (
         <div ref={setNodeRef} className={cn(className, isOver && 'ring-2 ring-primary/40')}>
             {children}

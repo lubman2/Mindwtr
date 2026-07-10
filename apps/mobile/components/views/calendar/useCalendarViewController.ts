@@ -20,6 +20,7 @@ import {
   expandCalendarRecurringTasks,
   formatCalendarTimeInputValue,
   formatI18nTemplate,
+  getCalendarPlanningCandidates,
   getCalendarMonthIndex,
   normalizeDateFormatSetting,
   resolveCalendarSystemSetting,
@@ -54,7 +55,7 @@ import { useTheme } from '../../../contexts/theme-context';
 import { useToast } from '../../../contexts/toast-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
-import { taskMatchesAreaFilter } from '@/lib/area-filter';
+import { taskMatchesAreaFilter } from '@mindwtr/core';
 import { useLanguage } from '../../../contexts/language-context';
 import { canOpenExternalCalendarEvent, fetchExternalCalendarEvents, openExternalCalendarEvent } from '../../../lib/external-calendar';
 import { logError } from '../../../lib/app-log';
@@ -187,6 +188,7 @@ export function useCalendarViewController() {
   };
 
   const timeEstimatesEnabled = settings?.features?.timeEstimates !== false;
+  const prioritiesEnabled = settings?.features?.priorities !== false;
   const calendarSettings: CalendarSettings | undefined = settings?.calendar;
   const today = new Date();
   const systemLocale = typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function'
@@ -552,13 +554,15 @@ export function useCalendarViewController() {
     [calendarColorById],
   );
 
-  const nextQuickScheduleCandidates = useMemo(() => {
+  const planningTasks = useMemo(() => {
     if (!selectedDate) return [];
-    return visibleSchedulableTasks
-      .filter((task) => task.status === 'next')
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-      .slice(0, 6);
-  }, [selectedDate, visibleSchedulableTasks]);
+    return getCalendarPlanningCandidates(areaVisibleTasks, {
+      limit: 6,
+      now: new Date(nowTick),
+      prioritizeByPriority: prioritiesEnabled,
+      projects,
+    });
+  }, [areaVisibleTasks, nowTick, prioritiesEnabled, projects, selectedDate]);
 
   const searchCandidates = useMemo(() => {
     if (!selectedDate) return [];
@@ -901,7 +905,8 @@ export function useCalendarViewController() {
     return `${startLabel}-${endLabel}`;
   };
 
-  const getScheduleSlotLabel = (date: Date, task: Task) => {
+  const getScheduleSlotLabel = (date: Date | null, task: Task) => {
+    if (!date) return null;
     const durationMinutes = timeEstimateToMinutes(task.timeEstimate);
     const slot = findFreeSlotForDay(date, durationMinutes, task.id);
     return slot ? formatTimeRange(slot, durationMinutes) : null;
@@ -1147,6 +1152,11 @@ export function useCalendarViewController() {
         day: 'numeric',
       })
     : '';
+  const selectedDatePlanningLabel = selectedDate
+    ? tr('calendar.planningForDate', {
+        date: selectedDate.toLocaleDateString(locale, { weekday: 'short', month: 'short', day: 'numeric' }),
+      })
+    : '';
   const selectedDayModeLabel = selectedDate
     ? `${selectedDate.toLocaleDateString(locale, { weekday: 'short', month: 'long', day: 'numeric' })}${isToday(selectedDate) ? ` · ${t('filters.datePreset.today')}` : ''}`
     : '';
@@ -1207,7 +1217,7 @@ export function useCalendarViewController() {
     locale,
     markTaskDone,
     monthLabel,
-    nextQuickScheduleCandidates,
+    planningTasks,
     tr,
     openQuickAddAtDateTime,
     openQuickAddForDate,
@@ -1223,6 +1233,7 @@ export function useCalendarViewController() {
     selectedDateDeadlines,
     selectedDateExternalEvents,
     selectedDateLongLabel,
+    selectedDatePlanningLabel,
     selectedDateScheduled,
     selectedDateTimedEvents,
     selectedDayMinutes,

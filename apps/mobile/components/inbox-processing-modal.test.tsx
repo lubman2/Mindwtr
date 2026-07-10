@@ -1,5 +1,5 @@
 import React from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
 import { act, create } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,8 +8,14 @@ import { InboxProcessingModal } from './inbox-processing-modal';
 const updateTask = vi.fn();
 const deleteTask = vi.fn();
 const addProject = vi.fn();
+const addTask = vi.fn();
 const push = vi.fn();
 const clarifyTask = vi.fn();
+const showToast = vi.fn();
+const dismissToast = vi.fn();
+const translate = (key: string) => ({
+  'taskEdit.dateOnly': 'Date only',
+}[key] ?? key);
 const mockSettings = { gtd: { inboxProcessing: {} }, ai: {} } as any;
 const baseInboxTask = {
   id: 'inbox-1',
@@ -67,6 +73,7 @@ const storeState = {
   updateTask,
   deleteTask,
   addProject,
+  addTask,
 };
 const originalPlatformOs = Platform.OS;
 
@@ -75,6 +82,13 @@ const setPlatform = (os: typeof Platform.OS) => {
     configurable: true,
     value: os,
   });
+};
+
+const flattenStyle = (style: unknown): Record<string, any> => {
+  if (Array.isArray(style)) {
+    return style.reduce<Record<string, any>>((acc, item) => Object.assign(acc, flattenStyle(item)), {});
+  }
+  return style && typeof style === 'object' ? (style as Record<string, any>) : {};
 };
 
 vi.mock('@mindwtr/core', () => {
@@ -121,6 +135,17 @@ vi.mock('@mindwtr/core', () => {
       && project.status !== 'completed'
       && (!selectedAreaId || project.areaId === selectedAreaId)
     ))),
+    resolveAreaFilter: vi.fn((value: string | undefined, areas: any[]) => {
+      if (!value || value === '__all__' || value === '__none__') return value ?? '__all__';
+      return areas.some((area: any) => !area.deletedAt && area.id === value) ? value : '__all__';
+    }),
+    taskMatchesAreaFilter: vi.fn((task: any, filter: string, projectMap: Map<string, any>, areaById?: Map<string, any>) => {
+      if (filter === '__all__') return true;
+      const taskAreaId = task.areaId || (task.projectId ? projectMap.get(task.projectId)?.areaId : undefined);
+      const effectiveAreaId = taskAreaId && (!areaById || areaById.has(taskAreaId)) ? taskAreaId : undefined;
+      if (filter === '__none__') return !effectiveAreaId;
+      return effectiveAreaId === filter;
+    }),
     QUICK_DATE_PRESETS: ['today', 'tomorrow', 'in_3_days', 'next_week', 'next_month', 'no_date'],
     getQuickDate: vi.fn((preset: string) => {
       const today = new Date(2025, 0, 1);
@@ -145,6 +170,38 @@ vi.mock('@mindwtr/core', () => {
     isSelectableProjectForTaskAssignment: vi.fn((project: any) => (
       !project.deletedAt && project.status !== 'archived' && project.status !== 'completed'
     )),
+    getPersonSuggestionNames: vi.fn((people: any[] | undefined, tasks: any[], value: string | undefined, limit: number) => {
+      const query = (value ?? '').trim().toLowerCase();
+      if (!query) return [];
+      const names = new Map<string, { name: string; lastUsedAt: number }>();
+      for (const person of people ?? []) {
+        if (person.deletedAt || typeof person.name !== 'string') continue;
+        const name = person.name.trim();
+        if (!name) continue;
+        names.set(name.toLowerCase(), {
+          name,
+          lastUsedAt: Date.parse(person.updatedAt || person.createdAt || '') || 0,
+        });
+      }
+      for (const task of tasks) {
+        if (task.deletedAt || typeof task.assignedTo !== 'string') continue;
+        const name = task.assignedTo.trim();
+        if (!name) continue;
+        const key = name.toLowerCase();
+        const current = names.get(key);
+        const lastUsedAt = Date.parse(task.updatedAt || task.createdAt || '') || 0;
+        names.set(key, {
+          name: current?.name ?? name,
+          lastUsedAt: Math.max(current?.lastUsedAt ?? 0, lastUsedAt),
+        });
+      }
+      return Array.from(names.values())
+        .filter((entry) => entry.name.toLowerCase().includes(query))
+        .filter((entry) => entry.name.toLowerCase() !== query)
+        .sort((left, right) => right.lastUsedAt - left.lastUsedAt || left.name.localeCompare(right.name))
+        .slice(0, limit)
+        .map((entry) => entry.name);
+    }),
     isTaskInActiveProject: vi.fn(() => true),
     normalizeClockTimeInput: vi.fn((value?: string | null) => {
       const trimmed = String(value ?? '').trim();
@@ -172,7 +229,10 @@ vi.mock('@mindwtr/core', () => {
 });
 
 vi.mock('../contexts/language-context', () => ({
-  useLanguage: () => ({ t: (key: string) => key, language: 'en' }),
+  useLanguage: () => ({
+    t: translate,
+    language: 'en',
+  }),
 }));
 
 vi.mock('../contexts/theme-context', () => ({
@@ -185,9 +245,13 @@ vi.mock('expo-router', () => ({
 
 vi.mock('../contexts/toast-context', () => ({
   useToast: () => ({
-    showToast: vi.fn(),
-    dismissToast: vi.fn(),
+    showToast,
+    dismissToast,
   }),
+}));
+
+vi.mock('@/hooks/use-theme-tokens', () => ({
+  useThemeTokens: () => ({ isMaterial: false, roles: null, shape: { large: 16 } }),
 }));
 
 vi.mock('@/hooks/use-theme-colors', () => ({
@@ -235,14 +299,18 @@ describe('InboxProcessingModal', () => {
     mockSettings.features = undefined;
     mockSettings.gtd = { inboxProcessing: {}, taskEditor: undefined };
     mockSettings.ai = {};
+    mockSettings.filters = undefined;
     storeState.tasks = [{ ...baseInboxTask }];
     storeState.projects = [];
     storeState.areas = [];
     updateTask.mockClear();
     deleteTask.mockClear();
     addProject.mockClear();
+    addTask.mockClear();
     push.mockClear();
     clarifyTask.mockClear();
+    showToast.mockClear();
+    dismissToast.mockClear();
   });
 
   afterEach(() => {
@@ -302,6 +370,39 @@ describe('InboxProcessingModal', () => {
     expect(processingScroll.props.keyboardShouldPersistTaps).toBe('handled');
   });
 
+  it('lifts the Android processing form by the measured keyboard inset instead of resizing', () => {
+    setPlatform('android');
+    const listeners = new Map<string, (event?: any) => void>();
+    const addListener = vi.spyOn(Keyboard, 'addListener').mockImplementation((event: string, callback: any) => {
+      listeners.set(event, callback);
+      return { remove: vi.fn() } as any;
+    });
+    const onClose = vi.fn();
+    let tree: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<InboxProcessingModal visible onClose={onClose} />);
+    });
+
+    expect(addListener).toHaveBeenCalledWith('keyboardDidShow', expect.any(Function));
+    expect(addListener).toHaveBeenCalledWith('keyboardDidChangeFrame', expect.any(Function));
+    expect(addListener).toHaveBeenCalledWith('keyboardDidHide', expect.any(Function));
+
+    act(() => {
+      listeners.get('keyboardDidShow')?.({ endCoordinates: { height: 280 } });
+    });
+
+    const keyboardAvoidingView = tree!.root.findByType(KeyboardAvoidingView);
+    expect(keyboardAvoidingView.props.behavior).toBeUndefined();
+    expect(flattenStyle(keyboardAvoidingView.props.style).paddingBottom).toBe(280);
+
+    act(() => {
+      listeners.get('keyboardDidHide')?.();
+    });
+
+    expect(flattenStyle(tree!.root.findByType(KeyboardAvoidingView).props.style).paddingBottom).toBeUndefined();
+  });
+
   it('replaces the header next action with skip and saves edits before advancing', () => {
     mockSettings.features = undefined;
     mockSettings.gtd.inboxProcessing = {};
@@ -310,6 +411,7 @@ describe('InboxProcessingModal', () => {
     updateTask.mockClear();
     deleteTask.mockClear();
     addProject.mockClear();
+    addTask.mockClear();
     const onClose = vi.fn();
     let tree: ReturnType<typeof create>;
 
@@ -383,7 +485,7 @@ describe('InboxProcessingModal', () => {
     expect(root.findAllByProps({ placeholder: 'inbox.addContextPlaceholder' })).toHaveLength(0);
   });
 
-  it('filters project choices by selected area without preselecting the task area', () => {
+  it('preselects the task area and filters project choices by it', () => {
     storeState.tasks = [{ ...baseInboxTask, areaId: workArea.id }];
     storeState.areas = [workArea, homeArea];
     storeState.projects = [workProject, homeProject];
@@ -396,16 +498,71 @@ describe('InboxProcessingModal', () => {
 
     const root = tree!.root;
 
+    // The area assigned while the task sat in the inbox starts selected, so the
+    // project picker opens filtered to it (and apply keeps the area).
     expect(findNodesWithText(root, 'taskEdit.areaLabel').length).toBeGreaterThan(0);
     expect(findNodesWithText(root, 'Work Project').length).toBeGreaterThan(0);
-    expect(findNodesWithText(root, 'Home Project').length).toBeGreaterThan(0);
+    expect(findNodesWithText(root, 'Home Project')).toHaveLength(0);
 
     act(() => {
-      findPressableWithText(root, 'Work').props.onPress();
+      findPressableWithText(root, 'projects.noArea').props.onPress();
     });
 
     expect(findNodesWithText(root, 'Work Project').length).toBeGreaterThan(0);
-    expect(findNodesWithText(root, 'Home Project')).toHaveLength(0);
+    expect(findNodesWithText(root, 'Home Project').length).toBeGreaterThan(0);
+  });
+
+  it('respects the global area filter when building the processing queue', () => {
+    mockSettings.filters = { areaId: workArea.id };
+    storeState.areas = [workArea, homeArea];
+    storeState.projects = [workProject, homeProject];
+    storeState.tasks = [
+      {
+        ...baseInboxTask,
+        id: 'home-inbox',
+        title: 'Home inbox',
+        projectId: homeProject.id,
+        contexts: [],
+        tags: [],
+      },
+      {
+        ...baseInboxTask,
+        id: 'work-inbox',
+        title: 'Work inbox',
+        projectId: workProject.id,
+        contexts: [],
+        tags: [],
+      },
+    ];
+    const onClose = vi.fn();
+    let tree: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<InboxProcessingModal visible onClose={onClose} />);
+    });
+
+    const root = tree!.root;
+
+    expect(root.findByProps({ placeholder: 'taskEdit.titleLabel' }).props.value).toBe('Work inbox');
+
+    const skipLabel = root.findByProps({ children: 'Skip' });
+    const skipButton = skipLabel.parent;
+
+    if (!skipButton) {
+      throw new Error('Skip button not found');
+    }
+
+    act(() => {
+      skipButton.props.onPress();
+    });
+
+    expect(updateTask).toHaveBeenCalledWith(
+      'work-inbox',
+      expect.objectContaining({
+        title: 'Work inbox',
+      }),
+    );
+    expect(onClose).toHaveBeenCalled();
   });
 
   it('creates inbox processing projects in the selected area', async () => {
@@ -504,6 +661,121 @@ describe('InboxProcessingModal', () => {
       })
     );
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('chains a fresh action input from keyboard submit instead of converting (#827)', () => {
+    const onClose = vi.fn();
+    let tree: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<InboxProcessingModal visible onClose={onClose} />);
+    });
+
+    const root = tree!.root;
+
+    act(() => {
+      findPressableWithText(root, 'process.moreThanOneStepYes').props.onPress();
+    });
+
+    const findActionInputs = () => root.findAll((node) => (
+      typeof node.type === 'string'
+      && node.props.accessibilityLabel === 'process.nextAction'
+      && typeof node.props.onChangeText === 'function'
+    ));
+
+    act(() => {
+      findActionInputs()[0].props.onChangeText('Draft launch brief');
+    });
+    act(() => {
+      findActionInputs()[0].props.onSubmitEditing();
+    });
+    expect(findActionInputs()).toHaveLength(2);
+    expect(findActionInputs()[0].props.blurOnSubmit).toBe(false);
+
+    act(() => {
+      findActionInputs()[1].props.onChangeText('Book venue');
+    });
+    act(() => {
+      findActionInputs()[1].props.onSubmitEditing();
+    });
+    expect(findActionInputs()).toHaveLength(3);
+
+    // Submit on an empty trailing row must not add another.
+    act(() => {
+      findActionInputs()[2].props.onSubmitEditing();
+    });
+    expect(findActionInputs()).toHaveLength(3);
+
+    expect(addProject).not.toHaveBeenCalled();
+    expect(updateTask).not.toHaveBeenCalled();
+  });
+
+  it('creates extra next actions in the new project when added at the split step (#827)', async () => {
+    addProject.mockResolvedValueOnce({
+      id: 'project-created',
+      title: 'Plan Launch',
+      color: '#3b82f6',
+      status: 'active',
+      order: 0,
+      tagIds: [],
+      createdAt: '2025-01-01T00:00:00.000Z',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    });
+    const onClose = vi.fn();
+    let tree: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<InboxProcessingModal visible onClose={onClose} />);
+    });
+
+    const root = tree!.root;
+
+    act(() => {
+      findPressableWithText(root, 'process.moreThanOneStepYes').props.onPress();
+    });
+    act(() => {
+      root.findByProps({ accessibilityLabel: 'projects.title' }).props.onChangeText('Plan Launch');
+    });
+    act(() => {
+      findPressableWithText(root, 'process.addAnotherAction').props.onPress();
+    });
+    act(() => {
+      findPressableWithText(root, 'process.addAnotherAction').props.onPress();
+    });
+
+    const findActionInputs = () => root.findAll((node) => (
+      typeof node.type === 'string'
+      && node.props.accessibilityLabel === 'process.nextAction'
+      && typeof node.props.onChangeText === 'function'
+    ));
+    expect(findActionInputs()).toHaveLength(3);
+    act(() => {
+      findActionInputs()[0].props.onChangeText('Draft launch brief');
+    });
+    act(() => {
+      findActionInputs()[1].props.onChangeText('Book venue');
+    });
+    act(() => {
+      findActionInputs()[2].props.onChangeText('   ');
+    });
+
+    await act(async () => {
+      findPressableWithText(root, 'process.createProject').props.onPress();
+    });
+
+    expect(updateTask).toHaveBeenCalledWith(
+      'inbox-1',
+      expect.objectContaining({
+        title: 'Draft launch brief',
+        status: 'next',
+        projectId: 'project-created',
+      })
+    );
+    expect(addTask).toHaveBeenCalledTimes(1);
+    expect(addTask).toHaveBeenCalledWith('Book venue', {
+      status: 'inbox',
+      projectId: 'project-created',
+    });
   });
 
   it('suggests existing contexts and tags while typing without a prefix', () => {
@@ -642,8 +914,7 @@ describe('InboxProcessingModal', () => {
     });
 
     const root = tree!.root;
-    const laterLabel = findNodeWithText(root, 'Later');
-    const laterButton = laterLabel.parent;
+    const laterButton = findPressableWithText(root, 'Later');
 
     if (!laterButton) {
       throw new Error('Later button not found');
@@ -701,7 +972,7 @@ describe('InboxProcessingModal', () => {
     });
 
     const root = tree!.root;
-    const laterButton = findNodeWithText(root, 'Later').parent;
+    const laterButton = findPressableWithText(root, 'Later');
 
     if (!laterButton) {
       throw new Error('Later button not found');
@@ -756,7 +1027,7 @@ describe('InboxProcessingModal', () => {
     });
 
     const root = tree!.root;
-    const laterButton = findNodeWithText(root, 'Later').parent;
+    const laterButton = findPressableWithText(root, 'Later');
 
     if (!laterButton) {
       throw new Error('Later button not found');
@@ -810,6 +1081,127 @@ describe('InboxProcessingModal', () => {
         startTime: '2026-03-23',
       })
     );
+  });
+
+  it('moves Later items to next when No date is explicitly selected', () => {
+    const onClose = vi.fn();
+    let tree: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<InboxProcessingModal visible onClose={onClose} />);
+    });
+
+    const root = tree!.root;
+    const laterButton = findPressableWithText(root, 'Later');
+
+    if (!laterButton) {
+      throw new Error('Later button not found');
+    }
+
+    act(() => {
+      laterButton.props.onPress();
+    });
+
+    const noDateButton = findNodeWithText(root, 'No date').parent;
+
+    if (!noDateButton) {
+      throw new Error('No date button not found');
+    }
+
+    expect(noDateButton.props.accessibilityState?.selected).toBe(false);
+
+    act(() => {
+      noDateButton.props.onPress();
+    });
+
+    const selectedNoDateButton = findNodeWithText(root, 'No date').parent;
+
+    if (!selectedNoDateButton) {
+      throw new Error('No date button not found after selection');
+    }
+
+    expect(selectedNoDateButton.props.accessibilityState?.selected).toBe(true);
+
+    const nextTaskButton = findNodeWithText(root, 'Next task →').parent;
+
+    if (!nextTaskButton) {
+      throw new Error('Next task button not found');
+    }
+
+    act(() => {
+      nextTaskButton.props.onPress();
+    });
+
+    expect(updateTask).toHaveBeenCalledWith(
+      'inbox-1',
+      expect.objectContaining({
+        status: 'next',
+      })
+    );
+    expect(updateTask.mock.calls[0][1]).toHaveProperty('startTime', undefined);
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('advances to the next inbox item when Later No date is selected directly', () => {
+    storeState.tasks = [
+      { ...baseInboxTask },
+      {
+        ...baseInboxTask,
+        id: 'inbox-2',
+        title: 'Second inbox task',
+        description: 'Second description',
+        contexts: [],
+        tags: [],
+      },
+    ];
+    const onClose = vi.fn();
+    let tree: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<InboxProcessingModal visible onClose={onClose} />);
+    });
+
+    const root = tree!.root;
+    const laterButton = findPressableWithText(root, 'Later');
+
+    if (!laterButton) {
+      throw new Error('Later button not found');
+    }
+
+    act(() => {
+      laterButton.props.onPress();
+    });
+
+    const noDateButton = findNodeWithText(root, 'No date').parent;
+
+    if (!noDateButton) {
+      throw new Error('No date button not found');
+    }
+
+    act(() => {
+      noDateButton.props.onPress();
+    });
+
+    const nextTaskButton = findNodeWithText(root, 'Next task →').parent;
+
+    if (!nextTaskButton) {
+      throw new Error('Next task button not found');
+    }
+
+    act(() => {
+      nextTaskButton.props.onPress();
+    });
+
+    expect(updateTask).toHaveBeenCalledWith(
+      'inbox-1',
+      expect.objectContaining({
+        status: 'next',
+      })
+    );
+    expect(updateTask.mock.calls[0][1]).toHaveProperty('startTime', undefined);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(root.findByProps({ placeholder: 'taskEdit.titleLabel' }).props.value).toBe('Second inbox task');
+    expect(showToast).not.toHaveBeenCalled();
   });
 
   it('saves the selected priority when the priority field is shown', () => {
@@ -931,8 +1323,7 @@ describe('InboxProcessingModal', () => {
     });
 
     const root = tree!.root;
-    const delegateLabel = findNodeWithText(root, 'inbox.delegate');
-    const delegateButton = delegateLabel.parent;
+    const delegateButton = findPressableWithText(root, 'inbox.delegate');
 
     if (!delegateButton) {
       throw new Error('Delegate button not found');
@@ -996,8 +1387,7 @@ describe('InboxProcessingModal', () => {
       priorityButton.props.onPress();
     });
 
-    const delegateLabel = findNodeWithText(root, 'inbox.delegate');
-    const delegateButton = delegateLabel.parent;
+    const delegateButton = findPressableWithText(root, 'inbox.delegate');
 
     if (!delegateButton) {
       throw new Error('Delegate button not found');
@@ -1061,8 +1451,7 @@ describe('InboxProcessingModal', () => {
       priorityButton.props.onPress();
     });
 
-    const delegateLabel = findNodeWithText(root, 'inbox.delegate');
-    const delegateButton = delegateLabel.parent;
+    const delegateButton = findPressableWithText(root, 'inbox.delegate');
 
     if (!delegateButton) {
       throw new Error('Delegate button not found');
@@ -1114,8 +1503,7 @@ describe('InboxProcessingModal', () => {
     });
 
     const root = tree!.root;
-    const delegateLabel = findNodeWithText(root, 'inbox.delegate');
-    const delegateButton = delegateLabel.parent;
+    const delegateButton = findPressableWithText(root, 'inbox.delegate');
 
     if (!delegateButton) {
       throw new Error('Delegate button not found');

@@ -4,6 +4,7 @@ import { Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import type { AIProviderId, AIReasoningEffort } from '@mindwtr/core';
 
 import type { ThemeColors } from '@/hooks/use-theme-colors';
+import { CompactText } from '@/components/compact-text';
 
 import { AiSettingsAssistantAnthropicPanel } from './ai-settings-assistant-anthropic-panel';
 import { AiSettingsAssistantGeminiPanel } from './ai-settings-assistant-gemini-panel';
@@ -124,9 +125,12 @@ export function AiSettingsAssistantCard({
                                 ]}
                                 onPress={() => onAiProviderChange('openai')}
                             >
-                                <Text style={[styles.backendOptionText, { color: aiProvider === 'openai' ? tc.tint : tc.secondaryText }]}>
+                                <CompactText
+                                    style={[styles.backendOptionText, { color: aiProvider === 'openai' ? tc.tint : tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
                                     {getAIProviderLabel('openai')}
-                                </Text>
+                                </CompactText>
                             </TouchableOpacity>
                             {!isFossBuild && (
                                 <TouchableOpacity
@@ -136,9 +140,12 @@ export function AiSettingsAssistantCard({
                                     ]}
                                     onPress={() => onAiProviderChange('gemini')}
                                 >
-                                    <Text style={[styles.backendOptionText, { color: aiProvider === 'gemini' ? tc.tint : tc.secondaryText }]}>
+                                    <CompactText
+                                        style={[styles.backendOptionText, { color: aiProvider === 'gemini' ? tc.tint : tc.secondaryText }]}
+                                        numberOfLines={2}
+                                    >
                                         {t('settings.aiProviderGemini')}
-                                    </Text>
+                                    </CompactText>
                                 </TouchableOpacity>
                             )}
                             {!isFossBuild && (
@@ -149,9 +156,12 @@ export function AiSettingsAssistantCard({
                                     ]}
                                     onPress={() => onAiProviderChange('anthropic')}
                                 >
-                                    <Text style={[styles.backendOptionText, { color: aiProvider === 'anthropic' ? tc.tint : tc.secondaryText }]}>
+                                    <CompactText
+                                        style={[styles.backendOptionText, { color: aiProvider === 'anthropic' ? tc.tint : tc.secondaryText }]}
+                                        numberOfLines={2}
+                                    >
                                         {t('settings.aiProviderAnthropic')}
-                                    </Text>
+                                    </CompactText>
                                 </TouchableOpacity>
                             )}
                         </View>
@@ -177,9 +187,12 @@ export function AiSettingsAssistantCard({
                                 style={[styles.modelSuggestButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
                                 onPress={() => onModelPickerChange('model')}
                             >
-                                <Text style={[styles.modelSuggestButtonText, { color: tc.secondaryText }]}>
+                                <CompactText
+                                    style={[styles.modelSuggestButtonText, { color: tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
                                     {tr('settings.aiMobile.suggestions')}
-                                </Text>
+                                </CompactText>
                             </TouchableOpacity>
                         </View>
                     </View>
@@ -205,9 +218,12 @@ export function AiSettingsAssistantCard({
                                 style={[styles.modelSuggestButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
                                 onPress={() => onModelPickerChange('copilot')}
                             >
-                                <Text style={[styles.modelSuggestButtonText, { color: tc.secondaryText }]}>
+                                <CompactText
+                                    style={[styles.modelSuggestButtonText, { color: tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
                                     {tr('settings.aiMobile.suggestions')}
-                                </Text>
+                                </CompactText>
                             </TouchableOpacity>
                         </View>
                     </View>

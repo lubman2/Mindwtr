@@ -15,7 +15,7 @@ import {
     startOfMonth as startOfGregorianMonth,
     type Locale,
 } from 'date-fns';
-import { ar, de, enGB, enUS, es, fr, hi, it, ja, ko, nl, pl, ptBR, ru, tr, zhCN, zhTW } from 'date-fns/locale';
+import { ar, cs, de, enGB, enUS, es, fr, hi, it, ja, ko, nl, pl, ptBR, ru, tr, vi, zhCN, zhTW } from 'date-fns/locale';
 import {
     addMonths as addJalaliMonths,
     endOfMonth as endOfJalaliMonth,
@@ -44,6 +44,7 @@ const DEFAULT_LOCALE = enUS;
 const DMY_EN_REGIONS = new Set(['GB', 'IE', 'AU', 'NZ', 'ZA']);
 const DATE_LOCALE_BY_LANGUAGE: Record<Language, Locale> = {
     en: enUS,
+    vi,
     zh: zhCN,
     'zh-Hant': zhTW,
     es,
@@ -56,12 +57,14 @@ const DATE_LOCALE_BY_LANGUAGE: Record<Language, Locale> = {
     pt: ptBR,
     pl,
     ko,
+    cs,
     it,
     tr,
     nl,
 };
 const LOCALE_TAG_BY_LANGUAGE: Record<Language, string> = {
     en: 'en-US',
+    vi: 'vi-VN',
     zh: 'zh-CN',
     'zh-Hant': 'zh-TW',
     es: 'es-ES',
@@ -73,6 +76,7 @@ const LOCALE_TAG_BY_LANGUAGE: Record<Language, string> = {
     fr: 'fr-FR',
     pt: 'pt-PT',
     pl: 'pl-PL',
+    cs: 'cs-CZ',
     ko: 'ko-KR',
     it: 'it-IT',
     tr: 'tr-TR',
@@ -202,11 +206,77 @@ export function normalizeTimeFormatSetting(value?: string | null): TimeFormatSet
     return 'system';
 }
 
-export function normalizeWeekStartSetting(value?: string | null): WeekStartSetting {
+// CLDR weekData firstDay: regions not listed here start the week on Monday.
+const SUNDAY_FIRST_REGIONS = new Set([
+    'AG', 'AS', 'BD', 'BR', 'BS', 'BT', 'BW', 'BZ', 'CA', 'CO', 'DM', 'DO', 'ET',
+    'GT', 'GU', 'HK', 'HN', 'ID', 'IL', 'IN', 'JM', 'JP', 'KE', 'KH', 'KR', 'LA',
+    'MH', 'MM', 'MO', 'MT', 'MX', 'MZ', 'NI', 'NP', 'PA', 'PE', 'PH', 'PK', 'PR',
+    'PT', 'PY', 'SA', 'SG', 'SV', 'TH', 'TT', 'TW', 'UM', 'US', 'VE', 'VI', 'WS',
+    'YE', 'ZA', 'ZW',
+]);
+const SATURDAY_FIRST_REGIONS = new Set([
+    'AE', 'AF', 'BH', 'DJ', 'DZ', 'EG', 'IQ', 'IR', 'JO', 'KW', 'LY', 'OM', 'QA',
+    'SD', 'SY',
+]);
+
+function regionWeekStart(region: string): WeekStartSetting {
+    if (SATURDAY_FIRST_REGIONS.has(region)) return 'saturday';
+    if (SUNDAY_FIRST_REGIONS.has(region)) return 'sunday';
+    return 'monday';
+}
+
+/**
+ * Week start inferred from the device locale, so calendars look right without
+ * a setting. Uses Intl week info when the runtime provides it and falls back
+ * to CLDR region data parsed from the locale tag.
+ */
+export function getSystemWeekStart(localeInput?: string | null): WeekStartSetting {
+    let locale = typeof localeInput === 'string' && localeInput.trim() ? localeInput.trim() : '';
+    if (!locale) {
+        try {
+            if (typeof navigator !== 'undefined' && typeof navigator.language === 'string' && navigator.language) {
+                locale = navigator.language;
+            } else {
+                locale = Intl.DateTimeFormat().resolvedOptions().locale ?? '';
+            }
+        } catch {
+            locale = '';
+        }
+    }
+    if (!locale) return 'monday';
+    try {
+        const intlLocale = new Intl.Locale(locale);
+        const weekInfo = (intlLocale as { getWeekInfo?: () => { firstDay?: number } }).getWeekInfo?.()
+            ?? (intlLocale as { weekInfo?: { firstDay?: number } }).weekInfo;
+        if (weekInfo?.firstDay === 7) return 'sunday';
+        if (weekInfo?.firstDay === 6) return 'saturday';
+        if (typeof weekInfo?.firstDay === 'number') return 'monday';
+        const region = intlLocale.maximize?.().region ?? intlLocale.region;
+        if (region) return regionWeekStart(region.toUpperCase());
+    } catch {
+        // Fall through to plain locale-tag parsing below.
+    }
+    const match = locale.match(/[-_]([A-Za-z]{2})(?:[-_]|$)/);
+    if (match) return regionWeekStart(match[1].toUpperCase());
+    return 'monday';
+}
+
+export type WeekStartPreference = WeekStartSetting | 'system';
+
+/** The stored preference, for settings UIs: explicit day or 'system'. */
+export function normalizeWeekStartPreference(value?: string | null): WeekStartPreference {
     const normalized = String(value || '').trim().toLowerCase();
     if (normalized === 'monday') return 'monday';
     if (normalized === 'saturday') return 'saturday';
-    return 'sunday';
+    if (normalized === 'sunday') return 'sunday';
+    return 'system';
+}
+
+/** The resolved week start: explicit setting wins, otherwise the device locale decides. */
+export function normalizeWeekStartSetting(value?: string | null): WeekStartSetting {
+    const preference = normalizeWeekStartPreference(value);
+    if (preference !== 'system') return preference;
+    return getSystemWeekStart();
 }
 
 export function getWeekStartsOnIndex(value?: string | null): WeekStartsOnIndex {

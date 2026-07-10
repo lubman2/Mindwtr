@@ -28,6 +28,16 @@ const t = (key: string) => {
         'taskEdit.startDateLabel': 'Start Date',
         'taskEdit.dueDateLabel': 'Due Date',
         'taskEdit.reviewDateLabel': 'Review Date',
+        'taskEdit.dateOnly': 'Date only',
+        'taskEdit.startModeLabel': 'Start mode',
+        'taskEdit.startModeAbsolute': 'Absolute',
+        'taskEdit.startModeRelative': 'Relative',
+        'taskEdit.relativeStartAmount': 'Start lead time',
+        'taskEdit.relativeStartUnit': 'Start lead time unit',
+        'taskEdit.relativeStartMinutes': 'minutes before due',
+        'taskEdit.relativeStartHours': 'hours before due',
+        'taskEdit.relativeStartDays': 'days before due',
+        'taskEdit.relativeStartWeeks': 'weeks before due',
         'taskEdit.statusLabel': 'Status',
         'taskEdit.priorityLabel': 'Priority',
         'taskEdit.energyLevel': 'Energy Level',
@@ -37,6 +47,7 @@ const t = (key: string) => {
         'taskEdit.tagsPlaceholder': 'Add tags',
         'taskEdit.assignedTo': 'Assigned to',
         'taskEdit.assignedToPlaceholder': 'Delegate to...',
+        'people.new': 'New Person',
         'task.aria.startDate': 'Start date',
         'task.aria.startTime': 'Start time',
         'task.aria.dueDate': 'Due date',
@@ -54,6 +65,10 @@ const t = (key: string) => {
         'taskEdit.locationLabel': 'Location',
         'taskEdit.locationPlaceholder': 'Add location',
         'taskEdit.recurrenceLabel': 'Recurrence',
+        'taskEdit.repeatReminderLabel': 'Repeat reminder',
+        'taskEdit.repeatReminderOff': 'Off',
+        'taskEdit.repeatReminderEveryMinutes': 'Every {count} min',
+        'taskEdit.repeatReminderMinutesShort': '{count} min',
         'taskEdit.checklist': 'Checklist',
         'attachments.title': 'Attachments',
         'recurrence.none': 'None',
@@ -66,6 +81,7 @@ const t = (key: string) => {
         'recurrence.dayUnit': 'day(s)',
         'recurrence.weekUnit': 'week(s)',
         'recurrence.afterCompletion': 'Repeat after completion',
+        'recurrence.yearUnit': 'year(s)',
         'recurrence.endsLabel': 'Ends',
         'recurrence.endsNever': 'Never',
         'recurrence.endsOnDate': 'On date',
@@ -103,8 +119,10 @@ const createData = (overrides: Partial<TaskItemFieldRendererData> = {}): TaskIte
     attachmentError: null,
     visibleEditAttachments: [],
     editStartTime: '',
+    editRelativeStartOffset: undefined,
     editDueDate: '',
     editReviewAt: '',
+    editRepeatReminderMinutes: undefined,
     editStatus: 'inbox',
     editPriority: '',
     editEnergyLevel: '',
@@ -115,6 +133,8 @@ const createData = (overrides: Partial<TaskItemFieldRendererData> = {}): TaskIte
     editShowFutureRecurrence: false,
     monthlyRecurrence: { pattern: 'date', interval: 1 },
     editTimeEstimate: '',
+    editTimeSpentMinutes: undefined,
+    timeSpentEnabled: true,
     editContexts: '',
     editTags: '',
     editLocation: '',
@@ -127,6 +147,7 @@ const createData = (overrides: Partial<TaskItemFieldRendererData> = {}): TaskIte
     popularContextOptions: [],
     popularTagOptions: [],
     assignedToOptions: [],
+    showObsidianNoteAttachment: true,
     ...overrides,
 });
 
@@ -136,22 +157,27 @@ const createHandlers = (): TaskItemFieldRendererHandlers => ({
     setEditDescription: vi.fn(),
     addFileAttachment: vi.fn(),
     addLinkAttachment: vi.fn(),
+    addObsidianNoteAttachment: vi.fn(),
     editLinkAttachment: vi.fn(),
     openAttachment: vi.fn(),
     removeAttachment: vi.fn(),
     setEditStartTime: vi.fn(),
+    setEditRelativeStartOffset: vi.fn(),
     setEditDueDate: vi.fn(),
     setEditReviewAt: vi.fn(),
+    setEditRepeatReminderMinutes: vi.fn(),
     setEditStatus: vi.fn(),
     setEditPriority: vi.fn(),
     setEditEnergyLevel: vi.fn(),
     setEditAssignedTo: vi.fn(),
+    createAssignedToPerson: vi.fn(),
     setEditRecurrence: vi.fn(),
     setEditRecurrenceStrategy: vi.fn(),
     setEditRecurrenceRRule: vi.fn(),
     setEditShowFutureRecurrence: vi.fn(),
     openCustomRecurrence: vi.fn(),
     setEditTimeEstimate: vi.fn(),
+    setEditTimeSpentMinutes: vi.fn(),
     setEditContexts: vi.fn(),
     setEditTags: vi.fn(),
     setEditLocation: vi.fn(),
@@ -237,6 +263,11 @@ function TagAutocompleteHarness() {
         />
     );
 }
+
+const selectTextareaRange = (textarea: HTMLTextAreaElement, start: number, end: number) => {
+    fireEvent.focus(textarea);
+    textarea.setSelectionRange(start, end);
+};
 
 function AssignedToAutocompleteHarness() {
     const [editAssignedTo, setEditAssignedTo] = useState('');
@@ -377,6 +408,78 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         expect(queryByRole('button', { name: 'Clear Due Date' })).toBeNull();
     });
 
+    it.each([
+        {
+            fieldId: 'startTime' as const,
+            editValue: { editStartTime: '2026-04-18T09:30' },
+            dateOnlyLabel: 'Date only: Start Date',
+            handlerKey: 'setEditStartTime' as const,
+            expected: '2026-04-18',
+        },
+        {
+            fieldId: 'dueDate' as const,
+            editValue: { editDueDate: '2026-04-19T11:45' },
+            dateOnlyLabel: 'Date only: Due Date',
+            handlerKey: 'setEditDueDate' as const,
+            expected: '2026-04-19',
+        },
+        {
+            fieldId: 'reviewAt' as const,
+            editValue: { editReviewAt: '2026-04-20T14:15' },
+            dateOnlyLabel: 'Date only: Review Date',
+            handlerKey: 'setEditReviewAt' as const,
+            expected: '2026-04-20',
+        },
+    ])('strips the time from $fieldId when the date-only button is clicked', ({ fieldId, editValue, dateOnlyLabel, handlerKey, expected }) => {
+        const handlers = createHandlers();
+
+        const { getByRole } = render(
+            <TaskItemFieldRenderer
+                fieldId={fieldId}
+                data={createData(editValue)}
+                handlers={handlers}
+            />
+        );
+
+        fireEvent.click(getByRole('button', { name: dateOnlyLabel }));
+
+        expect(handlers[handlerKey]).toHaveBeenCalledWith(expected);
+    });
+
+    it('hides the date-only button when the due date has no time component', () => {
+        const handlers = createHandlers();
+
+        const { queryByRole } = render(
+            <TaskItemFieldRenderer
+                fieldId="dueDate"
+                data={createData({ editDueDate: '2026-04-19' })}
+                handlers={handlers}
+            />
+        );
+
+        expect(queryByRole('button', { name: 'Date only: Due Date' })).toBeNull();
+    });
+
+    it('collapses due-date repeat reminder options until the compact row is opened', () => {
+        const handlers = createHandlers();
+
+        const { getByRole, queryByRole } = render(
+            <TaskItemFieldRenderer
+                fieldId="dueDate"
+                data={createData({ editDueDate: '2026-04-19T11:45' })}
+                handlers={handlers}
+            />
+        );
+
+        expect(queryByRole('combobox', { name: 'Repeat reminder' })).toBeNull();
+        const collapsedRow = getByRole('button', { name: 'Repeat reminder: Off' });
+
+        fireEvent.click(collapsedRow);
+        fireEvent.click(getByRole('button', { name: '10 min' }));
+
+        expect(handlers.setEditRepeatReminderMinutes).toHaveBeenCalledWith(10);
+    });
+
     it('applies the configured locale to native date and time inputs', () => {
         const handlers = createHandlers();
 
@@ -479,10 +582,10 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
             inputLabel: 'Review date',
             dialogLabel: 'Review Date calendar',
         },
-    ])('closes the $fieldId mini calendar when clicking outside', ({ fieldId, editValue, inputLabel, dialogLabel }) => {
+    ])('closes the $fieldId mini calendar when clicking outside', ({ fieldId, editValue, dialogLabel }) => {
         const handlers = createHandlers();
 
-        const { getByLabelText, getByRole, queryByRole } = render(
+        const { getByRole, queryByRole } = render(
             <TaskItemFieldRenderer
                 fieldId={fieldId}
                 data={createData(editValue)}
@@ -490,7 +593,7 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
             />
         );
 
-        fireEvent.focus(getByLabelText(inputLabel));
+        fireEvent.click(getByRole('button', { name: dialogLabel }));
         expect(getByRole('dialog', { name: dialogLabel })).toBeInTheDocument();
 
         fireEvent.mouseDown(document.body);
@@ -499,6 +602,27 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
     });
 
     it('sets the date and closes the mini calendar when a day is selected', () => {
+        const handlers = createHandlers();
+
+        const { getByRole, queryByRole } = render(
+            <TaskItemFieldRenderer
+                fieldId="dueDate"
+                data={createData({ editDueDate: '2026-04-12' })}
+                handlers={handlers}
+            />
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Due Date calendar' }));
+        const dialog = getByRole('dialog', { name: 'Due Date calendar' });
+
+        fireEvent.pointerDown(within(dialog).getByRole('button', { name: /April 19, 2026/i }));
+
+        expect(handlers.setEditDueDate).toHaveBeenCalledWith('2026-04-19');
+        expect(queryByRole('dialog', { name: 'Due Date calendar' })).not.toBeInTheDocument();
+        expect(dialog).not.toBeInTheDocument();
+    });
+
+    it('keeps the due-date mini calendar closed when the date input receives focus', () => {
         const handlers = createHandlers();
 
         const { getByLabelText, getByRole, queryByRole } = render(
@@ -510,32 +634,101 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         );
 
         fireEvent.focus(getByLabelText('Due date'));
-        const dialog = getByRole('dialog', { name: 'Due Date calendar' });
 
-        fireEvent.pointerDown(getByRole('button', { name: /April 19, 2026/i }));
-
-        expect(handlers.setEditDueDate).toHaveBeenCalledWith('2026-04-19');
         expect(queryByRole('dialog', { name: 'Due Date calendar' })).not.toBeInTheDocument();
-        expect(dialog).not.toBeInTheDocument();
+        expect(getByRole('button', { name: 'Today' })).toBeInTheDocument();
     });
 
-    it('lets quick date shortcuts use the full date field width', () => {
+    it('opens the due-date mini calendar from the calendar button and hides quick shortcuts', () => {
         const handlers = createHandlers();
 
-        const { getByRole } = render(
+        const { getByLabelText, getByRole, queryByRole } = render(
             <TaskItemFieldRenderer
                 fieldId="dueDate"
+                data={createData({ editDueDate: '2026-04-12' })}
+                handlers={handlers}
+            />
+        );
+
+        fireEvent.focus(getByLabelText('Due date'));
+        expect(getByRole('button', { name: 'Today' })).toBeInTheDocument();
+
+        fireEvent.click(getByRole('button', { name: 'Due Date calendar' }));
+
+        expect(getByRole('dialog', { name: 'Due Date calendar' })).toBeInTheDocument();
+        expect(queryByRole('button', { name: 'Today' })).not.toBeInTheDocument();
+    });
+
+    it('keeps the mini calendar closed after selecting a date from another month', async () => {
+        const handlers = createHandlers();
+
+        const { getByRole, queryByRole } = render(
+            <TaskItemFieldRenderer
+                fieldId="dueDate"
+                data={createData({ editDueDate: '2026-04-12' })}
+                handlers={handlers}
+            />
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Due Date calendar' }));
+        const dialog = getByRole('dialog', { name: 'Due Date calendar' });
+        const nextMonthButton = within(dialog).getByRole('button', { name: 'Next month' });
+        fireEvent.click(nextMonthButton);
+
+        const updatedDialog = getByRole('dialog', { name: 'Due Date calendar' });
+        fireEvent.pointerDown(
+            within(updatedDialog).getByRole('button', { name: /May 19, 2026/i })
+        );
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+        expect(handlers.setEditDueDate).toHaveBeenCalledWith('2026-05-19');
+        await waitFor(() => {
+            expect(queryByRole('dialog', { name: 'Due Date calendar' })).not.toBeInTheDocument();
+        });
+    });
+
+    it.each([
+        {
+            fieldId: 'startTime' as const,
+            inputLabel: 'Start date',
+            handlerKey: 'setEditStartTime' as const,
+        },
+        {
+            fieldId: 'dueDate' as const,
+            inputLabel: 'Due date',
+            handlerKey: 'setEditDueDate' as const,
+        },
+        {
+            fieldId: 'reviewAt' as const,
+            inputLabel: 'Review date',
+            handlerKey: 'setEditReviewAt' as const,
+        },
+    ])('shows $fieldId quick shortcuts only while the date field is active', ({ fieldId, inputLabel, handlerKey }) => {
+        const handlers = createHandlers();
+
+        const { getByLabelText, getByText, queryByRole } = render(
+            <TaskItemFieldRenderer
+                fieldId={fieldId}
                 data={createData()}
                 handlers={handlers}
             />
         );
 
-        const nextMonthButton = getByRole('button', { name: 'Next month' });
-        const chipsRow = nextMonthButton.parentElement;
+        expect(queryByRole('button', { name: 'Next month' })).not.toBeInTheDocument();
+
+        fireEvent.focus(getByLabelText(inputLabel));
+
+        const nextMonthButton = getByText('Next month').closest('button');
+        const chipsRow = nextMonthButton?.parentElement;
 
         expect(chipsRow).toHaveClass('w-full');
         expect(chipsRow).toHaveClass('flex-wrap');
         expect(chipsRow).not.toHaveClass('max-w-[min(22rem,100%)]');
+
+        fireEvent.mouseDown(nextMonthButton!);
+        fireEvent.click(nextMonthButton!);
+
+        expect(handlers[handlerKey]).toHaveBeenCalled();
     });
 
     it('renders status choices as pills and keeps archived available', () => {
@@ -746,6 +939,24 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         expect(input).toHaveValue('Alex');
     });
 
+    it('offers to create an assignee from an unmatched assigned-to value', async () => {
+        const handlers = createHandlers();
+        const { findByRole, getByRole } = render(
+            <TaskItemFieldRenderer
+                fieldId="assignedTo"
+                data={createData({ editAssignedTo: 'Morgan', assignedToOptions: ['Alex'] })}
+                handlers={handlers}
+            />
+        );
+
+        const input = getByRole('textbox', { name: 'Assigned to' });
+        fireEvent.focus(input);
+
+        fireEvent.click(await findByRole('option', { name: 'New Person: Morgan' }));
+
+        expect(handlers.createAssignedToPerson).toHaveBeenCalledWith('Morgan');
+    });
+
     it('updates weekly recurrence intervals without dropping selected weekdays', () => {
         const handlers = createHandlers();
         const { container, getByRole } = render(
@@ -763,13 +974,35 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         const input = container.querySelector('input[type="number"]') as HTMLInputElement | null;
 
         expect(input).toBeTruthy();
-        fireEvent.change(input!, { target: { value: '4' } });
+        fireEvent.change(input!, { target: { value: '78' } });
 
-        expect(handlers.setEditRecurrenceRRule).toHaveBeenCalledWith('FREQ=WEEKLY;INTERVAL=4;BYDAY=TU');
+        expect(handlers.setEditRecurrenceRRule).toHaveBeenCalledWith('FREQ=WEEKLY;INTERVAL=78;BYDAY=TU');
 
         fireEvent.click(getByRole('button', { name: 'Wed' }));
 
         expect(handlers.setEditRecurrenceRRule).toHaveBeenCalledWith('FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,WE');
+    });
+
+    it('updates yearly recurrence intervals', () => {
+        const handlers = createHandlers();
+        const { container } = render(
+            <LanguageProvider>
+                <TaskItemFieldRenderer
+                    fieldId="recurrence"
+                    data={createData({
+                        editRecurrence: 'yearly',
+                        editRecurrenceRRule: 'FREQ=YEARLY',
+                    })}
+                    handlers={handlers}
+                />
+            </LanguageProvider>
+        );
+        const input = container.querySelector('input[type="number"]') as HTMLInputElement | null;
+
+        expect(input).toBeTruthy();
+        fireEvent.change(input!, { target: { value: '2' } });
+
+        expect(handlers.setEditRecurrenceRRule).toHaveBeenCalledWith('FREQ=YEARLY;INTERVAL=2');
     });
 
     it('updates monthly recurrence intervals from the monthly recurrence controls', () => {
@@ -816,12 +1049,18 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         const original = 'Line one\nLine two\nLine three';
         const insertionPoint = original.indexOf('Line three');
 
-        fireEvent.change(textarea, { target: { value: original } });
-        textarea.setSelectionRange(insertionPoint, insertionPoint);
-        fireEvent.select(textarea);
+        fireEvent.change(textarea, {
+            target: {
+                value: original,
+                selectionStart: insertionPoint,
+                selectionEnd: insertionPoint,
+            },
+        });
         fireEvent.change(textarea, {
             target: {
                 value: `${original.slice(0, insertionPoint)}extra ${original.slice(insertionPoint)}`,
+                selectionStart: insertionPoint + 'extra '.length,
+                selectionEnd: insertionPoint + 'extra '.length,
             },
         });
         const selectionSpy = vi.spyOn(HTMLTextAreaElement.prototype, 'setSelectionRange');
@@ -863,8 +1102,7 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         const textarea = getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement;
 
         fireEvent.change(textarea, { target: { value: 'run tests' } });
-        textarea.setSelectionRange(0, 9);
-        fireEvent.select(textarea);
+        selectTextareaRange(textarea, 0, 9);
         fireEvent.keyDown(textarea, { key: '`' });
 
         await waitFor(() => {
@@ -879,8 +1117,7 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         const textarea = getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement;
 
         fireEvent.change(textarea, { target: { value: 'run tests' } });
-        textarea.setSelectionRange(0, 9);
-        fireEvent.select(textarea);
+        selectTextareaRange(textarea, 0, 9);
         fireEvent.keyDown(textarea, { key: '`' });
 
         await waitFor(() => {
@@ -909,8 +1146,7 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         const textarea = getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement;
 
         fireEvent.change(textarea, { target: { value: 'drop this' } });
-        textarea.setSelectionRange(0, 9);
-        fireEvent.select(textarea);
+        selectTextareaRange(textarea, 0, 9);
         fireEvent.keyDown(textarea, { key: '~' });
 
         await waitFor(() => {
@@ -924,9 +1160,9 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         const { getByRole } = render(<DescriptionHarness />);
         const textarea = getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement;
 
-        fireEvent.change(textarea, { target: { value: 'run tests' } });
-        textarea.setSelectionRange(0, 9);
-        fireEvent.select(textarea);
+        fireEvent.change(textarea, {
+            target: { value: 'run tests', selectionStart: 0, selectionEnd: 9 },
+        });
         fireEvent.change(textarea, { target: { value: '`' } });
 
         await waitFor(() => {
@@ -940,9 +1176,9 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         const { getByRole } = render(<DescriptionHarness />);
         const textarea = getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement;
 
-        fireEvent.change(textarea, { target: { value: 'drop this' } });
-        textarea.setSelectionRange(0, 9);
-        fireEvent.select(textarea);
+        fireEvent.change(textarea, {
+            target: { value: 'drop this', selectionStart: 0, selectionEnd: 9 },
+        });
         fireEvent.change(textarea, { target: { value: '~' } });
 
         await waitFor(() => {
@@ -956,9 +1192,9 @@ describe('TaskItemFieldRenderer date clear buttons', () => {
         const { getByRole } = render(<DescriptionHarness />);
         const textarea = getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement;
 
-        fireEvent.change(textarea, { target: { value: 'run tests' } });
-        textarea.setSelectionRange(0, 9);
-        fireEvent.select(textarea);
+        fireEvent.change(textarea, {
+            target: { value: 'run tests', selectionStart: 0, selectionEnd: 9 },
+        });
         fireEvent.change(textarea, { target: { value: '```' } });
 
         await waitFor(() => {

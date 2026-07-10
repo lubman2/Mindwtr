@@ -1,7 +1,13 @@
 import React from 'react';
 import { Image, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { CheckSquare, Square } from 'lucide-react-native';
-import { getAttachmentDisplayTitle, getRecurrenceCountValue, getRecurrenceUntilValue, hasTimeComponent, parseRRuleString, tFallback } from '@mindwtr/core';
+import {
+  formatRecurrenceLabel,
+  getAttachmentDisplayTitle,
+  getRecurringTaskPreviewDate,
+  hasTimeComponent,
+  tFallback,
+} from '@mindwtr/core';
 import type {
   Attachment,
   Area,
@@ -60,8 +66,6 @@ function TaskEditViewTabComponent({
   formatTimeEstimateLabel,
   formatDate,
   formatDueDate,
-  getRecurrenceRuleValue,
-  getRecurrenceStrategyValue,
   applyChecklistUpdate,
   visibleAttachments,
   openAttachment,
@@ -132,6 +136,7 @@ function TaskEditViewTabComponent({
 
   const project = projects.find((p) => p.id === mergedTask.projectId);
   const section = sections.find((item) => item.id === mergedTask.sectionId);
+  const title = String(mergedTask.title || '').trim();
   const description = String(mergedTask.description || '').trim();
   const area = areas.find((a) => a.id === mergedTask.areaId);
   const checklist = mergedTask.checklist || [];
@@ -145,27 +150,27 @@ function TaskEditViewTabComponent({
   const timeEstimateLabel = mergedTask.timeEstimate
     ? (formatTimeEstimateLabel(mergedTask.timeEstimate as TimeEstimate) || String(mergedTask.timeEstimate))
     : undefined;
-  const recurrenceRule = getRecurrenceRuleValue(mergedTask.recurrence);
-  const recurrenceStrategy = getRecurrenceStrategyValue(mergedTask.recurrence);
-  const recurrenceCount = getRecurrenceCountValue(mergedTask.recurrence);
-  const recurrenceUntil = getRecurrenceUntilValue(mergedTask.recurrence);
-  const recurrenceInterval = mergedTask.recurrence && typeof mergedTask.recurrence === 'object' && mergedTask.recurrence.rrule
-    ? parseRRuleString(mergedTask.recurrence.rrule).interval
-    : undefined;
-  const recurrenceParts = recurrenceRule
-    ? [
-        `${t(`recurrence.${recurrenceRule}`) || recurrenceRule}${recurrenceStrategy === 'fluid' ? ` · ${t('recurrence.afterCompletionShort')}` : ''}`,
-        recurrenceRule === 'weekly' && recurrenceInterval && recurrenceInterval > 1
-          ? `${t('recurrence.repeatEvery')} ${recurrenceInterval} ${t('recurrence.weekUnit')}`
-          : undefined,
-        recurrenceRule === 'monthly' && recurrenceInterval && recurrenceInterval > 1
-          ? `${t('recurrence.repeatEvery')} ${recurrenceInterval} ${t('recurrence.monthUnit')}`
-          : undefined,
-        recurrenceUntil ? `${t('recurrence.endsOnDate')} ${formatDate(recurrenceUntil)}` : undefined,
-        recurrenceCount ? `${t('recurrence.endsAfterCount')} ${recurrenceCount} ${t('recurrence.occurrenceUnit')}` : undefined,
-      ].filter(Boolean)
-    : [];
-  const recurrenceLabel = recurrenceParts.length > 0 ? recurrenceParts.join(' · ') : undefined;
+  const recurrenceLabel = formatRecurrenceLabel({ recurrence: mergedTask.recurrence, t, formatDate }) || undefined;
+  const projectedRecurrenceDateLabel = (() => {
+    if (!recurrenceLabel || !mergedTask.recurrence) return '';
+    const nowIso = new Date().toISOString();
+    const previewTask = {
+      ...mergedTask,
+      id: mergedTask.id ?? 'draft-recurrence-preview',
+      title: String(mergedTask.title ?? ''),
+      status: mergedTask.status ?? 'next',
+      tags: mergedTask.tags ?? [],
+      contexts: mergedTask.contexts ?? [],
+      createdAt: mergedTask.createdAt ?? nowIso,
+      updatedAt: mergedTask.updatedAt ?? nowIso,
+      recurrence: mergedTask.recurrence,
+    } as Task;
+    const previewDate = getRecurringTaskPreviewDate(previewTask, nowIso);
+    return previewDate ? formatDate(previewDate) : '';
+  })();
+  const recurrencePreviewLabel = recurrenceLabel && projectedRecurrenceDateLabel
+    ? `${recurrenceLabel} · ${tFallback(t, 'recurrence.nextCalendarPreview', 'Next calendar preview')}: ${projectedRecurrenceDateLabel}`
+    : recurrenceLabel;
   const hasReminderHandoffSchedule = hasTimeComponent(mergedTask.startTime) || hasTimeComponent(mergedTask.dueDate);
 
   return (
@@ -175,6 +180,14 @@ function TaskEditViewTabComponent({
       keyboardShouldPersistTaps="handled"
       nestedScrollEnabled={nestedScrollEnabled}
     >
+      {title ? (
+        <View style={[styles.viewRow, { backgroundColor: tc.inputBg, borderColor: tc.border }]}>
+          <Text style={[styles.viewLabel, { color: tc.secondaryText }]}>{t('taskEdit.titleLabel')}</Text>
+          <Text style={[styles.viewTitleValue, { color: tc.text }]}>
+            {title}
+          </Text>
+        </View>
+      ) : null}
       {showStatusField && statusLabel ? (
         <View style={[styles.viewRow, { backgroundColor: tc.inputBg, borderColor: tc.border }]}>
           <Text style={[styles.viewLabel, { color: tc.secondaryText }]}>{t('taskEdit.statusLabel')}</Text>
@@ -219,13 +232,13 @@ function TaskEditViewTabComponent({
         </View>
       ) : null}
       {mergedTask.location ? renderViewRow(t('taskEdit.locationLabel'), mergedTask.location) : null}
-      {!isReference && recurrenceLabel ? renderViewRow(t('taskEdit.recurrenceLabel'), recurrenceLabel) : null}
+      {!isReference && recurrencePreviewLabel ? renderViewRow(t('taskEdit.recurrenceLabel'), recurrencePreviewLabel) : null}
       {description ? (
         <View style={styles.viewSection}>
           <Text style={[styles.viewLabel, { color: tc.secondaryText }]}>{t('taskEdit.descriptionLabel')}</Text>
           <View style={[styles.viewCard, { borderColor: tc.border, backgroundColor: tc.inputBg }]}
           >
-            <MarkdownText markdown={description} tc={tc} direction={resolvedDirection} />
+            <MarkdownText markdown={description} tc={tc} direction={resolvedDirection} selectable />
           </View>
         </View>
       ) : null}

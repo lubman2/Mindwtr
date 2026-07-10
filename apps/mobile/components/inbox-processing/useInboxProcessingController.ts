@@ -16,10 +16,12 @@ import {
   hasTimeComponent,
   isTaskInActiveProject,
   normalizeClockTimeInput,
+  resolveAreaFilter,
   safeFormatDate,
   safeParseDate,
   tFallback,
   resolveAutoTextDirection,
+  taskMatchesAreaFilter,
   useTaskStore,
   type AIProviderId,
   type Task,
@@ -56,7 +58,7 @@ export function useInboxProcessingController({
   visible,
   onClose,
 }: InboxProcessingControllerParams) {
-  const { tasks, projects, areas, settings, updateTask, deleteTask, addProject } = useTaskStore();
+  const { tasks, projects, areas, people, settings, updateTask, deleteTask, addProject, addTask } = useTaskStore();
   const { t, language } = useLanguage();
   const { showToast } = useToast();
   const router = useRouter();
@@ -78,6 +80,7 @@ export function useInboxProcessingController({
   const [convertToProject, setConvertToProject] = useState(false);
   const [projectTitleDraft, setProjectTitleDraft] = useState('');
   const [nextActionDraft, setNextActionDraft] = useState('');
+  const [extraActionDrafts, setExtraActionDrafts] = useState<string[]>([]);
   const [processingTitle, setProcessingTitle] = useState('');
   const [processingDescription, setProcessingDescription] = useState('');
   const [processingTitleFocused, setProcessingTitleFocused] = useState(false);
@@ -88,6 +91,7 @@ export function useInboxProcessingController({
   const [selectedTimeEstimate, setSelectedTimeEstimate] = useState<TimeEstimate | undefined>(undefined);
   const [pendingStartDate, setPendingStartDate] = useState<Date | null>(null);
   const [pendingStartDateOnly, setPendingStartDateOnly] = useState(false);
+  const [laterNoDateSelected, setLaterNoDateSelected] = useState(false);
   const [pendingDueDate, setPendingDueDate] = useState<Date | null>(null);
   const [pendingDueDateOnly, setPendingDueDateOnly] = useState(false);
   const [pendingReviewDate, setPendingReviewDate] = useState<Date | null>(null);
@@ -158,15 +162,26 @@ export function useInboxProcessingController({
       : MOBILE_TIME_ESTIMATE_OPTIONS;
   }, [selectedTimeEstimate, settings?.gtd?.timeEstimatePresets]);
 
+  const projectById = useMemo(
+    () => new Map(projects.map((project) => [project.id, project])),
+    [projects],
+  );
+  const areaById = useMemo(
+    () => new Map(areas.map((area) => [area.id, area])),
+    [areas],
+  );
+  const resolvedAreaFilter = useMemo(
+    () => resolveAreaFilter(settings?.filters?.areaId, areas),
+    [settings?.filters?.areaId, areas],
+  );
   const inboxTasks = useMemo(() => {
-    const projectById = new Map(projects.map((project) => [project.id, project]));
     return tasks.filter((task) => {
       if (task.deletedAt) return false;
       if (task.status !== 'inbox') return false;
       if (!isTaskInActiveProject(task, projectById)) return false;
-      return true;
+      return taskMatchesAreaFilter(task, resolvedAreaFilter, projectById, areaById);
     });
-  }, [projects, tasks]);
+  }, [areaById, projectById, resolvedAreaFilter, tasks]);
 
   const processingQueue = useMemo(
     () => inboxTasks.filter((task) => !skippedIds.has(task.id)),
@@ -203,10 +218,6 @@ export function useInboxProcessingController({
     [insets.top, tc.border],
   );
 
-  const areaById = useMemo(
-    () => new Map(areas.map((area) => [area.id, area])),
-    [areas],
-  );
   const contextSuggestionPool = useMemo(() => {
     return collectTaskTokenUsage(tasks, (task) => task.contexts, { prefix: '@' })
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt || b.count - a.count || a.token.localeCompare(b.token))
@@ -252,12 +263,12 @@ export function useInboxProcessingController({
     tokenQuery,
   ]);
   const assignedToSuggestions = useMemo(
-    () => getAssignedToSuggestions(tasks, selectedAssignedTo, MAX_TOKEN_SUGGESTIONS),
-    [selectedAssignedTo, tasks],
+    () => getAssignedToSuggestions(tasks, selectedAssignedTo, MAX_TOKEN_SUGGESTIONS, people),
+    [people, selectedAssignedTo, tasks],
   );
   const delegateWhoSuggestions = useMemo(
-    () => getAssignedToSuggestions(tasks, delegateWho, MAX_TOKEN_SUGGESTIONS),
-    [delegateWho, tasks],
+    () => getAssignedToSuggestions(tasks, delegateWho, MAX_TOKEN_SUGGESTIONS, people),
+    [delegateWho, people, tasks],
   );
   const contextCopilotSuggestions = useMemo(() => {
     const selected = new Set(selectedContexts);
@@ -339,6 +350,7 @@ export function useInboxProcessingController({
     setExecutionChoice('defer');
     setPendingStartDate(task?.startTime ? safeParseDate(task.startTime) : null);
     setPendingStartDateOnly(Boolean(task?.startTime) && !hasTimeComponent(task?.startTime));
+    setLaterNoDateSelected(false);
     setPendingDueDate(task?.dueDate ? safeParseDate(task.dueDate) : null);
     setPendingDueDateOnly(Boolean(task?.dueDate) && !hasTimeComponent(task?.dueDate));
     setPendingReviewDate(task?.reviewAt ? safeParseDate(task.reviewAt) : null);
@@ -353,6 +365,7 @@ export function useInboxProcessingController({
     setConvertToProject(false);
     setProjectTitleDraft('');
     setNextActionDraft('');
+    setExtraActionDrafts([]);
     setSelectedContexts(task?.contexts ?? []);
     setSelectedTags(task?.tags ?? []);
     setSelectedPriority(task?.priority);
@@ -362,7 +375,9 @@ export function useInboxProcessingController({
     setNewContext('');
     setProjectSearch('');
     setSelectedProjectId(task?.projectId ?? null);
-    setSelectedAreaId(null);
+    // Keep an area assigned while the task sat in the inbox; a project home
+    // outranks the direct area (container exclusivity).
+    setSelectedAreaId(task?.projectId ? null : (task?.areaId ?? null));
     resetTitleFocus();
     setProcessingTitle(task?.title ?? '');
     setProcessingDescription(task?.description ?? '');
@@ -469,7 +484,7 @@ export function useInboxProcessingController({
 
   const handleLaterMobile = useCallback(() => {
     if (!currentTask) return;
-    if (!pendingStartDate) {
+    if (!pendingStartDate && !laterNoDateSelected) {
       showToast({
         title: t('common.notice'),
         message: tFallback(t, 'process.laterStartRequired', 'Choose a start date for Later.'),
@@ -481,14 +496,16 @@ export function useInboxProcessingController({
       status: 'next',
       ...(showProjectField ? { projectId: selectedProjectId ?? undefined } : {}),
       ...(showAreaField ? { areaId: selectedProjectId ? undefined : (selectedAreaId ?? undefined) } : {}),
-      startTime: formatScheduledDateValue(pendingStartDate, pendingStartDateOnly),
+      startTime: pendingStartDate ? formatScheduledDateValue(pendingStartDate, pendingStartDateOnly) : undefined,
     });
     setPendingStartDate(null);
+    setLaterNoDateSelected(false);
     moveToNext();
   }, [
     applyProcessingEdits,
     currentTask,
     formatScheduledDateValue,
+    laterNoDateSelected,
     moveToNext,
     pendingStartDate,
     pendingStartDateOnly,
@@ -687,6 +704,7 @@ export function useInboxProcessingController({
     setConvertToProject(false);
     setProjectTitleDraft('');
     setNextActionDraft('');
+    setExtraActionDrafts([]);
   }, []);
 
   const finalizeNextAction = useCallback((projectId: string | null) => {
@@ -764,6 +782,15 @@ export function useInboxProcessingController({
       }, nextAction, currentTask.title);
       if (!applied) return;
 
+      // The converted capture becomes the project's clarified next action.
+      // Extra actions typed at the split step are raw captures, so they
+      // return to the Inbox (project attached) for their own clarify pass —
+      // same semantics as a quick-add with a +Project token (#827).
+      const extraActions = extraActionDrafts.map((title) => title.trim()).filter(Boolean);
+      for (const title of extraActions) {
+        await addTask(title, { status: 'inbox', projectId: project.id });
+      }
+      setExtraActionDrafts([]);
       setPendingStartDate(null);
       setPendingDueDate(null);
       setPendingReviewDate(null);
@@ -782,9 +809,11 @@ export function useInboxProcessingController({
     }
   }, [
     addProject,
+    addTask,
     applyProcessingEdits,
     buildScheduleUpdates,
     currentTask,
+    extraActionDrafts,
     moveToNext,
     nextActionDraft,
     processingTitle,
@@ -1027,6 +1056,7 @@ export function useInboxProcessingController({
     isDelegateConfirmationDisabled,
     newContext,
     nextActionDraft,
+    laterNoDateSelected,
     pendingDueDate,
     pendingDueDateOnly,
     pendingReviewDate,
@@ -1058,6 +1088,7 @@ export function useInboxProcessingController({
     setDelegateWho,
     setExecutionChoice,
     setNewContext,
+    setLaterNoDateSelected,
     setPendingDueDate,
     setPendingDueDateOnly,
     setPendingReviewDate,
@@ -1070,6 +1101,8 @@ export function useInboxProcessingController({
     setProcessingTitleFocused,
     setProjectTitleDraft,
     setNextActionDraft,
+    extraActionDrafts,
+    setExtraActionDrafts,
     setSelectedEnergyLevel,
     setSelectedPriority,
     setSelectedTimeEstimate,

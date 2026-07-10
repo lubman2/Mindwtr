@@ -1,24 +1,26 @@
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, Modal, Pressable, StyleSheet } from 'react-native';
 
+import { AppPressable } from '../app-pressable';
+
 import { useLanguage } from '../../contexts/language-context';
 import { useThemeColors } from '../../hooks/use-theme-colors';
 
 type TaskEditHeaderProps = {
-  title: string;
   onDone: () => void;
   onShare: () => void;
   onDuplicate: () => void;
+  onPromoteToProject?: () => void;
   onDelete: () => void;
   onConvertToReference?: () => void;
   showConvertToReference?: boolean;
 };
 
 export function TaskEditHeader({
-  title,
   onDone,
   onShare,
   onDuplicate,
+  onPromoteToProject,
   onDelete,
   onConvertToReference,
   showConvertToReference = false,
@@ -26,6 +28,7 @@ export function TaskEditHeader({
   const { t } = useLanguage();
   const tc = useThemeColors();
   const [menuVisible, setMenuVisible] = useState(false);
+  const createProjectFromTaskLabel = t('task.createProjectFromTask');
 
   return (
     <>
@@ -38,9 +41,6 @@ export function TaskEditHeader({
             <Text style={[styles.headerBtn, styles.headerMoreBtn, { color: tc.tint }]}>•••</Text>
           </TouchableOpacity>
         </View>
-        <Text style={[styles.headerTitle, { color: tc.text }]} numberOfLines={1}>
-          {title}
-        </Text>
         <View style={[styles.headerSide, styles.headerRight]}>
           <TouchableOpacity
             style={[styles.headerActionTouchable, styles.headerActionRight]}
@@ -60,7 +60,7 @@ export function TaskEditHeader({
         >
           <Pressable style={styles.menuOverlay} onPress={() => setMenuVisible(false)}>
             <View style={[styles.menuCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
-              <Pressable
+              <AppPressable
                 style={styles.menuItem}
                 onPress={() => {
                   setMenuVisible(false);
@@ -68,8 +68,8 @@ export function TaskEditHeader({
                 }}
               >
                 <Text style={[styles.menuItemText, { color: tc.text }]}>{t('common.share')}</Text>
-              </Pressable>
-              <Pressable
+              </AppPressable>
+              <AppPressable
                 style={styles.menuItem}
                 onPress={() => {
                   setMenuVisible(false);
@@ -77,9 +77,20 @@ export function TaskEditHeader({
                 }}
               >
                 <Text style={[styles.menuItemText, { color: tc.text }]}>{t('taskEdit.duplicateTask')}</Text>
-              </Pressable>
+              </AppPressable>
+              {onPromoteToProject && (
+                <AppPressable
+                  style={styles.menuItem}
+                  onPress={() => {
+                    setMenuVisible(false);
+                    onPromoteToProject();
+                  }}
+                >
+                  <Text style={[styles.menuItemText, { color: tc.text }]}>{createProjectFromTaskLabel}</Text>
+                </AppPressable>
+              )}
               {showConvertToReference && onConvertToReference && (
-                <Pressable
+                <AppPressable
                   style={styles.menuItem}
                   onPress={() => {
                     setMenuVisible(false);
@@ -87,9 +98,9 @@ export function TaskEditHeader({
                   }}
                 >
                   <Text style={[styles.menuItemText, { color: tc.text }]}>{t('task.convertToReference')}</Text>
-                </Pressable>
+                </AppPressable>
               )}
-              <Pressable
+              <AppPressable
                 style={styles.menuItem}
                 onPress={() => {
                   setMenuVisible(false);
@@ -97,7 +108,7 @@ export function TaskEditHeader({
                 }}
               >
                 <Text style={[styles.menuItemText, { color: '#EF4444' }]}>{t('common.delete')}</Text>
-              </Pressable>
+              </AppPressable>
             </View>
           </Pressable>
         </Modal>
@@ -122,13 +133,6 @@ const styles = StyleSheet.create({
   },
   headerMoreBtn: {
     fontSize: 22,
-  },
-  headerTitle: {
-    flex: 1,
-    textAlign: 'center',
-    fontSize: 17,
-    fontWeight: '700',
-    marginHorizontal: 8,
   },
   headerSide: {
     minWidth: 72,
@@ -161,6 +165,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     paddingVertical: 8,
+    overflow: 'hidden',
   },
   menuItem: {
     paddingVertical: 10,

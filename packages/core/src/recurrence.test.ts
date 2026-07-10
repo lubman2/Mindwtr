@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import {
     buildRRuleString,
@@ -6,13 +7,84 @@ import {
     createCurrentRecurringCalendarTask,
     expandCalendarRecurringTasks,
     createProjectedRecurringTask,
+    formatRecurrenceLabel,
+    getProjectedRecurringTaskCalendarDate,
     getProjectedRecurringTaskId,
+    getRecurringTaskPreviewDate,
+    getTaskCalendarOccurrenceDate,
     isProjectedRecurringTask,
     normalizeRecurrenceForLoad,
 } from './recurrence';
-import type { Task } from './types';
+import type { Task, TaskStatus } from './types';
+
+type LocalApiRecurrenceParityCase = {
+    name: string;
+    completedAt: string;
+    previousStatus: TaskStatus;
+    task: Task;
+    expected: Record<string, unknown> | null;
+};
+
+const localApiRecurrenceParityCases = JSON.parse(
+    readFileSync(new URL('./recurrence-local-api-parity.fixtures.json', import.meta.url), 'utf8')
+) as LocalApiRecurrenceParityCase[];
+
+const toLocalApiRecurrenceParitySnapshot = (task: Task | null): Record<string, unknown> | null => {
+    if (!task) return null;
+    return {
+        status: task.status,
+        ...(task.startTime ? { startTime: task.startTime } : {}),
+        ...(task.dueDate ? { dueDate: task.dueDate } : {}),
+        ...(task.reviewAt ? { reviewAt: task.reviewAt } : {}),
+        ...(task.recurrence ? { recurrence: task.recurrence } : {}),
+    };
+};
 
 describe('recurrence', () => {
+    const t = (key: string) => ({
+        'recurrence.daily': 'Daily',
+        'recurrence.weekly': 'Weekly',
+        'recurrence.yearly': 'Yearly',
+        'recurrence.repeatEvery': 'Repeat every',
+        'recurrence.dayUnit': 'day(s)',
+        'recurrence.weekUnit': 'week(s)',
+        'recurrence.yearUnit': 'year(s)',
+        'recurrence.endsAfterCount': 'After',
+        'recurrence.endsOnDate': 'On date',
+        'recurrence.occurrenceUnit': 'occurrence(s)',
+        'recurrence.afterCompletionShort': 'after completion',
+    }[key] ?? key);
+
+    it('formats daily recurrence intervals for display', () => {
+        const label = formatRecurrenceLabel({
+            recurrence: { rule: 'daily', rrule: 'FREQ=DAILY;INTERVAL=3' },
+            t,
+        });
+
+        expect(label).toBe('Daily · Repeat every 3 day(s)');
+    });
+
+    it('formats long weekly and yearly recurrence intervals for display', () => {
+        expect(formatRecurrenceLabel({
+            recurrence: { rule: 'weekly', rrule: 'FREQ=WEEKLY;INTERVAL=78' },
+            t,
+        })).toBe('Weekly · Repeat every 78 week(s)');
+
+        expect(formatRecurrenceLabel({
+            recurrence: { rule: 'yearly', rrule: 'FREQ=YEARLY;INTERVAL=2' },
+            t,
+        })).toBe('Yearly · Repeat every 2 year(s)');
+    });
+
+    it('formats recurrence end metadata for display', () => {
+        const label = formatRecurrenceLabel({
+            recurrence: { rule: 'weekly', strategy: 'fluid', rrule: 'FREQ=WEEKLY;INTERVAL=2;COUNT=4' },
+            t,
+        });
+
+        expect(label).toBe('Weekly · after completion · Repeat every 2 week(s) · After 4 occurrence(s)');
+    });
+
     it('builds and parses weekly BYDAY rules', () => {
         const rrule = buildRRuleString('weekly', ['WE', 'MO']);
         expect(rrule).toBe('FREQ=WEEKLY;BYDAY=MO,WE');
@@ -44,6 +116,15 @@ describe('recurrence', () => {
         expect(parsed.byMonthDay).toEqual([15]);
         expect(parsed.count).toBe(4);
         expect(parsed.until).toBe('2025-06-15');
+    });
+
+    it('builds and parses yearly interval rules', () => {
+        const rrule = buildRRuleString('yearly', undefined, 2);
+        expect(rrule).toBe('FREQ=YEARLY;INTERVAL=2');
+
+        const parsed = parseRRuleString(rrule);
+        expect(parsed.rule).toBe('yearly');
+        expect(parsed.interval).toBe(2);
     });
 
     it('normalizes legacy recurrence values to object form', () => {
@@ -84,6 +165,25 @@ describe('recurrence', () => {
         expect(next?.status).toBe('next');
     });
 
+    it('preserves text direction on the next recurring task', () => {
+        const task: Task = {
+            id: 't1-rtl',
+            title: 'RTL reading',
+            status: 'done',
+            tags: [],
+            contexts: [],
+            textDirection: 'rtl',
+            dueDate: '2025-01-06T10:00:00.000Z',
+            recurrence: { rule: 'daily' },
+            createdAt: '2025-01-01T00:00:00.000Z',
+            updatedAt: '2025-01-01T00:00:00.000Z',
+        };
+
+        const next = createNextRecurringTask(task, '2025-01-06T12:00:00.000Z', 'done');
+
+        expect(next?.textDirection).toBe('rtl');
+    });
+
     it('uses completion date for fluid recurrence', () => {
         const task: Task = {
             id: 't2',
@@ -99,6 +199,48 @@ describe('recurrence', () => {
 
         const next = createNextRecurringTask(task, '2025-01-05T14:00:00.000Z', 'done');
         expect(next?.dueDate).toBe('2025-01-06T14:00:00.000Z');
+    });
+
+    it('advances date-only start dates for fluid recurrence', () => {
+        const task: Task = {
+            id: 't2-start-fluid-date',
+            title: 'Weekly planning',
+            status: 'done',
+            tags: [],
+            contexts: [],
+            startTime: '2026-06-01',
+            recurrence: { rule: 'weekly', strategy: 'fluid' },
+            createdAt: '2026-06-01T00:00:00.000Z',
+            updatedAt: '2026-06-01T00:00:00.000Z',
+        };
+
+        const next = createNextRecurringTask(task, '2026-06-12T12:00:00.000Z', 'done');
+        expect(next?.startTime).toBe('2026-06-19');
+        expect(next?.dueDate).toBeUndefined();
+    });
+
+    it('keeps the advanced start date when switching a strict follow-up to fluid', () => {
+        const original: Task = {
+            id: 't2-start-strict-to-fluid',
+            title: 'Weekly reset',
+            status: 'done',
+            tags: [],
+            contexts: [],
+            startTime: '2026-06-01',
+            recurrence: { rule: 'weekly', strategy: 'strict' },
+            createdAt: '2026-06-01T00:00:00.000Z',
+            updatedAt: '2026-06-01T00:00:00.000Z',
+        };
+
+        const strictNext = createNextRecurringTask(original, '2026-06-01T12:00:00.000Z', 'done') as Task;
+        const fluidTask: Task = {
+            ...strictNext,
+            recurrence: { rule: 'weekly', strategy: 'fluid' },
+        };
+
+        const next = createNextRecurringTask(fluidTask, '2026-06-12T12:00:00.000Z', 'next');
+        expect(strictNext.startTime).toBe('2026-06-08');
+        expect(next?.startTime).toBe('2026-06-19');
     });
 
     it('keeps dueDate unset for startTime-only recurring tasks', () => {
@@ -137,6 +279,58 @@ describe('recurrence', () => {
         expect(next?.startTime).toBe('2028-03-01T09:00:00.000Z');
         expect(next?.dueDate).toBe('2028-04-01T09:00:00.000Z');
         expect(next?.status).toBe('next');
+    });
+
+    it('carries recurrence task metadata into the next instance', () => {
+        const task: Task = {
+            id: 't2-field-carry',
+            title: 'Renew prescription',
+            status: 'done',
+            tags: [],
+            contexts: [],
+            taskMode: 'list',
+            checklist: [{ id: 'c1', title: 'Call pharmacy', isCompleted: true }],
+            startTime: '2025-01-09T09:00:00.000Z',
+            relativeStartOffset: { amount: -1, unit: 'day' },
+            dueDate: '2025-01-10T09:00:00.000Z',
+            repeatReminderMinutes: 30,
+            recurrence: { rule: 'weekly', strategy: 'strict' },
+            createdAt: '2025-01-01T00:00:00.000Z',
+            updatedAt: '2025-01-01T00:00:00.000Z',
+        };
+
+        const next = createNextRecurringTask(task, '2025-01-10T12:00:00.000Z', 'done');
+
+        expect(next?.taskMode).toBe('list');
+        expect(next?.relativeStartOffset).toEqual({ amount: -1, unit: 'day' });
+        expect(next?.repeatReminderMinutes).toBe(30);
+        expect(next?.startTime).toBe('2025-01-16T09:00:00.000Z');
+        expect(next?.dueDate).toBe('2025-01-17T09:00:00.000Z');
+        expect(next?.checklist).toHaveLength(1);
+        expect(next?.checklist?.[0]).toMatchObject({ title: 'Call pharmacy', isCompleted: false });
+        expect(next?.checklist?.[0]?.id).not.toBe('c1');
+    });
+
+    it('regenerates relative start dates from the next due date across month clamps', () => {
+        const task: Task = {
+            id: 't2-relative-start-month-clamp',
+            title: 'Month-end close prep',
+            status: 'done',
+            tags: [],
+            contexts: [],
+            startTime: '2025-01-30',
+            relativeStartOffset: { amount: -1, unit: 'day' },
+            dueDate: '2025-01-31',
+            recurrence: { rule: 'monthly', strategy: 'strict' },
+            createdAt: '2025-01-01T00:00:00.000Z',
+            updatedAt: '2025-01-01T00:00:00.000Z',
+        };
+
+        const next = createNextRecurringTask(task, '2025-01-31T12:00:00.000Z', 'done');
+
+        expect(next?.dueDate).toBe('2025-02-28');
+        expect(next?.startTime).toBe('2025-02-27');
+        expect(next?.relativeStartOffset).toEqual({ amount: -1, unit: 'day' });
     });
 
     it('respects daily interval for strict recurrence', () => {
@@ -212,8 +406,25 @@ describe('recurrence', () => {
 
         const next = createNextRecurringTask(task, '2025-01-05T14:00:00.000Z', 'next');
         expect(next?.dueDate).toBeUndefined();
-        expect(next?.startTime).toBe('2025-01-08T14:00:00.000Z');
+        expect(next?.startTime).toBe('2025-01-08');
         expect(next?.status).toBe('next');
+    });
+
+    it('keeps regenerated unscheduled recurrences date-only instead of inheriting the completion time', () => {
+        const task: Task = {
+            id: 't2e',
+            title: 'Pay rent',
+            status: 'next',
+            tags: [],
+            contexts: [],
+            recurrence: { rule: 'monthly', strategy: 'strict', byMonthDay: [9], rrule: 'FREQ=MONTHLY;BYMONTHDAY=9' },
+            createdAt: '2026-07-01T00:00:00.000Z',
+            updatedAt: '2026-07-01T00:00:00.000Z',
+        };
+
+        const next = createNextRecurringTask(task, '2026-07-03T12:00:00.000Z', 'done');
+        expect(next?.startTime).toBe('2026-07-09');
+        expect(next?.dueDate).toBeUndefined();
     });
 
     it('falls back to weekly interval when BYDAY is empty', () => {
@@ -497,6 +708,28 @@ describe('recurrence', () => {
         expect(july?.dueDate).toBe('2025-07-31');
     });
 
+    it('carries yearly recurrence forward by the RRULE interval', () => {
+        const task: Task = {
+            id: 't7-biennial',
+            title: 'Biennial renewal',
+            status: 'done',
+            tags: [],
+            contexts: [],
+            dueDate: '2025-06-15',
+            recurrence: { rule: 'yearly', rrule: 'FREQ=YEARLY;INTERVAL=2' },
+            createdAt: '2025-01-01T00:00:00.000Z',
+            updatedAt: '2025-01-01T00:00:00.000Z',
+        };
+
+        const next = createNextRecurringTask(task, '2025-06-15T12:00:00.000Z', 'done');
+
+        expect(next?.dueDate).toBe('2027-06-15');
+        expect(next?.recurrence).toMatchObject({
+            rule: 'yearly',
+            rrule: 'FREQ=YEARLY;INTERVAL=2',
+        });
+    });
+
     it('clamps yearly recurrence for leap-day tasks', () => {
         const task: Task = {
             id: 't8',
@@ -629,6 +862,47 @@ describe('recurrence', () => {
         expect(projected?.dueDate).toBe('2025-06-01');
         expect(projected?.createdAt).toBe(task.createdAt);
         expect(projected?.updatedAt).toBe('2025-05-27T12:00:00.000Z');
+    });
+
+    it('returns the calendar occurrence date for calendar-visible tasks', () => {
+        expect(getTaskCalendarOccurrenceDate({
+            startTime: '2026-07-09T09:00',
+            dueDate: '2026-07-10',
+        })).toBe('2026-07-09T09:00');
+        expect(getTaskCalendarOccurrenceDate({
+            dueDate: '2026-07-10',
+        })).toBe('2026-07-10');
+        expect(getTaskCalendarOccurrenceDate({})).toBeUndefined();
+    });
+
+    it.each(localApiRecurrenceParityCases.map((testCase) => [testCase.name, testCase] as const))(
+        'matches the local API recurrence parity fixture: %s',
+        (_name, testCase) => {
+            const next = createNextRecurringTask(testCase.task, testCase.completedAt, testCase.previousStatus);
+
+            expect(toLocalApiRecurrenceParitySnapshot(next)).toEqual(testCase.expected);
+        }
+    );
+
+    it('returns the projected calendar occurrence date for recurrence previews', () => {
+        const task: Task = {
+            id: 't-projected-date-label',
+            title: 'Ninth day planning',
+            status: 'next',
+            tags: [],
+            contexts: [],
+            recurrence: {
+                rule: 'monthly',
+                strategy: 'strict',
+                byMonthDay: [9],
+                rrule: 'FREQ=MONTHLY;BYMONTHDAY=9',
+            },
+            showFutureRecurrence: true,
+            createdAt: '2026-06-01T00:00:00.000Z',
+            updatedAt: '2026-06-01T00:00:00.000Z',
+        };
+
+        expect(getProjectedRecurringTaskCalendarDate(task, '2026-06-05T12:00:00.000Z')).toBe('2026-07-09');
     });
 
     it('projects a start-only monthly nth-weekday recurrence into the calendar preview', () => {
@@ -824,5 +1098,57 @@ describe('recurrence', () => {
         expect(next?.priority).toBe('urgent');
         expect(next?.energyLevel).toBe('high');
         expect(next?.assignedTo).toBe('Ada');
+    });
+});
+
+describe('getRecurringTaskPreviewDate', () => {
+    const nowIso = '2026-07-03T12:00:00.000Z';
+    const base: Task = {
+        id: 'preview-1',
+        title: 'Pay rent',
+        status: 'next',
+        tags: [],
+        contexts: [],
+        createdAt: nowIso,
+        updatedAt: nowIso,
+    };
+
+    it('shows the first upcoming occurrence for an unscheduled day-of-month rule without the calendar toggle', () => {
+        const task: Task = {
+            ...base,
+            recurrence: { rule: 'monthly', strategy: 'strict', byMonthDay: [9], rrule: 'FREQ=MONTHLY;BYMONTHDAY=9' },
+        };
+        expect(getRecurringTaskPreviewDate(task, nowIso)).toBe('2026-07-09');
+    });
+
+    it('shows the first upcoming occurrence for an unscheduled nth-weekday rule without the calendar toggle', () => {
+        const task: Task = {
+            ...base,
+            recurrence: { rule: 'monthly', strategy: 'strict', byDay: ['3TH'], rrule: 'FREQ=MONTHLY;BYDAY=3TH' },
+        };
+        expect(getRecurringTaskPreviewDate(task, nowIso)).toBe('2026-07-16');
+    });
+
+    it('shows the projected next occurrence for a scheduled task', () => {
+        const task: Task = {
+            ...base,
+            startTime: '2026-07-09',
+            recurrence: { rule: 'monthly', strategy: 'strict', byMonthDay: [9], rrule: 'FREQ=MONTHLY;BYMONTHDAY=9' },
+        };
+        expect(getRecurringTaskPreviewDate(task, nowIso)).toBe('2026-08-09');
+    });
+
+    it('matches the calendar projection when the calendar toggle is enabled', () => {
+        const task: Task = {
+            ...base,
+            showFutureRecurrence: true,
+            recurrence: { rule: 'monthly', strategy: 'strict', byMonthDay: [9], rrule: 'FREQ=MONTHLY;BYMONTHDAY=9' },
+        };
+        expect(getRecurringTaskPreviewDate(task, nowIso)).toBe('2026-07-09');
+    });
+
+    it('returns undefined for done tasks and tasks without recurrence', () => {
+        expect(getRecurringTaskPreviewDate({ ...base, status: 'done' as TaskStatus, recurrence: 'daily' }, nowIso)).toBeUndefined();
+        expect(getRecurringTaskPreviewDate(base, nowIso)).toBeUndefined();
     });
 });

@@ -16,7 +16,7 @@ import {
 } from '@mindwtr/core';
 import type { RangeSelectionOptions } from '@mindwtr/core';
 import type { TaskSortBy } from '@mindwtr/core';
-import { AtSign, ChevronDown, ChevronRight, Filter, Hash, Tag, type LucideIcon } from 'lucide-react';
+import { ArrowUpDown, AtSign, CheckSquare, ChevronDown, ChevronRight, Filter, Hash, Tag, type LucideIcon } from 'lucide-react';
 import { TokenPickerModal } from '../TokenPickerModal';
 import { BulkSelectionToolbar } from './list/BulkSelectionToolbar';
 import { ListBulkActions } from './list/ListBulkActions';
@@ -24,7 +24,7 @@ import { cn } from '../../lib/utils';
 import { useLanguage } from '../../contexts/language-context';
 import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
-import { resolveAreaFilter, taskMatchesAreaFilter } from '../../lib/area-filter';
+import { resolveAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
 import { reportError } from '../../lib/report-error';
 import { useConfirmDialog } from '../../hooks/useConfirmDialog';
 import { VirtualTaskRow } from './list/VirtualTaskRow';
@@ -42,7 +42,11 @@ import {
     NO_CONTEXT_TOKEN,
     sanitizeContextsViewState,
     subscribeContextsTokenSelection,
+    type ContextsViewGroupBy,
 } from '../../lib/contexts-view-state';
+import { groupTasks, type TaskGroup } from './list/next-grouping';
+import { GroupedTaskSections } from './list/GroupedTaskSections';
+import { GroupBySelect } from './list/GroupBySelect';
 
 type BulkTokenPickerState = {
     field: 'tags' | 'contexts';
@@ -51,13 +55,14 @@ type BulkTokenPickerState = {
 
 export function ContextsView() {
     const perf = usePerformanceMonitor('ContextsView');
-    const { tasks, tasksById, projects, areas, settings, updateSettings } = useTaskStore(
+    const { tasks, tasksById, projects, areas, areaFilterId, taskSortBy, updateSettings } = useTaskStore(
         (state) => ({
             tasks: state.tasks,
             tasksById: state._tasksById,
             projects: state.projects,
             areas: state.areas,
-            settings: state.settings,
+            areaFilterId: state.settings?.filters?.areaId,
+            taskSortBy: state.settings?.taskSortBy,
             updateSettings: state.updateSettings,
         }),
         shallow
@@ -74,7 +79,7 @@ export function ContextsView() {
     const selectedContext = persistedViewState.selectedContext;
     const statusFilters = persistedViewState.statusFilters;
     const selectedStatusSet = useMemo(() => new Set(statusFilters), [statusFilters]);
-    const sortBy = (settings?.taskSortBy ?? 'default') as TaskSortBy;
+    const sortBy = (taskSortBy ?? 'default') as TaskSortBy;
     const [searchQuery, setSearchQuery] = useState('');
     const [selectionMode, setSelectionMode] = useState(false);
     const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
@@ -117,8 +122,8 @@ export function ContextsView() {
     }), [setSelectedContext]);
     const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
     const resolvedAreaFilter = useMemo(
-        () => resolveAreaFilter(settings?.filters?.areaId, areas),
-        [settings?.filters?.areaId, areas],
+        () => resolveAreaFilter(areaFilterId, areas),
+        [areaFilterId, areas],
     );
 
     useEffect(() => {
@@ -194,10 +199,22 @@ export function ContextsView() {
         ? contextFilteredTasks.filter((task) => task.title.toLowerCase().includes(normalizedSearchQuery))
         : contextFilteredTasks;
     const sortedTasks = sortTasksBy(filteredTasks, sortBy);
+    const groupBy = persistedViewState.groupBy;
+    const setGroupBy = useCallback((value: ContextsViewGroupBy) => {
+        setPersistedViewState((current) => ({
+            ...current,
+            groupBy: value,
+        }));
+    }, [setPersistedViewState]);
+    const groupedTasks = useMemo<TaskGroup[]>(
+        () => groupTasks(groupBy, { tasks: sortedTasks, areas, projectMap, t }),
+        [areas, groupBy, projectMap, sortedTasks, t],
+    );
+    const isGrouping = groupBy !== 'none';
     const filteredTaskIds = sortedTasks.map((task) => task.id);
     const selectedVisibleCount = filteredTaskIds.filter((id) => multiSelectedIds.has(id)).length;
     const allVisibleTasksSelected = filteredTaskIds.length > 0 && selectedVisibleCount === filteredTaskIds.length;
-    const shouldVirtualize = filteredTasks.length > LIST_VIRTUALIZATION_THRESHOLD;
+    const shouldVirtualize = !isGrouping && filteredTasks.length > LIST_VIRTUALIZATION_THRESHOLD;
     const handleVirtualRowMeasure = useCallback((id: string, height: number) => {
         if (rowHeightsRef.current.get(id) === height) return;
         rowHeightsRef.current.set(id, height);
@@ -396,6 +413,7 @@ export function ContextsView() {
     const contextsLabel = tFallback(t, 'taskEdit.contextsLabel', 'Contexts');
     const tagsLabel = tFallback(t, 'taskEdit.tagsLabel', 'Tags');
     const allTokensLabel = `${contextsLabel} & ${tagsLabel}`;
+    const sortLabel = tFallback(t, 'sort.label', 'Sort');
 
     const renderTokenRow = (token: string, marker: '@' | '#') => {
         const taskCount = scopedTasks.filter(t => matchesSelected(t, token)).length;
@@ -567,14 +585,35 @@ export function ContextsView() {
                             </div>
                             <div className="ml-auto">
                                 <div className="flex flex-wrap items-center gap-2">
-                                    <div className="relative min-w-[172px]">
+                                    <button
+                                        onClick={() => {
+                                            if (selectionMode) exitSelectionMode();
+                                            else setSelectionMode(true);
+                                        }}
+                                        className={cn(
+                                            "inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40",
+                                            selectionMode
+                                                ? "bg-primary/10 text-primary border-primary"
+                                                : "bg-card text-muted-foreground border-border hover:bg-muted/70 hover:text-foreground"
+                                        )}
+                                    >
+                                        <CheckSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                                        {selectionMode ? t('bulk.exitSelect') : t('bulk.select')}
+                                    </button>
+                                    <div className="relative flex h-9 min-w-[160px] items-center rounded-lg border border-border bg-card pl-2 text-xs transition-colors hover:bg-muted/70 focus-within:ring-2 focus-within:ring-primary/40">
+                                        <ArrowUpDown
+                                            className="mr-1.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                                            aria-hidden="true"
+                                            data-testid="contexts-sort-icon"
+                                        />
+                                        <span className="mr-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                            {sortLabel}
+                                        </span>
                                         <select
                                             value={sortBy}
                                             onChange={(event) => updateSettings({ taskSortBy: event.target.value as TaskSortBy })}
-                                            aria-label={t('sort.label')}
-                                            className={cn(
-                                                "h-9 w-full appearance-none rounded-lg border border-border bg-card pl-3 pr-9 text-xs text-foreground transition-colors hover:bg-muted/70 focus:outline-none focus:ring-2 focus:ring-primary/40"
-                                            )}
+                                            aria-label={sortLabel}
+                                            className="h-full min-w-0 flex-1 appearance-none bg-transparent pr-8 text-xs text-foreground focus:outline-none"
                                         >
                                             <option value="default">{t('sort.default')}</option>
                                             <option value="due">{t('sort.due')}</option>
@@ -589,20 +628,12 @@ export function ContextsView() {
                                             aria-hidden="true"
                                         />
                                     </div>
-                                    <button
-                                        onClick={() => {
-                                            if (selectionMode) exitSelectionMode();
-                                            else setSelectionMode(true);
-                                        }}
-                                        className={cn(
-                                            "text-xs px-3 py-1 rounded-md border transition-colors",
-                                            selectionMode
-                                                ? "bg-primary/10 text-primary border-primary"
-                                                : "bg-muted/50 text-muted-foreground border-border hover:bg-muted hover:text-foreground"
-                                        )}
-                                    >
-                                        {selectionMode ? t('bulk.exitSelect') : t('bulk.select')}
-                                    </button>
+                                    <GroupBySelect
+                                        value={groupBy}
+                                        axes={['none', 'status', 'tag', 'context', 'area', 'project'] as const}
+                                        onChange={setGroupBy}
+                                        t={t}
+                                    />
                                 </div>
                             </div>
                         </header>
@@ -684,7 +715,7 @@ export function ContextsView() {
                             onScroll={handleVirtualScroll}
                             className={cn(
                                 "flex-1 min-h-0 overflow-y-auto pr-2",
-                                !shouldVirtualize && "divide-y divide-border/30",
+                                !shouldVirtualize && !isGrouping && "divide-y divide-border/30",
                             )}
                         >
                             {sortedTasks.length > 0 ? (
@@ -707,6 +738,20 @@ export function ContextsView() {
                                             );
                                         })}
                                     </div>
+                                ) : isGrouping ? (
+                                    <GroupedTaskSections
+                                        groups={groupedTasks}
+                                        renderTask={(task) => (
+                                            <StoreTaskItem
+                                                key={task.id}
+                                                taskId={task.id}
+                                                selectionMode={selectionMode}
+                                                isMultiSelected={multiSelectedIds.has(task.id)}
+                                                onToggleSelectId={toggleMultiSelect}
+                                                showProjectBadgeInActions={false}
+                                            />
+                                        )}
+                                    />
                                 ) : (
                                     sortedTasks.map(task => (
                                         <StoreTaskItem

@@ -111,6 +111,7 @@ type SyncBackupSectionProps = {
   handleBackup: () => void;
   handleImportDgt: () => void;
   handleImportOmniFocus: () => void;
+  handleImportTickTick: () => void;
   handleImportTodoist: () => void;
   handleRestoreBackup: () => void;
   isBackupBusy: boolean;
@@ -125,6 +126,7 @@ export function SyncBackupSection({
   handleBackup,
   handleImportDgt,
   handleImportOmniFocus,
+  handleImportTickTick,
   handleImportTodoist,
   handleRestoreBackup,
   isBackupBusy,
@@ -166,6 +168,19 @@ export function SyncBackupSection({
             <Text style={[styles.settingLabel, { color: tc.tint }]}>{tr('settings.syncMobile.importFromTodoist')}</Text>
             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
               {tr('settings.syncMobile.importTodoistCsvOrZipExportsIntoMindwtrProjects')}
+            </Text>
+          </View>
+          {backupAction === 'import' && <ActivityIndicator size="small" color={tc.tint} />}
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
+          onPress={handleImportTickTick}
+          disabled={isSyncing || isBackupBusy}
+        >
+          <View style={styles.settingInfo}>
+            <Text style={[styles.settingLabel, { color: tc.tint }]}>{tr('settings.syncMobile.importFromTicktick')}</Text>
+            <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
+              {tr('settings.syncMobile.importTicktickCsvOrZipBackupsIntoMindwtrAreas')}
             </Text>
           </View>
           {backupAction === 'import' && <ActivityIndicator size="small" color={tc.tint} />}

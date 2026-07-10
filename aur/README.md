@@ -1,6 +1,6 @@
 # Mindwtr AUR Package
 
-This directory contains the PKGBUILD for maintaining the [mindwtr-bin](https://aur.archlinux.org/packages/mindwtr-bin) package on the Arch User Repository (AUR).
+This directory contains the PKGBUILD for maintaining the [mindwtr-bin](https://aur.archlinux.org/packages/mindwtr-bin) package on the Arch User Repository (AUR). It also includes the `mindwtr-bin-beta` template used by release-candidate automation.
 
 ## Installation
 
@@ -91,8 +91,9 @@ echo "  git add PKGBUILD .SRCINFO && git commit -m 'Update to v$VERSION' && git 
 
 | Package            | Source                     | Notes                    |
 | ------------------ | -------------------------- | ------------------------ |
-| `mindwtr-bin`      | GitHub Release `.deb`      | Binary package (current) |
-| `mindwtr`          | Build from source          | Not yet available        |
+| `mindwtr-bin`      | GitHub Release `.deb`      | Stable binary package    |
+| `mindwtr-bin-beta` | GitHub prerelease `.deb`   | RC/beta binary package   |
+| `mindwtr`          | Build from source          | Stable source package    |
 | `mindwtr-appimage` | GitHub Release `.AppImage` | Alternative binary       |
 
 ### Useful Commands

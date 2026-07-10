@@ -35,6 +35,14 @@ const initialUiState = useUiStore.getState();
 
 describe('ReviewView', () => {
     const nowIso = '2026-04-19T12:00:00.000Z';
+    const dateStringFromToday = (offsetDays: number) => {
+        const date = new Date();
+        date.setDate(date.getDate() + offsetDays);
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    };
     const makeTask = (id: string, overrides: Partial<Task> = {}): Task => ({
         id,
         title: `Task ${id}`,
@@ -77,6 +85,7 @@ describe('ReviewView', () => {
             listOptions: {
                 showDetails: false,
                 nextGroupBy: 'none',
+                referenceGroupBy: 'area',
                 focusTop3Only: false,
             },
             expandedTaskIds: {},
@@ -145,6 +154,25 @@ describe('ReviewView', () => {
         ))).toEqual([false, false]);
     });
 
+    it('shows bulk organize for selected review tasks', () => {
+        const tasks = [
+            makeTask('review-1', { title: 'First review task' }),
+            makeTask('review-2', { title: 'Second review task' }),
+        ];
+        useTaskStore.setState({
+            tasks,
+            _allTasks: tasks,
+            lastDataChangeAt: 1,
+        });
+
+        const { getByRole } = renderWithProviders(<ReviewView />);
+
+        fireEvent.click(getByRole('button', { name: 'Select' }));
+        fireEvent.click(getByRole('button', { name: 'Select All' }));
+
+        expect(getByRole('button', { name: 'Bulk organize' })).toBeInTheDocument();
+    });
+
     it('auto-skips an empty weekly review to the all-clear state while showing checked stages', async () => {
         const { getByText } = renderWithProviders(<ReviewView />);
 
@@ -160,7 +188,7 @@ describe('ReviewView', () => {
         const project = makeProject('project-1', { title: 'Launch Project' });
         const tasks = [
             makeTask('inbox-1', { title: 'Inbox item', status: 'inbox' }),
-            makeTask('calendar-1', { title: 'Calendar item', dueDate: '2026-06-11', status: 'next' }),
+            makeTask('calendar-1', { title: 'Calendar item', dueDate: dateStringFromToday(1), status: 'next' }),
             makeTask('waiting-1', { title: 'Waiting item', status: 'waiting' }),
             makeTask('context-1', { title: 'Context item', contexts: ['@home'], status: 'next' }),
             makeTask('project-1-task', { title: 'Project item', projectId: project.id, status: 'next' }),
@@ -179,19 +207,17 @@ describe('ReviewView', () => {
                 },
             },
         });
-        const { getByRole, getByText, queryByRole, queryByText } = renderWithProviders(<ReviewView />);
+        const { getByRole, getByText, queryByRole } = renderWithProviders(<ReviewView />);
 
         fireEvent.click(getByText('Weekly Review'));
         await waitForExternalCalendarIdle();
         expect(getByRole('heading', { level: 1, name: 'Process Inbox' })).toBeInTheDocument();
         expect(getByText('Inbox Zero Goal')).toBeInTheDocument();
+        expect(getByRole('button', { name: 'Process Inbox (1)' })).toBeInTheDocument();
 
         fireEvent.click(getByText('Next Step'));
-        const aiVisible = queryByText('AI insight');
-        if (aiVisible) {
-            expect(aiVisible).toBeInTheDocument();
-            fireEvent.click(getByText('Next Step'));
-        }
+        expect(getByRole('heading', { level: 1, name: 'Stale items' })).toBeInTheDocument();
+        fireEvent.click(getByText('Next Step'));
 
         expect(getByRole('heading', { level: 1, name: 'Review Calendar' })).toBeInTheDocument();
         expect(getByText('Events')).toBeInTheDocument();
@@ -217,9 +243,10 @@ describe('ReviewView', () => {
     });
 
     it('can navigate back', async () => {
+        const freshIso = new Date().toISOString();
         const tasks = [
             makeTask('inbox-1', { title: 'Inbox item', status: 'inbox' }),
-            makeTask('waiting-1', { title: 'Waiting item', status: 'waiting' }),
+            makeTask('waiting-1', { title: 'Waiting item', status: 'waiting', updatedAt: freshIso }),
         ];
         useTaskStore.setState({
             tasks,
@@ -245,13 +272,78 @@ describe('ReviewView', () => {
         expect(getByText('Inbox Zero Goal')).toBeInTheDocument();
     });
 
-    it('parses quick-add date commands when adding a task during project review', async () => {
-        const addTask = vi.fn(async () => ({ success: true }));
-        const project = makeProject('project-1', { title: 'Launch Project' });
+    it('can apply AI Someday suggestions for stale projects', async () => {
+        const project = makeProject('project-1', {
+            title: 'Stale Project',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+        });
+        const updateProject = vi.fn(async () => ({ success: true }));
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                choices: [{
+                    message: {
+                        content: JSON.stringify({
+                            suggestions: [{
+                                id: 'project:project-1',
+                                action: 'someday',
+                                reason: 'No movement for a long time.',
+                            }],
+                        }),
+                    },
+                }],
+            }),
+        } as Response);
         useTaskStore.setState({
             projects: [project],
             _allProjects: [project],
             settings: {
+                ai: {
+                    enabled: true,
+                    provider: 'openai',
+                    baseUrl: 'https://ai.example.com/v1',
+                    model: 'gpt-4o-mini',
+                },
+                gtd: {
+                    weeklyReview: {
+                        includeContextStep: false,
+                    },
+                },
+            },
+            updateProject,
+        });
+
+        const { getByRole, getByText } = renderWithProviders(<ReviewView />);
+
+        fireEvent.click(getByText('Weekly Review'));
+        await waitFor(() => expect(getByRole('heading', { level: 1, name: 'Stale items' })).toBeInTheDocument());
+
+        fireEvent.click(getByRole('button', { name: 'Run analysis' }));
+
+        await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+        const projectSuggestion = await waitFor(() => (
+            getByRole('button', { name: 'Stale Project: Move to Someday' })
+        ));
+        expect(projectSuggestion).toHaveAttribute('aria-pressed', 'true');
+
+        fireEvent.click(getByRole('button', { name: 'Apply selected (1)' }));
+
+        await waitFor(() => {
+            expect(updateProject).toHaveBeenCalledWith('project-1', { status: 'someday' });
+        });
+        fetchSpy.mockRestore();
+    });
+
+    it('parses quick-add date commands when adding a task during project review', async () => {
+        const addTask = vi.fn(async () => ({ success: true }));
+        const project = makeProject('project-1', { title: 'Launch Project', updatedAt: new Date().toISOString() });
+        useTaskStore.setState({
+            projects: [project],
+            _allProjects: [project],
+            settings: {
+                quickAddAutoClean: true,
                 gtd: {
                     weeklyReview: {
                         includeContextStep: false,

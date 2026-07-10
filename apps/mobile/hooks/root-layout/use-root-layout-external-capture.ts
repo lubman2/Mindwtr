@@ -7,6 +7,7 @@ import { logError, logWarn } from '@/lib/app-log';
 import {
     isOpenFeatureUrl,
     isShortcutCaptureUrl,
+    normalizeShortcutTags,
     parseOpenFeatureUrl,
     parseShortcutCaptureUrl,
     resolveOpenFeaturePath,
@@ -33,46 +34,31 @@ type UseRootLayoutExternalCaptureParams = {
     showToast: (options: ToastOptions) => void;
 };
 
-const normalizeShortcutTags = (tags: string[]): string[] => {
-    const normalized: string[] = [];
-    const seen = new Set<string>();
-    for (const rawTag of tags) {
-        const trimmed = String(rawTag || '').trim();
-        if (!trimmed) continue;
-        const prefixed = trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
-        const key = prefixed.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        normalized.push(prefixed);
-    }
-    return normalized;
-};
-
 const trimSharedValue = (value: string | null | undefined): string => (
     typeof value === 'string' ? value.trim() : ''
 );
 
-function buildShareIntentInitialProps({
+function buildShareIntentCaptureParams({
     shareText,
     shareWebUrl,
 }: {
     shareText?: string | null;
     shareWebUrl?: string | null;
-}): Partial<Task> | null {
-    const noteParts: string[] = [];
-    const seen = new Set<string>();
-    for (const part of [trimSharedValue(shareText), trimSharedValue(shareWebUrl)]) {
-        if (!part) continue;
-        if (seen.has(part)) continue;
-        seen.add(part);
-        noteParts.push(part);
+}): Record<string, string> | null {
+    const title = trimSharedValue(shareText) || trimSharedValue(shareWebUrl);
+    if (!title) return null;
+
+    const params: Record<string, string> = {
+        initialValue: encodeURIComponent(title),
+    };
+    const url = trimSharedValue(shareWebUrl);
+    if (url && url !== title) {
+        params.initialProps = encodeURIComponent(JSON.stringify({
+            description: url,
+        } satisfies Partial<Task>));
     }
 
-    if (noteParts.length === 0) return null;
-
-    return {
-        description: noteParts.join('\n\n'),
-    };
+    return params;
 }
 
 export function useRootLayoutExternalCapture({
@@ -119,13 +105,11 @@ export function useRootLayoutExternalCapture({
 
     useEffect(() => {
         if (!hasShareIntent) return;
-        const initialProps = buildShareIntentInitialProps({ shareText, shareWebUrl });
-        if (initialProps) {
+        const params = buildShareIntentCaptureParams({ shareText, shareWebUrl });
+        if (params) {
             router.replace({
                 pathname: '/capture-modal',
-                params: {
-                    initialProps: encodeURIComponent(JSON.stringify(initialProps)),
-                },
+                params,
             });
         } else {
             void logError(new Error('Share intent payload missing text'), { scope: 'share-intent' });

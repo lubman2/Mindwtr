@@ -1,7 +1,7 @@
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Project, Task } from '@mindwtr/core';
+import type { AppSettings, Area, Project, Task } from '@mindwtr/core';
 
 const addTaskMock = vi.hoisted(() => vi.fn());
 const addProjectMock = vi.hoisted(() => vi.fn());
@@ -9,8 +9,33 @@ const updateTaskMock = vi.hoisted(() => vi.fn());
 const setHighlightTaskMock = vi.hoisted(() => vi.fn());
 const quickAddPropsSpy = vi.hoisted(() => vi.fn());
 const quickAddFocusMock = vi.hoisted(() => vi.fn());
+const selectedAreaIdForNewTasksMock = vi.hoisted(() => ({ current: undefined as string | null | undefined }));
 const taskEditModalPropsSpy = vi.hoisted(() => vi.fn());
+const bulkOrganizeModalPropsSpy = vi.hoisted(() => vi.fn());
 const parseQuickAddMock = vi.hoisted(() => vi.fn());
+const taskListHeaderPropsSpy = vi.hoisted(() => vi.fn());
+const taskListSelectionState = vi.hoisted(() => ({
+  current: {
+    bulkActionLabel: 'Move',
+    bulkActionLoading: false,
+    exitSelectionMode: vi.fn(),
+    handleBatchAddTag: vi.fn(),
+    handleBatchDelete: vi.fn(),
+    handleBatchOrganize: vi.fn(),
+    handleBatchMove: vi.fn(),
+    hasSelection: false,
+    multiSelectedIds: new Set<string>(),
+    rangeSelectMode: false,
+    selectedIdsArray: [] as string[],
+    selectionMode: false,
+    setTagInput: vi.fn(),
+    setTagModalVisible: vi.fn(),
+    tagInput: '',
+    tagModalVisible: false,
+    toggleMultiSelect: vi.fn(),
+    toggleRangeSelectMode: vi.fn(),
+  },
+}));
 
 const projectFixture = vi.hoisted(() => ({
   id: 'project-1',
@@ -42,7 +67,7 @@ const storeState = vi.hoisted(() => ({
   _allTasks: [] as Task[],
   projects: [projectFixture as Project],
   sections: [],
-  areas: [],
+  areas: [] as Area[],
   addTask: addTaskMock,
   addProject: addProjectMock,
   updateTask: updateTaskMock,
@@ -57,7 +82,10 @@ const storeState = vi.hoisted(() => ({
     ai: { enabled: false },
     appearance: {},
     features: {},
-  },
+  } as AppSettings,
+  getDerivedState: vi.fn(() => ({
+    focusedCount: storeState._allTasks.filter((task) => task.isFocusedToday).length,
+  })),
   updateSettings: vi.fn(),
   highlightTaskId: null as string | null,
   setHighlightTask: setHighlightTaskMock,
@@ -72,6 +100,8 @@ vi.mock('react-native', () => ({
       ? data.map((item: unknown, index: number) => renderItem?.({ item, index }))
       : (typeof ListEmptyComponent === 'function' ? React.createElement(ListEmptyComponent) : ListEmptyComponent),
   ),
+  Modal: ({ children, visible, ...props }: any) => (visible ? React.createElement('Modal', props, children) : null),
+  Pressable: ({ children, onPress, ...props }: any) => React.createElement('Pressable', { ...props, onPress }, children),
   RefreshControl: () => null,
   StyleSheet: { create: (styles: unknown) => styles },
   Text: ({ children, ...props }: any) => React.createElement('Text', props, children),
@@ -95,11 +125,13 @@ vi.mock('lucide-react-native', () => ({
 }));
 
 vi.mock('react-native-draggable-flatlist', () => ({
-  NestableDraggableFlatList: () => null,
-  ScaleDecorator: ({ children }: any) => children,
+  default: (props: any) => React.createElement('DraggableFlatList', props),
+  NestableDraggableFlatList: (props: any) => React.createElement('NestableDraggableFlatList', props),
+  ScaleDecorator: ({ children, ...props }: any) => React.createElement('ScaleDecorator', props, children),
 }));
 
-vi.mock('@mindwtr/core', () => {
+vi.mock('@mindwtr/core', async () => {
+  const actual = await vi.importActual<typeof import('@mindwtr/core')>('@mindwtr/core');
   const useTaskStore = Object.assign(
     (selector: (state: typeof storeState) => unknown) => selector(storeState),
     { getState: () => storeState },
@@ -108,15 +140,47 @@ vi.mock('@mindwtr/core', () => {
   return {
     DEFAULT_PROJECT_COLOR: '#2563eb',
     createAIProvider: vi.fn(),
+    formatFocusTaskLimitText: (template: string, limit: number) => (
+      template.includes('{{count}}') ? template.replace('{{count}}', String(limit)) : `Max ${limit} focus items.`
+    ),
+    canStarNewCapture: ({ focusedCount, focusTaskLimit }: { focusedCount: number; focusTaskLimit: number }) => focusedCount < focusTaskLimit,
+    buildCaptureTaskProps: actual.buildCaptureTaskProps,
+    applyCapturedProject: actual.applyCapturedProject,
+    getDefaultTaskAreaMode: (settings: any) => {
+      const mode = settings?.gtd?.defaultAreaMode;
+      if (mode === 'none' || mode === 'fixed' || mode === 'active') return mode;
+      return settings?.gtd?.defaultAreaId ? 'fixed' : 'none';
+    },
     getQuickAddProjectInitialProps: vi.fn(() => ({})),
     getTranslationsSync: vi.fn(() => ({ 'trash.restoreToInbox': 'Restore' })),
+    getTaskMetadataFilterVisibility: vi.fn(() => ({
+      showEnergy: true,
+      showLocation: true,
+      showPriority: true,
+      showTimeEstimate: true,
+    })),
     getUsedTaskTokens: vi.fn(() => []),
+    hasActiveFilterCriteria: vi.fn(() => false),
     isSelectableProjectForTaskAssignment: (item: Project) => item.status === 'active' && !item.deletedAt,
     isTaskInActiveProject: vi.fn(() => true),
+    matchesTask: vi.fn(() => true),
+    normalizeClockTimeInput: (value?: string | null) => String(value ?? '').trim(),
+    normalizeFocusTaskLimit: (value: unknown) => (typeof value === 'number' ? value : 3),
     parseQuickAdd: parseQuickAddMock,
+    parseSearchQuery: vi.fn(() => ({ filters: [], text: '' })),
+    resolveDefaultNewTaskAreaId: (settings: any, areas: any[]) => {
+      const mode = settings?.gtd?.defaultAreaMode ?? (settings?.gtd?.defaultAreaId ? 'fixed' : 'none');
+      if (mode !== 'fixed') return undefined;
+      const areaId = settings?.gtd?.defaultAreaId;
+      return typeof areaId === 'string' && areas.some((area) => area.id === areaId && !area.deletedAt)
+        ? areaId
+        : undefined;
+    },
     shallow: Object.is,
     sortTasksBy: (tasks: Task[]) => tasks,
     splitCompletedTasks: (tasks: Task[]) => ({ activeTasks: tasks, completedTasks: [] }),
+    taskMatchesAreaFilter: vi.fn(() => true),
+    taskMatchesFilterCriteria: vi.fn(() => true),
     tFallback: (t: (key: string) => string, key: string, fallback: string) => {
       const value = t(key);
       return value && value !== key ? value : fallback;
@@ -141,7 +205,7 @@ vi.mock('./list-empty-state', () => ({
 }));
 
 vi.mock('./swipeable-task-item', () => ({
-  SwipeableTaskItem: () => null,
+  SwipeableTaskItem: (props: any) => React.createElement('SwipeableTaskItem', props),
 }));
 
 vi.mock('../contexts/theme-context', () => ({
@@ -186,7 +250,7 @@ vi.mock('@/hooks/use-mobile-area-filter', () => ({
   useMobileAreaFilter: () => ({
     areaById: new Map(),
     resolvedAreaFilter: null,
-    selectedAreaIdForNewTasks: undefined,
+    selectedAreaIdForNewTasks: selectedAreaIdForNewTasksMock.current,
   }),
 }));
 
@@ -206,10 +270,6 @@ vi.mock('@/hooks/use-manual-pull-sync', () => ({
   }),
 }));
 
-vi.mock('@/lib/area-filter', () => ({
-  taskMatchesAreaFilter: () => true,
-}));
-
 vi.mock('@/lib/task-meta-navigation', () => ({
   openContextsScreen: vi.fn(),
   openProjectScreen: vi.fn(),
@@ -226,7 +286,25 @@ vi.mock('../lib/app-log', () => ({
 }));
 
 vi.mock('./use-task-list-selection', () => ({
-  useTaskListSelection: () => ({
+  useTaskListSelection: () => taskListSelectionState.current,
+}));
+
+vi.mock('./task-list/TaskListBulkBar', () => ({
+  TaskListBulkBar: (props: any) => React.createElement('TaskListBulkBar', props),
+  getBulkMoveStatusOptions: (currentStatus?: string) => (
+    ['inbox', 'next', 'waiting', 'someday', 'done', 'reference'].filter((status) => status !== currentStatus)
+  ),
+}));
+
+vi.mock('./task-list/TaskListBulkOrganizeModal', () => ({
+  TaskListBulkOrganizeModal: (props: any) => {
+    bulkOrganizeModalPropsSpy(props);
+    return React.createElement('TaskListBulkOrganizeModal', props);
+  },
+}));
+
+const resetTaskListSelectionState = () => {
+  taskListSelectionState.current = {
     bulkActionLabel: 'Move',
     bulkActionLoading: false,
     exitSelectionMode: vi.fn(),
@@ -245,23 +323,18 @@ vi.mock('./use-task-list-selection', () => ({
     tagModalVisible: false,
     toggleMultiSelect: vi.fn(),
     toggleRangeSelectMode: vi.fn(),
-  }),
-}));
-
-vi.mock('./task-list/TaskListBulkBar', () => ({
-  TaskListBulkBar: () => null,
-}));
-
-vi.mock('./task-list/TaskListBulkOrganizeModal', () => ({
-  TaskListBulkOrganizeModal: () => null,
-}));
+  };
+};
 
 vi.mock('./task-list/TaskListFiltersSheet', () => ({
   TaskListFiltersSheet: () => null,
 }));
 
 vi.mock('./task-list/TaskListHeader', () => ({
-  TaskListHeader: () => null,
+  TaskListHeader: (props: any) => {
+    taskListHeaderPropsSpy(props);
+    return React.createElement('TaskListHeader', props);
+  },
 }));
 
 vi.mock('./task-list/TaskListQuickAdd', () => ({
@@ -290,13 +363,22 @@ vi.mock('./task-list/TaskListTagModal', () => ({
 import { TaskList } from './task-list';
 
 const latestQuickAddProps = () => quickAddPropsSpy.mock.calls.at(-1)?.[0];
+const latestHeaderProps = () => taskListHeaderPropsSpy.mock.calls.at(-1)?.[0];
 
 describe('TaskList project quick add', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetTaskListSelectionState();
     storeState.tasks = [];
     storeState._allTasks = [];
+    storeState.areas = [];
     storeState.highlightTaskId = null;
+    storeState.settings = {
+      ai: { enabled: false },
+      appearance: {},
+      features: {},
+    };
+    selectedAreaIdForNewTasksMock.current = undefined;
     addTaskMock.mockResolvedValue({ success: true, id: 'created-task' });
     parseQuickAddMock.mockImplementation((input: string) => ({ title: input, props: {} }));
     vi.stubGlobal('requestAnimationFrame', (callback: (time: number) => void) => {
@@ -320,6 +402,154 @@ describe('TaskList project quick add', () => {
     />,
   );
 
+  const renderInboxList = () => create(
+    <TaskList
+      allowAdd
+      showHeader={false}
+      statusFilter="inbox"
+      taskSource={[]}
+      title="Inbox"
+    />,
+  );
+
+  it("does not show standalone quick-add outside a project", async () => {
+    let tree!: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <TaskList
+          allowAdd
+          showHeader={false}
+          statusFilter="next"
+          taskSource={[]}
+          title="Next"
+        />,
+      );
+    });
+
+    expect(quickAddPropsSpy).not.toHaveBeenCalled();
+
+    act(() => {
+      tree.unmount();
+    });
+  });
+
+  it('passes a group control to non-reference list headers', async () => {
+    const onChangeGroupBy = vi.fn();
+    let tree!: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <TaskList
+          allowAdd
+          groupBy="tag"
+          onChangeGroupBy={onChangeGroupBy}
+          showHeader={false}
+          statusFilter="inbox"
+          taskSource={[]}
+          title="Inbox"
+        />,
+      );
+    });
+
+    expect(latestHeaderProps()).toEqual(expect.objectContaining({
+      groupByLabel: 'Tags',
+      onOpenGroup: expect.any(Function),
+    }));
+
+    act(() => {
+      tree.unmount();
+    });
+  });
+
+  it('publishes project selection actions to an external bulk bar with organize available', async () => {
+    taskListSelectionState.current = {
+      ...taskListSelectionState.current,
+      hasSelection: true,
+      selectedIdsArray: ['task-1', 'task-2'],
+      selectionMode: true,
+    };
+    const onBulkBarPropsChange = vi.fn();
+    let tree!: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <TaskList
+          allowAdd={false}
+          bulkBarPlacement="external"
+          enableProjectBulkOrganize
+          onBulkBarPropsChange={onBulkBarPropsChange}
+          projectId={project.id}
+          showHeader={false}
+          statusFilter="all"
+          taskSource={[]}
+          title={project.title}
+        />,
+      );
+    });
+
+    const bulkBarProps = onBulkBarPropsChange.mock.calls.at(-1)?.[0];
+    expect(bulkBarProps).toEqual(expect.objectContaining({
+      hasSelection: true,
+      selectedCount: 2,
+    }));
+    expect(typeof bulkBarProps.onOpenOrganize).toBe('function');
+    expect(tree.root.findAll((node) => String(node.type) === 'TaskListBulkBar')).toHaveLength(0);
+
+    act(() => {
+      bulkBarProps.onOpenOrganize();
+    });
+
+    expect(bulkOrganizeModalPropsSpy.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+      selectedCount: 2,
+      visible: true,
+    }));
+  });
+
+
+
+  it('omits the current page status from bulk move options and orders Done before Reference', async () => {
+    taskListSelectionState.current = {
+      ...taskListSelectionState.current,
+      hasSelection: true,
+      selectedIdsArray: ['task-1'],
+      selectionMode: true,
+    };
+    let tree!: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <TaskList
+          allowAdd={false}
+          showHeader={false}
+          statusFilter="inbox"
+          taskSource={[]}
+          title="Inbox"
+        />,
+      );
+    });
+
+    const bulkBarProps = tree.root.findAll((node) => String(node.type) === 'TaskListBulkBar')[0]?.props;
+    expect(bulkBarProps.statusOptions).toEqual(['next', 'waiting', 'someday', 'done', 'reference']);
+
+    act(() => {
+      tree.unmount();
+    });
+  });
+
+  it('does not show an in-page composer on the Inbox; capture uses the bottom-bar button', async () => {
+    let tree!: ReturnType<typeof create>;
+    await act(async () => {
+      tree = renderInboxList();
+    });
+
+    expect(quickAddPropsSpy).not.toHaveBeenCalled();
+
+    act(() => {
+      tree.unmount();
+    });
+  });
+
   it('plain add clears the composer and refocuses it for the next capture', async () => {
     let tree!: ReturnType<typeof create>;
     await act(async () => {
@@ -336,11 +566,37 @@ describe('TaskList project quick add', () => {
 
     expect(addTaskMock).toHaveBeenCalledWith('Draft launch checklist', expect.objectContaining({
       projectId: project.id,
-      status: 'next',
+      status: 'inbox',
     }));
     expect(latestQuickAddProps().newTaskTitle).toBe('');
     expect(quickAddFocusMock).toHaveBeenCalledTimes(1);
     expect(taskEditModalPropsSpy.mock.calls.some(([props]) => props.visible === true)).toBe(false);
+
+    act(() => {
+      tree.unmount();
+    });
+  });
+
+  it('passes isFocusedToday when the quick-add focus toggle is enabled', async () => {
+    let tree!: ReturnType<typeof create>;
+    await act(async () => {
+      tree = renderProjectList();
+    });
+
+    await act(async () => {
+      latestQuickAddProps().onToggleFocusNewTask();
+      latestQuickAddProps().onChangeText('Focus launch checklist');
+    });
+
+    await act(async () => {
+      await latestQuickAddProps().handleAddTask();
+    });
+
+    expect(addTaskMock).toHaveBeenCalledWith('Focus launch checklist', expect.objectContaining({
+      isFocusedToday: true,
+      projectId: project.id,
+      status: 'inbox',
+    }));
 
     act(() => {
       tree.unmount();
@@ -370,7 +626,7 @@ describe('TaskList project quick add', () => {
 
     expect(addTaskMock).toHaveBeenCalledWith('Add launch brief', expect.objectContaining({
       projectId: project.id,
-      status: 'next',
+      status: 'inbox',
     }));
     expect(setHighlightTaskMock).toHaveBeenCalledWith('created-task');
     expect(taskEditModalPropsSpy.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
@@ -378,6 +634,154 @@ describe('TaskList project quick add', () => {
       task: expect.objectContaining({ id: 'created-task' }),
     }));
     expect(latestQuickAddProps().newTaskTitle).toBe('');
+
+    act(() => {
+      tree.unmount();
+    });
+  });
+
+  it('applies typeahead suggestions using the latest quick-add text and selection', async () => {
+    let tree!: ReturnType<typeof create>;
+    await act(async () => {
+      tree = renderProjectList();
+    });
+
+    await act(async () => {
+      const quickAdd = latestQuickAddProps();
+      quickAdd.onChangeText('+La today');
+      quickAdd.onSelectionChange({ start: '+La'.length, end: '+La'.length });
+      await quickAdd.applyTypeaheadOption({ kind: 'project', label: 'Launch', value: 'Launch' });
+    });
+
+    expect(latestQuickAddProps().newTaskTitle).toBe('+Launch today');
+
+    act(() => {
+      tree.unmount();
+    });
+  });
+
+  it('passes shared row context to task rows instead of making each row subscribe to the store', async () => {
+    const visibleTask = makeTask('task-row-context', 'Review launch notes');
+    storeState.tasks = [visibleTask];
+    storeState._allTasks = [visibleTask];
+
+    let tree!: ReturnType<typeof create>;
+    await act(async () => {
+      tree = create(
+        <TaskList
+          allowAdd={false}
+          showHeader={false}
+          statusFilter="next"
+          taskSource={[visibleTask]}
+          title="Next"
+        />,
+      );
+    });
+
+    const row = tree.root.findByType('SwipeableTaskItem' as unknown as React.ElementType);
+    expect(row.props.rowContext).toEqual(expect.objectContaining({
+      areas: storeState.areas,
+      focusedCount: 0,
+      projects: storeState.projects,
+      restoreTask: storeState.restoreTask,
+      updateTask: updateTaskMock,
+    }));
+    expect(row.props.rowContext).toEqual(expect.objectContaining({
+      focusTaskLimit: 3,
+      showTaskAge: false,
+      timeEstimatesEnabled: true,
+    }));
+
+    act(() => {
+      tree.unmount();
+    });
+  });
+
+  it('uses compact draggable rows without extra placeholder or scale overlays for long project reorder lists', async () => {
+    const longTaskList = Array.from({ length: 130 }, (_, index) => makeTask(
+      `task-${index}`,
+      `Task ${index}`,
+      { order: index },
+    ));
+    let tree!: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <TaskList
+          allowAdd={false}
+          enableProjectReorder
+          projectId={project.id}
+          projectReorderMode
+          showHeader={false}
+          statusFilter="all"
+          taskSource={longTaskList}
+          title={project.title}
+        />,
+      );
+    });
+
+    const draggableList = tree.root.findByType('DraggableFlatList' as unknown as React.ElementType);
+    expect(draggableList.props.data).toHaveLength(longTaskList.length);
+    expect(draggableList.props.renderPlaceholder).toBeUndefined();
+    expect(draggableList.props.animationConfig).toEqual(expect.objectContaining({
+      overshootClamping: true,
+    }));
+
+    let row!: ReturnType<typeof create>;
+    await act(async () => {
+      row = create(
+        draggableList.props.renderItem({
+          drag: vi.fn(),
+          getIndex: () => 80,
+          isActive: false,
+          item: { type: 'task', key: longTaskList[80].id, task: longTaskList[80] },
+        }),
+      );
+    });
+
+    expect(row.root.findAllByType('SwipeableTaskItem' as unknown as React.ElementType)).toHaveLength(0);
+    expect(row.root.findAllByType('ScaleDecorator' as unknown as React.ElementType)).toHaveLength(0);
+    expect(row.root.findByProps({ testID: 'project-task-reorder-row-task-80' })).toBeTruthy();
+    expect(row.root.findByProps({ testID: 'project-task-drag-handle-task-80' })).toBeTruthy();
+
+    act(() => {
+      row.unmount();
+      tree.unmount();
+    });
+  });
+
+  it('uses a single self-scrolling draggable list when a section-less project owns the scroll', async () => {
+    const longTaskList = Array.from({ length: 130 }, (_, index) => makeTask(
+      `task-${index}`,
+      `Task ${index}`,
+      { order: index },
+    ));
+    let tree!: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <TaskList
+          allowAdd={false}
+          enableProjectReorder
+          projectId={project.id}
+          projectReorderMode
+          showHeader={false}
+          statusFilter="all"
+          taskSource={longTaskList}
+          title={project.title}
+        />,
+      );
+    });
+
+    // The self-scrolling list owns scroll, so the nested (non-virtualizing) variant must be gone.
+    expect(tree.root.findAllByType('NestableDraggableFlatList' as unknown as React.ElementType)).toHaveLength(0);
+
+    const draggableList = tree.root.findByType('DraggableFlatList' as unknown as React.ElementType);
+    expect(draggableList.props.data).toHaveLength(longTaskList.length);
+    expect(draggableList.props.scrollEnabled).not.toBe(false);
+    expect(draggableList.props.animationConfig).toEqual(expect.objectContaining({
+      overshootClamping: true,
+    }));
 
     act(() => {
       tree.unmount();

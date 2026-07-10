@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Modal, Platform, Pressable, ScrollView, Switch, Text, TouchableOpacity, View } from 'react-native';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -12,6 +12,12 @@ import {
     isWeeklyReviewReminderEnabled,
 } from '@/lib/mobile-notification-settings';
 import { requestNotificationPermission, startMobileNotifications } from '@/lib/notification-service';
+import {
+    applyPersistentCaptureNotification,
+    isPersistentCaptureSupported,
+    readPersistentCaptureEnabled,
+    writePersistentCaptureEnabled,
+} from '@/lib/persistent-capture-notification';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 
 import { useSettingsLocalization, useSettingsScrollContent } from './settings.hooks';
@@ -75,6 +81,33 @@ export function NotificationsSettingsScreen() {
         }
         return false;
     }, []);
+
+    const [persistentCaptureEnabled, setPersistentCaptureEnabled] = useState(false);
+    useEffect(() => {
+        if (!isPersistentCaptureSupported()) return;
+        readPersistentCaptureEnabled().then(setPersistentCaptureEnabled).catch(console.error);
+    }, []);
+    const persistentCaptureStrings = useCallback(() => ({
+        title: t('captureNotification.title') || 'Quick capture',
+        text: t('captureNotification.text') || 'Tap to capture to your Inbox',
+        channelName: t('captureNotification.channelName') || 'Quick capture',
+    }), [t]);
+    const togglePersistentCapture = useCallback((value: boolean) => {
+        if (!value) {
+            setPersistentCaptureEnabled(false);
+            applyPersistentCaptureNotification(false, persistentCaptureStrings());
+            writePersistentCaptureEnabled(false).catch(console.error);
+            return;
+        }
+        ensureNotificationsPermission()
+            .then((granted) => {
+                if (!granted) return;
+                setPersistentCaptureEnabled(true);
+                applyPersistentCaptureNotification(true, persistentCaptureStrings());
+                writePersistentCaptureEnabled(true).catch(console.error);
+            })
+            .catch(console.error);
+    }, [ensureNotificationsPermission, persistentCaptureStrings]);
 
     const openDigestTimePicker = useCallback((picker: 'morning' | 'evening') => {
         setDigestTimePicker(picker);
@@ -222,6 +255,24 @@ export function NotificationsSettingsScreen() {
                             trackColor={{ false: '#767577', true: '#3B82F6' }}
                         />
                     </View>
+
+                    {isPersistentCaptureSupported() && (
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>
+                                    {t('settings.persistentCaptureLabel')}
+                                </Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
+                                    {t('settings.persistentCaptureDesc')}
+                                </Text>
+                            </View>
+                            <Switch
+                                value={persistentCaptureEnabled}
+                                onValueChange={togglePersistentCapture}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
+                        </View>
+                    )}
                 </View>
 
                 <View style={[styles.settingCard, { backgroundColor: tc.cardBg, marginTop: 12 }]}>

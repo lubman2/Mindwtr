@@ -1,3 +1,7 @@
+// The fully-populated round-trip test fixtures exceed serde_json::json!'s
+// default macro recursion depth.
+#![recursion_limit = "256"]
+
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -18,7 +22,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
 #[cfg(target_os = "macos")]
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_int};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(target_os = "windows")]
@@ -56,17 +60,20 @@ mod storage;
 mod sync;
 mod ui;
 
-use audio::{start_audio_recording, stop_audio_recording, transcribe_whisper};
+use audio::{
+    download_parakeet_model, download_whisper_model, start_audio_recording, stop_audio_recording,
+    transcribe_parakeet, transcribe_whisper,
+};
 use autostart::{get_launch_at_startup_enabled, set_launch_at_startup_enabled};
 use config::{
     check_obsidian_vault_marker, expand_external_calendar_file_scopes, expand_obsidian_vault_scope,
     get_ai_key, get_cloud_config, get_external_calendars, get_obsidian_config, get_sync_backend,
-    get_webdav_config, get_webdav_password, set_ai_key, set_cloud_config, set_external_calendars,
-    set_obsidian_config, set_sync_backend, set_webdav_config,
+    get_webdav_config, get_webdav_password, list_obsidian_vaults, set_ai_key, set_cloud_config,
+    set_external_calendars, set_obsidian_config, set_sync_backend, set_webdav_config,
 };
 use install::{
-    diagnostics_enabled, get_install_source, get_linux_distro, is_flatpak, is_niri_session,
-    is_windows_store_install,
+    check_microsoft_store_update, diagnostics_enabled, get_install_source, get_linux_distro,
+    is_flatpak, is_niri_session, is_windows_store_install,
 };
 use local_api::{
     get_local_api_server_status, set_local_api_server_config, start_configured_local_api_server,
@@ -83,17 +90,17 @@ use platform::{
     cloudkit_account_status, cloudkit_consume_pending_remote_change, cloudkit_delete_records,
     cloudkit_ensure_subscription, cloudkit_ensure_zone, cloudkit_fetch_all_records,
     cloudkit_fetch_attachment_asset, cloudkit_fetch_changes, cloudkit_register_for_notifications,
-    cloudkit_save_attachment_asset, cloudkit_save_records,
-    create_macos_calendar_event, delete_macos_calendar_event, ensure_macos_mindwtr_calendar,
-    get_macos_calendar_events, get_macos_calendar_permission_status, get_macos_writable_calendars,
-    open_path, request_macos_calendar_permission, set_macos_activation_policy,
-    update_macos_calendar_event,
+    cloudkit_save_attachment_asset, cloudkit_save_records, create_macos_calendar_event,
+    delete_macos_calendar_event, ensure_macos_mindwtr_calendar, get_macos_calendar_events,
+    get_macos_calendar_permission_status, get_macos_writable_calendars, import_attachment_file,
+    open_path,
+    request_macos_calendar_permission, set_macos_activation_policy, update_macos_calendar_event,
 };
 use storage::{
     create_data_snapshot, delete_calendar_sync_entry, get_all_calendar_sync_entries,
-    get_calendar_sync_entry, get_config_path_cmd, get_data, get_data_path_cmd, get_db_path_cmd,
-    list_data_snapshots, query_tasks, read_data_json, restore_data_snapshot, save_data, save_task,
-    search_fts, upsert_calendar_sync_entry,
+    get_calendar_sync_entry, get_config_path_cmd, get_config_path_for_startup, get_data,
+    get_data_path_cmd, get_db_path_cmd, list_data_snapshots, query_tasks, read_data_json,
+    restore_data_snapshot, save_data, save_task, search_fts, upsert_calendar_sync_entry,
 };
 use sync::{
     cloud_get_json, cloud_put_json, connect_dropbox, disconnect_dropbox, get_dropbox_access_token,
@@ -102,11 +109,12 @@ use sync::{
 };
 use ui::{
     acknowledge_close_request, apply_global_quick_add_shortcut, consume_quick_add_pending,
-    create_quick_add_window, get_system_theme_preference, quit_app, set_global_quick_add_shortcut,
-    set_tray_visible, show_main, show_quick_add_window,
+    create_quick_add_window, get_system_theme_preference, hide_quick_add_window,
+    hide_quick_add_window_for_app, quit_app, set_global_quick_add_shortcut, set_tray_visible,
+    show_main, show_quick_add_window,
 };
 
-#[cfg(test)]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 use config::read_config_toml;
 pub(crate) use config::{
     get_keyring_secret, parse_toml_string_value, read_config, set_keyring_secret,
@@ -168,6 +176,20 @@ const GLOBAL_QUICK_ADD_SHORTCUT_ALTERNATE_N: &str = "Control+Alt+N";
 const GLOBAL_QUICK_ADD_SHORTCUT_ALTERNATE_Q: &str = "Control+Alt+Q";
 const GLOBAL_QUICK_ADD_SHORTCUT_LEGACY: &str = "CommandOrControl+Shift+A";
 const GLOBAL_QUICK_ADD_SHORTCUT_DISABLED: &str = "disabled";
+#[cfg(any(target_os = "windows", test))]
+const WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS_ENV: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+#[cfg(any(target_os = "windows", test))]
+const WEBVIEW2_DISABLE_GPU_ARG: &str = "--disable-gpu";
+#[cfg(any(target_os = "linux", test))]
+const WEBKIT_DISABLE_DMABUF_RENDERER_ENV: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+#[cfg(any(target_os = "linux", test))]
+const WEBKIT_DISABLE_DMABUF_RENDERER_VALUE: &str = "1";
+#[cfg(any(target_os = "linux", test))]
+const WEBKIT_DISABLE_COMPOSITING_MODE_ENV: &str = "WEBKIT_DISABLE_COMPOSITING_MODE";
+#[cfg(any(target_os = "linux", test))]
+const WEBKIT_DISABLE_COMPOSITING_MODE_VALUE: &str = "1";
+#[cfg(any(target_os = "linux", test))]
+const MINDWTR_WEBKIT_ENABLE_DMABUF_ENV: &str = "MINDWTR_WEBKIT_ENABLE_DMABUF";
 
 #[cfg(target_os = "linux")]
 fn flatpak_notification_id() -> String {
@@ -193,7 +215,11 @@ async fn send_flatpak_notification(title: String, body: Option<String>) -> Resul
 
     let mut notification = ashpd::desktop::notification::Notification::new(trimmed_title)
         .priority(ashpd::desktop::notification::Priority::Normal);
-    if let Some(body) = body.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(body) = body
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         notification = notification.body(body);
     }
 
@@ -232,6 +258,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignedTo TEXT,
   taskMode TEXT,
   startTime TEXT,
+  relativeStartOffset TEXT,
   dueDate TEXT,
   recurrence TEXT,
   showFutureRecurrence INTEGER,
@@ -240,17 +267,25 @@ CREATE TABLE IF NOT EXISTS tasks (
   contexts TEXT,
   checklist TEXT,
   description TEXT,
+  textDirection TEXT,
   attachments TEXT,
   location TEXT,
   projectId TEXT,
   sectionId TEXT,
   areaId TEXT,
   orderNum INTEGER,
+  boardOrder INTEGER,
   isFocusedToday INTEGER,
   timeEstimate TEXT,
+  timeSpentMinutes INTEGER,
   suppressMindwtrReminders INTEGER,
+  repeatReminderMinutes INTEGER,
   reviewAt TEXT,
   completedAt TEXT,
+  statusBeforeProjectArchive TEXT,
+  completedAtBeforeProjectArchive TEXT,
+  isFocusedTodayBeforeProjectArchive INTEGER,
+  projectArchivedAt TEXT,
   rev INTEGER,
   revBy TEXT,
   createdAt TEXT NOT NULL,
@@ -290,7 +325,8 @@ CREATE TABLE IF NOT EXISTS projects (
   revBy TEXT,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL,
-  deletedAt TEXT
+  deletedAt TEXT,
+  purgedAt TEXT
 );
 
 CREATE TABLE IF NOT EXISTS areas (
@@ -300,6 +336,8 @@ CREATE TABLE IF NOT EXISTS areas (
   icon TEXT,
   orderNum INTEGER NOT NULL,
   deletedAt TEXT,
+  deletedAtBeforeProjectArchive TEXT,
+  projectArchivedAt TEXT,
   rev INTEGER,
   revBy TEXT,
   createdAt TEXT,
@@ -317,8 +355,26 @@ CREATE TABLE IF NOT EXISTS sections (
   revBy TEXT,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL,
+  deletedAt TEXT,
+  deletedAtBeforeProjectArchive TEXT,
+  projectArchivedAt TEXT
+);
+
+CREATE TABLE IF NOT EXISTS people (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  note TEXT,
+  referenceLink TEXT,
+  rev INTEGER,
+  revBy TEXT,
+  createdAt TEXT NOT NULL,
+  updatedAt TEXT NOT NULL,
   deletedAt TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_people_updated_at ON people(updatedAt);
+CREATE INDEX IF NOT EXISTS idx_people_deleted_at ON people(deletedAt);
+CREATE INDEX IF NOT EXISTS idx_people_updatedAt_rev ON people(updatedAt, rev);
 
 CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -436,6 +492,7 @@ struct AppConfigToml {
     local_api_enabled: Option<String>,
     local_api_port: Option<String>,
     local_api_token: Option<String>,
+    disable_hardware_acceleration: Option<String>,
 }
 
 fn default_obsidian_scan_folders() -> Vec<String> {
@@ -457,6 +514,8 @@ struct ObsidianConfigPayload {
     inbox_file: String,
     #[serde(default)]
     task_notes_include_archived: bool,
+    #[serde(default)]
+    dataview_metadata_enabled: bool,
     #[serde(default = "default_obsidian_new_task_format")]
     new_task_format: String,
     last_scanned_at: Option<String>,
@@ -471,6 +530,7 @@ impl Default for ObsidianConfigPayload {
             scan_folders: default_obsidian_scan_folders(),
             inbox_file: default_obsidian_inbox_file(),
             task_notes_include_archived: false,
+            dataview_metadata_enabled: false,
             new_task_format: default_obsidian_new_task_format(),
             last_scanned_at: None,
             enabled: false,
@@ -548,9 +608,8 @@ unsafe extern "C" {
         range_end: *const c_char,
     ) -> *mut c_char;
     fn mindwtr_macos_writable_calendars_json() -> *mut c_char;
-    fn mindwtr_macos_ensure_mindwtr_calendar_json(
-        stored_calendar_id: *const c_char,
-    ) -> *mut c_char;
+    fn mindwtr_macos_ensure_mindwtr_calendar_json(stored_calendar_id: *const c_char)
+        -> *mut c_char;
     fn mindwtr_macos_create_calendar_event_json(event_json: *const c_char) -> *mut c_char;
     fn mindwtr_macos_update_calendar_event_json(
         event_id: *const c_char,
@@ -561,6 +620,8 @@ unsafe extern "C" {
     fn mindwtr_macos_create_security_bookmark(path_cstr: *const c_char) -> *mut c_char;
     fn mindwtr_macos_resolve_security_bookmark(base64_cstr: *const c_char) -> *mut c_char;
     fn mindwtr_macos_free_bookmark_string(ptr: *mut c_char);
+    fn mindwtr_macos_frontmost_application_pid() -> c_int;
+    fn mindwtr_macos_activate_application(pid: c_int);
 
     fn mindwtr_cloudkit_account_status() -> *mut c_char;
     fn mindwtr_cloudkit_ensure_zone() -> *mut c_char;
@@ -626,7 +687,19 @@ struct QuickAddPending(Mutex<Option<String>>);
 struct CloseRequestHandled(AtomicBool);
 struct GlobalQuickAddShortcutState(Mutex<Option<String>>);
 
-struct AudioRecorderState(Mutex<Option<AudioRecorderHandle>>);
+#[derive(Clone, Copy, Debug, Default)]
+struct QuickAddFocusSnapshot {
+    macos_pid: Option<i32>,
+    windows_hwnd: Option<isize>,
+}
+
+#[derive(Default)]
+struct QuickAddFocusState(Mutex<QuickAddFocusSnapshot>);
+
+struct AudioRecorderState {
+    recorder: Mutex<Option<AudioRecorderHandle>>,
+    starting: AtomicBool,
+}
 
 #[derive(Clone, Debug)]
 struct RecorderInfo {
@@ -638,6 +711,7 @@ struct AudioRecorderHandle {
     stop_tx: mpsc::Sender<()>,
     samples: Arc<Mutex<Vec<i16>>>,
     info: Arc<Mutex<Option<RecorderInfo>>>,
+    limit_hit: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -682,6 +756,168 @@ where
 {
     args.into_iter()
         .any(|arg| arg.as_ref().eq_ignore_ascii_case(QUICK_ADD_CLI_FLAG))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn with_webview2_disable_gpu_argument(existing: Option<&str>) -> String {
+    let existing = existing.unwrap_or_default().trim();
+    if existing
+        .split_whitespace()
+        .any(|argument| argument == WEBVIEW2_DISABLE_GPU_ARG)
+    {
+        return existing.to_string();
+    }
+    if existing.is_empty() {
+        WEBVIEW2_DISABLE_GPU_ARG.to_string()
+    } else {
+        format!("{existing} {WEBVIEW2_DISABLE_GPU_ARG}")
+    }
+}
+
+fn bool_setting_enabled(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn hardware_acceleration_disabled(config: &AppConfigToml) -> bool {
+    bool_setting_enabled(config.disable_hardware_acceleration.as_deref())
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn read_startup_disable_hardware_acceleration() -> bool {
+    let config = read_config_toml(&get_config_path_for_startup());
+    hardware_acceleration_disabled(&config)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn should_configure_windows_webview2_disable_gpu(disable_hardware_acceleration: bool) -> bool {
+    disable_hardware_acceleration
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_webview2_browser_arguments(disable_hardware_acceleration: bool) {
+    if !should_configure_windows_webview2_disable_gpu(disable_hardware_acceleration) {
+        return;
+    }
+    let existing = env::var(WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS_ENV).ok();
+    let arguments = with_webview2_disable_gpu_argument(existing.as_deref());
+    env::set_var(WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS_ENV, arguments);
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_nvidia_vendor_id(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("0x10de")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_nvidia_gpu_detected() -> bool {
+    linux_sysfs_has_nvidia_gpu(Path::new("/sys/class/drm"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_sysfs_has_nvidia_gpu(root: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    let mut any_nvidia = false;
+    let mut saw_primary_marker = false;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !file_name.starts_with("card") || file_name.contains('-') {
+            continue;
+        }
+        let device_dir = entry.path().join("device");
+        let vendor = fs::read_to_string(device_dir.join("vendor")).unwrap_or_default();
+        let is_nvidia = is_nvidia_vendor_id(&vendor);
+        any_nvidia |= is_nvidia;
+        let boot_vga = fs::read_to_string(device_dir.join("boot_vga")).unwrap_or_default();
+        let is_primary = boot_vga.trim() == "1";
+        saw_primary_marker |= !boot_vga.trim().is_empty();
+        if is_primary && is_nvidia {
+            return true;
+        }
+    }
+    !saw_primary_marker && any_nvidia
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn should_configure_linux_webkit_disable_dmabuf(
+    existing_disable_dmabuf: Option<&str>,
+    enable_dmabuf_override: Option<&str>,
+    disable_hardware_acceleration: bool,
+    detected_nvidia: bool,
+) -> bool {
+    existing_disable_dmabuf.is_none()
+        && (disable_hardware_acceleration
+            || (!bool_setting_enabled(enable_dmabuf_override) && detected_nvidia))
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_webkit_renderer(disable_hardware_acceleration: bool) {
+    let existing_disable_dmabuf = env::var(WEBKIT_DISABLE_DMABUF_RENDERER_ENV).ok();
+    let enable_dmabuf_override = env::var(MINDWTR_WEBKIT_ENABLE_DMABUF_ENV).ok();
+    if should_configure_linux_webkit_disable_dmabuf(
+        existing_disable_dmabuf.as_deref(),
+        enable_dmabuf_override.as_deref(),
+        disable_hardware_acceleration,
+        linux_nvidia_gpu_detected(),
+    ) {
+        // WebKitGTK's DMABUF renderer can fail before a window appears on NVIDIA GBM setups.
+        env::set_var(
+            WEBKIT_DISABLE_DMABUF_RENDERER_ENV,
+            WEBKIT_DISABLE_DMABUF_RENDERER_VALUE,
+        );
+    }
+    if disable_hardware_acceleration && env::var(WEBKIT_DISABLE_COMPOSITING_MODE_ENV).is_err() {
+        env::set_var(
+            WEBKIT_DISABLE_COMPOSITING_MODE_ENV,
+            WEBKIT_DISABLE_COMPOSITING_MODE_VALUE,
+        );
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopRenderingConfig {
+    disable_hardware_acceleration: bool,
+}
+
+fn desktop_rendering_config_from(config: &AppConfigToml) -> DesktopRenderingConfig {
+    DesktopRenderingConfig {
+        disable_hardware_acceleration: hardware_acceleration_disabled(config),
+    }
+}
+
+#[tauri::command]
+fn get_desktop_rendering_config(app: tauri::AppHandle) -> DesktopRenderingConfig {
+    desktop_rendering_config_from(&read_config(&app))
+}
+
+#[tauri::command]
+fn set_desktop_rendering_config(
+    app: tauri::AppHandle,
+    disable_hardware_acceleration: bool,
+) -> Result<DesktopRenderingConfig, String> {
+    let mut config = read_config(&app);
+    config.disable_hardware_acceleration = Some(
+        if disable_hardware_acceleration {
+            "true"
+        } else {
+            "false"
+        }
+        .to_string(),
+    );
+    let config_path = get_config_path(&app);
+    let secrets_path = get_secrets_path(&app);
+    write_config_files(&config_path, &secrets_path, &config)?;
+    Ok(desktop_rendering_config_from(&config))
 }
 
 #[cfg(target_os = "linux")]
@@ -932,6 +1168,13 @@ fn enable_desktop_spellcheck(_window: &tauri::WebviewWindow) {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let disable_hardware_acceleration = read_startup_disable_hardware_acceleration();
+    #[cfg(target_os = "windows")]
+    configure_windows_webview2_browser_arguments(disable_hardware_acceleration);
+    #[cfg(target_os = "linux")]
+    configure_linux_webkit_renderer(disable_hardware_acceleration);
+
     let launch_args = env::args().collect::<Vec<_>>();
     let initial_launch_requests_quick_add = launch_requests_quick_add(launch_args.iter());
     #[cfg(target_os = "linux")]
@@ -948,6 +1191,7 @@ pub fn run() {
         .manage(QuickAddPending(Mutex::new(None)))
         .manage(CloseRequestHandled(AtomicBool::new(false)))
         .manage(GlobalQuickAddShortcutState(Mutex::new(None)))
+        .manage(QuickAddFocusState::default())
         .manage(LocalApiServerState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -1001,7 +1245,7 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 if window.label() == QUICK_ADD_WINDOW_LABEL {
-                    let _ = window.hide();
+                    let _ = hide_quick_add_window_for_app(window.app_handle());
                     return;
                 }
                 window
@@ -1219,9 +1463,13 @@ pub fn run() {
             }
             Ok(())
         })
-        .manage(AudioRecorderState(Mutex::new(None)))
+        .manage(AudioRecorderState {
+            recorder: Mutex::new(None),
+            starting: AtomicBool::new(false),
+        })
         .manage(ObsidianWatcherState::default())
         .invoke_handler(tauri::generate_handler![
+            check_microsoft_store_update,
             get_data,
             read_data_json,
             save_data,
@@ -1245,6 +1493,7 @@ pub fn run() {
             set_obsidian_config,
             expand_obsidian_vault_scope,
             check_obsidian_vault_marker,
+            list_obsidian_vaults,
             start_obsidian_watcher,
             stop_obsidian_watcher,
             obsidian_toggle_task,
@@ -1290,6 +1539,7 @@ pub fn run() {
             cloudkit_delete_records,
             cloudkit_consume_pending_remote_change,
             cloudkit_register_for_notifications,
+            import_attachment_file,
             open_path,
             read_sync_file,
             write_sync_file,
@@ -1299,12 +1549,16 @@ pub fn run() {
             start_audio_recording,
             stop_audio_recording,
             transcribe_whisper,
+            transcribe_parakeet,
+            download_parakeet_model,
+            download_whisper_model,
             log_ai_debug,
             append_log_line,
             clear_log_file,
             consume_quick_add_pending,
             get_system_theme_preference,
             set_global_quick_add_shortcut,
+            hide_quick_add_window,
             is_windows_store_install,
             get_install_source,
             get_launch_at_startup_enabled,
@@ -1312,6 +1566,8 @@ pub fn run() {
             send_flatpak_notification,
             get_local_api_server_status,
             set_local_api_server_config,
+            get_desktop_rendering_config,
+            set_desktop_rendering_config,
             quit_app
         ])
         .run(tauri::generate_context!())
@@ -1366,6 +1622,32 @@ mod tests {
     }
 
     #[test]
+    fn hardware_acceleration_setting_round_trips_in_public_config() {
+        let dir = unique_test_dir("hardware-acceleration");
+        fs::create_dir_all(&dir).expect("should create temp config dir");
+
+        let config_path = dir.join("config.toml");
+        let secrets_path = dir.join("secrets.toml");
+        let config = AppConfigToml {
+            disable_hardware_acceleration: Some("true".to_string()),
+            ..AppConfigToml::default()
+        };
+
+        write_config_files(&config_path, &secrets_path, &config)
+            .expect("should write config files");
+
+        let public_config = read_config_toml(&config_path);
+        assert_eq!(
+            public_config.disable_hardware_acceleration.as_deref(),
+            Some("true")
+        );
+        assert!(hardware_acceleration_disabled(&public_config));
+        assert!(!secrets_path.exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn flatpak_install_channel_reads_branch_from_instance_section() {
         let contents = r#"
 [Application]
@@ -1389,6 +1671,60 @@ arch=x86_64
         assert!(launch_requests_quick_add(["mindwtr", "--QUICK-ADD"]));
         assert!(!launch_requests_quick_add(["mindwtr"]));
         assert!(!launch_requests_quick_add(["mindwtr", "--foo"]));
+    }
+
+    #[test]
+    fn webview2_browser_arguments_add_disable_gpu_once() {
+        assert_eq!(with_webview2_disable_gpu_argument(None), "--disable-gpu");
+        assert_eq!(
+            with_webview2_disable_gpu_argument(Some("--foo=bar")),
+            "--foo=bar --disable-gpu",
+        );
+        assert_eq!(
+            with_webview2_disable_gpu_argument(Some("--foo=bar --disable-gpu")),
+            "--foo=bar --disable-gpu",
+        );
+    }
+
+    #[test]
+    fn webview2_disable_gpu_requires_local_setting() {
+        assert!(!should_configure_windows_webview2_disable_gpu(false));
+        assert!(should_configure_windows_webview2_disable_gpu(true));
+    }
+
+    #[test]
+    fn linux_webkit_dmabuf_renderer_is_targeted_to_nvidia_or_local_setting() {
+        assert!(!should_configure_linux_webkit_disable_dmabuf(
+            None, None, false, false,
+        ));
+        assert!(should_configure_linux_webkit_disable_dmabuf(
+            None, None, false, true,
+        ));
+        assert!(!should_configure_linux_webkit_disable_dmabuf(
+            None,
+            Some("1"),
+            false,
+            true,
+        ));
+        assert!(should_configure_linux_webkit_disable_dmabuf(
+            None,
+            Some("1"),
+            true,
+            true,
+        ));
+        assert!(!should_configure_linux_webkit_disable_dmabuf(
+            Some("0"),
+            None,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn nvidia_vendor_id_matches_sysfs_value() {
+        assert!(is_nvidia_vendor_id("0x10de\n"));
+        assert!(is_nvidia_vendor_id("0X10DE"));
+        assert!(!is_nvidia_vendor_id("0x8086"));
     }
 
     #[cfg(target_os = "linux")]

@@ -1,5 +1,5 @@
-import { memo } from 'react';
-import { ArrowRight, BookOpen, CheckCircle, ChevronLeft, ClipboardList, Clock, Trash2, User, X } from 'lucide-react';
+import { memo, useEffect, useRef } from 'react';
+import { ArrowRight, BookOpen, Check, CheckCircle, ChevronLeft, ClipboardList, Clock, Trash2, User, X } from 'lucide-react';
 import { DEFAULT_PROJECT_COLOR, filterProjectsBySelectedArea, safeFormatDate, safeParseDate, tFallback, type Area, type Project, type Task, type TaskPriority, type TimeEstimate } from '@mindwtr/core';
 
 import { cn } from '../lib/utils';
@@ -8,10 +8,12 @@ import {
     type InboxProcessingScheduleFieldKey,
     type InboxProcessingScheduleFieldsControls,
 } from './InboxProcessingScheduleFields';
+import { TokenAutocompleteInput } from './Task/TokenAutocompleteInput';
+import { AreaSelector } from './ui/AreaSelector';
 import { ProjectSelector } from './ui/ProjectSelector';
 import { QuickDateChips } from './QuickDateChips';
 
-export type ProcessingStep = 'refine' | 'actionable' | 'projectcheck' | 'twomin' | 'decide' | 'context' | 'project' | 'delegate';
+export type ProcessingStep = 'refine' | 'actionable' | 'projectcheck' | 'twomin' | 'decide' | 'context' | 'reference' | 'project' | 'delegate';
 
 export type InboxProcessingWizardProps = {
     t: (key: string) => string;
@@ -47,6 +49,7 @@ export type InboxProcessingWizardProps = {
     handleDelegateBack: () => void;
     handleSendDelegateRequest: () => void;
     handleConfirmWaiting: () => void;
+    handleConfirmReference: () => void;
     selectedContexts: string[];
     selectedTags: string[];
     selectedEnergyLevel?: Task['energyLevel'];
@@ -65,12 +68,13 @@ export type InboxProcessingWizardProps = {
     selectedPriority?: TaskPriority;
     setSelectedPriority: (value: TaskPriority | undefined) => void;
     allContexts: string[];
+    allTags: string[];
     customContext: string;
     setCustomContext: (value: string) => void;
-    addCustomContext: () => void;
+    addCustomContext: (value?: string) => void;
     customTag: string;
     setCustomTag: (value: string) => void;
-    addCustomTag: () => void;
+    addCustomTag: (value?: string) => void;
     toggleContext: (ctx: string) => void;
     toggleTag: (tag: string) => void;
     suggestedContexts: string[];
@@ -80,6 +84,8 @@ export type InboxProcessingWizardProps = {
     setConvertToProject: (value: boolean) => void;
     setProjectTitleDraft: (value: string) => void;
     setNextActionDraft: (value: string) => void;
+    extraActionDrafts: string[];
+    setExtraActionDrafts: (value: string[]) => void;
     projectTitleDraft: string;
     nextActionDraft: string;
     handleConvertToProject: () => void;
@@ -153,6 +159,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
     handleDelegateBack,
     handleSendDelegateRequest,
     handleConfirmWaiting,
+    handleConfirmReference,
     selectedContexts,
     selectedTags,
     selectedEnergyLevel,
@@ -171,6 +178,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
     selectedPriority,
     setSelectedPriority,
     allContexts,
+    allTags,
     customContext,
     setCustomContext,
     addCustomContext,
@@ -186,6 +194,8 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
     setConvertToProject,
     setProjectTitleDraft,
     setNextActionDraft,
+    extraActionDrafts,
+    setExtraActionDrafts,
     projectTitleDraft,
     nextActionDraft,
     handleConvertToProject,
@@ -210,6 +220,15 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
     scheduleFields,
     visibleScheduleFieldKeys,
 }: InboxProcessingWizardProps) {
+    // After a long step is submitted the view is left scrolled to the bottom;
+    // bring the panel top (title of the next task) back into view on advance.
+    const panelRef = useRef<HTMLDivElement | null>(null);
+    const processingTaskId = processingTask?.id;
+    useEffect(() => {
+        if (!processingTaskId) return;
+        panelRef.current?.scrollIntoView?.({ block: 'start' });
+    }, [processingTaskId]);
+
     if (!isProcessing || !processingTask) return null;
 
     const currentProject = selectedProjectId
@@ -217,6 +236,8 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
         : null;
     const laterLabel = tFallback(t, 'process.later', 'Later');
     const laterHint = tFallback(t, 'process.laterHint', 'Set a start date and move this to Next.');
+    const isReferenceOrganizationStep = processingStep === 'reference';
+    const selectedOrganizationCount = selectedContexts.length + selectedTags.length;
     const compareLabels = (left: string, right: string) =>
         left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });
     const sortedProjects = [...projects].sort((a, b) => compareLabels(a.title, b.title));
@@ -230,12 +251,13 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
         twomin: t('process.twoMin'),
         decide: t('process.nextStep'),
         context: t('process.context'),
+        reference: t('process.reference'),
         project: t('process.project'),
         delegate: t('process.delegateTitle'),
     };
 
     return (
-        <div className="bg-card border border-border rounded-xl animate-in fade-in overflow-visible">
+        <div ref={panelRef} className="bg-card border border-border rounded-xl animate-in fade-in overflow-visible">
             {/* Header */}
             <div className="flex items-center justify-between px-5 py-3.5">
                 <div className="flex items-center gap-2.5">
@@ -340,19 +362,17 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                         {showProjectInRefine && showAreaField && !selectedProjectId && (
                             <div className="space-y-1">
                                 <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.areaLabel')}</label>
-                                <select
-                                    aria-label={t('taskEdit.areaLabel')}
+                                <AreaSelector
+                                    areas={areas}
                                     value={selectedAreaId ?? ''}
-                                    onChange={(event) => setSelectedAreaId(event.target.value || null)}
-                                    className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
-                                >
-                                    <option value="">{t('projects.noArea')}</option>
-                                    {areas.map((area) => (
-                                        <option key={area.id} value={area.id}>
-                                            {area.name}
-                                        </option>
-                                    ))}
-                                </select>
+                                    onChange={(value) => setSelectedAreaId(value || null)}
+                                    placeholder={t('projects.noArea')}
+                                    noAreaLabel={t('projects.noArea')}
+                                    searchPlaceholder={t('areas.search')}
+                                    noMatchesLabel={t('common.noMatches')}
+                                    controlClassName="rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                                    menuClassName="text-sm"
+                                />
                             </div>
                         )}
                         {showProjectInRefine && showProjectField && (
@@ -404,7 +424,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                         </button>
                         <button
                             onClick={handleRefineNext}
-                            className="flex items-center gap-2 bg-primary text-primary-foreground px-6 py-2 rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors"
+                            className="flex items-center gap-2 bg-primary text-primary-foreground px-6 py-2 rounded-lg text-sm font-medium hover:bg-primary/90 transition-colors"
                         >
                             {t('process.refineNext')} <ArrowRight className="w-3.5 h-3.5" />
                         </button>
@@ -450,7 +470,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                         <button
                             type="button"
                             onClick={handleLater}
-                            className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-500 text-white py-2.5 text-sm font-semibold transition-colors hover:bg-blue-600"
+                            className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-500 text-white py-2.5 text-sm font-medium transition-colors hover:bg-blue-600"
                         >
                             <Clock className="w-4 h-4" /> {laterLabel}
                         </button>
@@ -459,7 +479,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                         <button
                             onClick={handleActionable}
                             className={cn(
-                                'flex items-center justify-center gap-2 bg-primary text-primary-foreground py-3 rounded-lg font-semibold hover:bg-primary/90 transition-colors',
+                                'flex items-center justify-center gap-2 bg-primary text-primary-foreground py-3 rounded-lg font-medium hover:bg-primary/90 transition-colors',
                                 showDoneNowShortcut ? 'flex-1' : 'w-full'
                             )}
                         >
@@ -468,7 +488,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                         {showDoneNowShortcut && (
                             <button
                                 onClick={handleTwoMinDone}
-                                className="flex-1 flex items-center justify-center gap-2 bg-green-500 text-white py-3 rounded-lg font-semibold hover:bg-green-600 transition-colors"
+                                className="flex-1 flex items-center justify-center gap-2 bg-green-500 text-white py-3 rounded-lg font-medium hover:bg-green-600 transition-colors"
                             >
                                 <CheckCircle className="w-4 h-4" /> {t('process.doneIt')}
                             </button>
@@ -603,7 +623,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                 </div>
             )}
 
-            {processingStep === 'context' && (
+            {(processingStep === 'context' || processingStep === 'reference') && (
                 <div className="space-y-4">
                     <p className="text-center text-sm text-muted-foreground">
                         {t('process.contextDesc')} {t('process.selectMultipleHint')}
@@ -636,11 +656,13 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                     {showContextsField ? (
                         <>
                             <div className="flex gap-2">
-                                <input
-                                    type="text"
+                                <TokenAutocompleteInput
                                     placeholder="@home"
                                     value={customContext}
-                                    onChange={(e) => setCustomContext(e.target.value)}
+                                    onChange={setCustomContext}
+                                    suggestions={[...suggestedContexts, ...allContexts]}
+                                    prefix="@"
+                                    onAcceptToken={(token) => addCustomContext(token)}
                                     className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary"
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') {
@@ -649,7 +671,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                                     }}
                                 />
                                 <button
-                                    onClick={addCustomContext}
+                                    onClick={() => addCustomContext()}
                                     disabled={!customContext.trim()}
                                     className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/80 disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
@@ -680,25 +702,6 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                                     </div>
                                 </div>
                             )}
-
-                            {allContexts.length > 0 && (
-                                <div className="flex flex-wrap gap-2 justify-center">
-                                    {allContexts.filter((ctx) => !suggestedContexts.includes(ctx)).map(ctx => (
-                                        <button
-                                            key={ctx}
-                                            onClick={() => toggleContext(ctx)}
-                                            className={cn(
-                                                'px-4 py-2 rounded-full text-sm font-medium transition-colors',
-                                                selectedContexts.includes(ctx)
-                                                    ? 'bg-primary text-primary-foreground'
-                                                    : 'bg-muted hover:bg-muted/80'
-                                            )}
-                                        >
-                                            {ctx}
-                                        </button>
-                                    ))}
-                                </div>
-                            )}
                         </>
                     ) : null}
 
@@ -708,11 +711,13 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                                 {t('taskEdit.tagsLabel')}
                             </div>
                             <div className="flex gap-2">
-                                <input
-                                    type="text"
+                                <TokenAutocompleteInput
                                     placeholder="#deep-work"
                                     value={customTag}
-                                    onChange={(e) => setCustomTag(e.target.value)}
+                                    onChange={setCustomTag}
+                                    suggestions={[...suggestedTags, ...allTags]}
+                                    prefix="#"
+                                    onAcceptToken={(token) => addCustomTag(token)}
                                     className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary"
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') {
@@ -721,7 +726,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                                     }}
                                 />
                                 <button
-                                    onClick={addCustomTag}
+                                    onClick={() => addCustomTag()}
                                     disabled={!customTag.trim()}
                                     className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/80 disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
@@ -749,7 +754,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                         </div>
                     ) : null}
 
-                    {showPriorityField && (
+                    {!isReferenceOrganizationStep && showPriorityField && (
                         <div className="space-y-2">
                             <div className="text-[11px] uppercase tracking-wide text-muted-foreground font-semibold">
                                 {t('taskEdit.priorityLabel')}
@@ -776,7 +781,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                         </div>
                     )}
 
-                    {(showEnergyLevelField || showAssignedToField || showTimeEstimateField) && (
+                    {!isReferenceOrganizationStep && (showEnergyLevelField || showAssignedToField || showTimeEstimateField) && (
                         <div className="grid gap-3 md:grid-cols-2">
                             {showEnergyLevelField && (
                                 <div className="space-y-2">
@@ -836,12 +841,12 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                     )}
 
                     <button
-                        onClick={handleConfirmContexts}
-                        className="w-full py-3 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90"
+                        onClick={isReferenceOrganizationStep ? handleConfirmReference : handleConfirmContexts}
+                        className="w-full flex items-center justify-center gap-2 py-3 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90"
                     >
-                        {selectedContexts.length > 0
-                            ? `${t('process.next')} → (${selectedContexts.length})`
-                            : `${t('process.next')} → (${t('process.noContext')})`}
+                        {selectedOrganizationCount > 0
+                            ? `${t('process.next')} (${selectedOrganizationCount})`
+                            : `${t('process.next')} (${t('process.noContext')})`} <ArrowRight className="w-3.5 h-3.5" />
                     </button>
                 </div>
             )}
@@ -858,7 +863,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                             onClick={() => handleSetProject(currentProject.id)}
                             className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border border-primary bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20"
                         >
-                            ✓ {currentProject.title}
+                            <Check className="w-4 h-4" /> {currentProject.title}
                         </button>
                     )}
 
@@ -869,6 +874,7 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                                 if (!convertToProject) {
                                     setProjectTitleDraft(processingTitle);
                                     setNextActionDraft('');
+                                    setExtraActionDrafts([]);
                                 }
                                 setConvertToProject(!convertToProject);
                             }}
@@ -888,19 +894,17 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                             {showAreaField ? (
                                 <div className="space-y-1">
                                     <label className="text-xs text-muted-foreground font-medium">{t('taskEdit.areaLabel')}</label>
-                                    <select
-                                        aria-label={t('taskEdit.areaLabel')}
+                                    <AreaSelector
+                                        areas={areas}
                                         value={selectedAreaId ?? ''}
-                                        onChange={(event) => setSelectedAreaId(event.target.value || null)}
-                                        className="w-full bg-card border border-border rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary focus:border-transparent"
-                                    >
-                                        <option value="">{t('projects.noArea')}</option>
-                                        {areas.map((area) => (
-                                            <option key={area.id} value={area.id}>
-                                                {area.name}
-                                            </option>
-                                        ))}
-                                    </select>
+                                        onChange={(value) => setSelectedAreaId(value || null)}
+                                        placeholder={t('projects.noArea')}
+                                        noAreaLabel={t('projects.noArea')}
+                                        searchPlaceholder={t('areas.search')}
+                                        noMatchesLabel={t('common.noMatches')}
+                                        controlClassName="bg-card rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                                        menuClassName="text-sm"
+                                    />
                                 </div>
                             ) : null}
                             <div className="space-y-1">
@@ -916,9 +920,47 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                                 <input
                                     value={nextActionDraft}
                                     onChange={(e) => setNextActionDraft(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key !== 'Enter' || !nextActionDraft.trim()) return;
+                                        e.preventDefault();
+                                        setExtraActionDrafts([...extraActionDrafts, '']);
+                                    }}
                                     placeholder={t('taskEdit.titleLabel')}
                                     className="w-full bg-card border border-border rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary"
                                 />
+                                {extraActionDrafts.map((draft, index) => (
+                                    <div key={index} className="flex gap-2">
+                                        <input
+                                            autoFocus
+                                            value={draft}
+                                            onChange={(e) => setExtraActionDrafts(
+                                                extraActionDrafts.map((value, i) => (i === index ? e.target.value : value)),
+                                            )}
+                                            onKeyDown={(e) => {
+                                                if (e.key !== 'Enter' || index !== extraActionDrafts.length - 1 || !draft.trim()) return;
+                                                e.preventDefault();
+                                                setExtraActionDrafts([...extraActionDrafts, '']);
+                                            }}
+                                            placeholder={t('taskEdit.titleLabel')}
+                                            className="w-full bg-card border border-border rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary"
+                                        />
+                                        <button
+                                            type="button"
+                                            aria-label={t('process.removeAction')}
+                                            onClick={() => setExtraActionDrafts(extraActionDrafts.filter((_, i) => i !== index))}
+                                            className="px-2 rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
+                                        >
+                                            <X className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                ))}
+                                <button
+                                    type="button"
+                                    onClick={() => setExtraActionDrafts([...extraActionDrafts, ''])}
+                                    className="text-xs font-medium text-primary hover:underline"
+                                >
+                                    + {t('process.addAnotherAction')}
+                                </button>
                             </div>
                             <button
                                 type="button"
@@ -933,19 +975,17 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                             {showAreaField ? (
                                 <div className="space-y-1">
                                     <label className="text-xs text-muted-foreground font-medium">{t('taskEdit.areaLabel')}</label>
-                                    <select
-                                        aria-label={t('taskEdit.areaLabel')}
+                                    <AreaSelector
+                                        areas={areas}
                                         value={selectedAreaId ?? ''}
-                                        onChange={(event) => setSelectedAreaId(event.target.value || null)}
-                                        className="w-full bg-card border border-border rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary focus:border-transparent"
-                                    >
-                                        <option value="">{t('projects.noArea')}</option>
-                                        {areas.map((area) => (
-                                            <option key={area.id} value={area.id}>
-                                                {area.name}
-                                            </option>
-                                        ))}
-                                    </select>
+                                        onChange={(value) => setSelectedAreaId(value || null)}
+                                        placeholder={t('projects.noArea')}
+                                        noAreaLabel={t('projects.noArea')}
+                                        searchPlaceholder={t('areas.search')}
+                                        noMatchesLabel={t('common.noMatches')}
+                                        controlClassName="bg-card rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                                        menuClassName="text-sm"
+                                    />
                                 </div>
                             ) : null}
                             {showProjectField ? (
@@ -1000,9 +1040,9 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
 
                                     <button
                                         onClick={() => handleSetProject(null)}
-                                        className="w-full py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700"
+                                        className="w-full py-3 bg-muted rounded-lg font-medium hover:bg-muted/80"
                                     >
-                                        ✓ {t('process.noProject')}
+                                        {t('process.noProject')}
                                     </button>
 
                                     {filteredProjects.length > 0 && (
@@ -1031,9 +1071,9 @@ export const InboxProcessingWizard = memo(function InboxProcessingWizard({
                             ) : (
                                 <button
                                     onClick={() => handleSetProject(null)}
-                                    className="w-full py-3 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90"
+                                    className="w-full flex items-center justify-center gap-2 py-3 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90"
                                 >
-                                    {t('process.next')}
+                                    {t('process.next')} <ArrowRight className="w-3.5 h-3.5" />
                                 </button>
                             )}
                         </>

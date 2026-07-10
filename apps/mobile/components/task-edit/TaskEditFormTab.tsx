@@ -343,10 +343,11 @@ function TaskEditFormTabComponent({
                                 </TouchableOpacity>
                             </View>
                             <TextInput
-                            style={[styles.input, inputStyle, textDirectionStyle]}
+                            style={[styles.input, inputStyle, textDirectionStyle, styles.titleInput]}
                             value={titleDraft}
-                            onChangeText={(text) => onTitleDraftChange(text)}
+                            onChangeText={(text) => onTitleDraftChange(text.replace(/[\r\n]+/g, ' '))}
                             placeholderTextColor={tc.secondaryText}
+                            multiline
                             onFocus={() => {
                                 onInputFocusTracked?.(undefined);
                                 setTitleFocused(true);
@@ -390,12 +391,15 @@ function TaskEditFormTabComponent({
                             style={[styles.copilotPill, { borderColor: tc.border, backgroundColor: tc.filterBg }]}
                             onPress={applyCopilotSuggestion}
                         >
-                            <Text style={[styles.copilotText, { color: tc.text }]}>
-                                ✨ {t('copilot.suggested')}{' '}
-                                {copilotSuggestion.context ? `${copilotSuggestion.context} ` : ''}
-                                {timeEstimatesEnabled && copilotSuggestion.timeEstimate ? `${copilotSuggestion.timeEstimate}` : ''}
-                                {copilotSuggestion.tags?.length ? copilotSuggestion.tags.join(' ') : ''}
-                            </Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'flex-start', columnGap: 4 }}>
+                                <Text style={[styles.copilotText, { color: tc.text }]}>✨</Text>
+                                <Text style={[styles.copilotText, { color: tc.text, flexShrink: 1 }]}>
+                                    {t('copilot.suggested')}{' '}
+                                    {copilotSuggestion.context ? `${copilotSuggestion.context} ` : ''}
+                                    {timeEstimatesEnabled && copilotSuggestion.timeEstimate ? `${copilotSuggestion.timeEstimate}` : ''}
+                                    {copilotSuggestion.tags?.length ? copilotSuggestion.tags.join(' ') : ''}
+                                </Text>
+                            </View>
                             <Text style={[styles.copilotHint, { color: tc.secondaryText }]}>
                                 {t('copilot.applyHint')}
                             </Text>
@@ -403,74 +407,59 @@ function TaskEditFormTabComponent({
                     )}
                     {aiEnabled && copilotApplied && (
                         <View style={[styles.copilotPill, { borderColor: tc.border, backgroundColor: tc.filterBg }]}>
-                            <Text style={[styles.copilotText, { color: tc.text }]}>
-                                ✅ {t('copilot.applied')}{' '}
-                                {copilotContext ? `${copilotContext} ` : ''}
-                                {timeEstimatesEnabled && copilotEstimate ? `${copilotEstimate}` : ''}
-                                {copilotTags.length ? copilotTags.join(' ') : ''}
-                            </Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'flex-start', columnGap: 4 }}>
+                                <Text style={[styles.copilotText, { color: tc.text }]}>✅</Text>
+                                <Text style={[styles.copilotText, { color: tc.text, flexShrink: 1 }]}>
+                                    {t('copilot.applied')}{' '}
+                                    {copilotContext ? `${copilotContext} ` : ''}
+                                    {timeEstimatesEnabled && copilotEstimate ? `${copilotEstimate}` : ''}
+                                    {copilotTags.length ? copilotTags.join(' ') : ''}
+                                </Text>
+                            </View>
                         </View>
                     )}
                     {basicFields.map((fieldId) => (
                         <React.Fragment key={fieldId}>{renderField(fieldId)}</React.Fragment>
                     ))}
 
-                    <CollapsibleSection
-                        resetKey={`${formResetKey ?? 'task'}:scheduling`}
-                        title={t('taskEdit.scheduling')}
-                        badge={schedulingFilledCount}
-                        defaultExpanded={sectionOpenDefaults.scheduling || schedulingFilledCount > 0}
-                    >
-                        {schedulingFields.length === 0 ? (
-                            <View style={[styles.emptySectionHint, { borderColor: tc.border, backgroundColor: tc.filterBg }]}>
-                                <Text style={[styles.emptySectionHintText, { color: tc.secondaryText }]}>
-                                    {t('taskEdit.schedulingEmpty')}
-                                </Text>
-                            </View>
-                        ) : (
-                            schedulingFields.map((fieldId) => (
+                    {schedulingFields.length > 0 && (
+                        <CollapsibleSection
+                            resetKey={`${formResetKey ?? 'task'}:scheduling`}
+                            title={t('taskEdit.scheduling')}
+                            badge={schedulingFilledCount}
+                            defaultExpanded={sectionOpenDefaults.scheduling || schedulingFilledCount > 0}
+                        >
+                            {schedulingFields.map((fieldId) => (
                                 <React.Fragment key={fieldId}>{renderField(fieldId)}</React.Fragment>
-                            ))
-                        )}
-                    </CollapsibleSection>
+                            ))}
+                        </CollapsibleSection>
+                    )}
 
-                    <CollapsibleSection
-                        resetKey={`${formResetKey ?? 'task'}:organization`}
-                        title={t('taskEdit.organization')}
-                        badge={organizationFilledCount}
-                        defaultExpanded={sectionOpenDefaults.organization || organizationFilledCount > 0}
-                    >
-                        {organizationFields.length === 0 ? (
-                            <View style={[styles.emptySectionHint, { borderColor: tc.border, backgroundColor: tc.filterBg }]}>
-                                <Text style={[styles.emptySectionHintText, { color: tc.secondaryText }]}>
-                                    {t('taskEdit.organizationEmpty')}
-                                </Text>
-                            </View>
-                        ) : (
-                            organizationFields.map((fieldId) => (
+                    {organizationFields.length > 0 && (
+                        <CollapsibleSection
+                            resetKey={`${formResetKey ?? 'task'}:organization`}
+                            title={t('taskEdit.organization')}
+                            badge={organizationFilledCount}
+                            defaultExpanded={sectionOpenDefaults.organization || organizationFilledCount > 0}
+                        >
+                            {organizationFields.map((fieldId) => (
                                 <React.Fragment key={fieldId}>{renderField(fieldId)}</React.Fragment>
-                            ))
-                        )}
-                    </CollapsibleSection>
+                            ))}
+                        </CollapsibleSection>
+                    )}
 
-                    <CollapsibleSection
-                        resetKey={`${formResetKey ?? 'task'}:details`}
-                        title={t('taskEdit.details')}
-                        badge={detailsFilledCount}
-                        defaultExpanded={sectionOpenDefaults.details || detailsFilledCount > 0}
-                    >
-                        {detailsFields.length === 0 ? (
-                            <View style={[styles.emptySectionHint, { borderColor: tc.border, backgroundColor: tc.filterBg }]}>
-                                <Text style={[styles.emptySectionHintText, { color: tc.secondaryText }]}>
-                                    {t('taskEdit.detailsEmpty')}
-                                </Text>
-                            </View>
-                        ) : (
-                            detailsFields.map((fieldId) => (
+                    {detailsFields.length > 0 && (
+                        <CollapsibleSection
+                            resetKey={`${formResetKey ?? 'task'}:details`}
+                            title={t('taskEdit.details')}
+                            badge={detailsFilledCount}
+                            defaultExpanded={sectionOpenDefaults.details || detailsFilledCount > 0}
+                        >
+                            {detailsFields.map((fieldId) => (
                                 <React.Fragment key={fieldId}>{renderField(fieldId)}</React.Fragment>
-                            ))
-                        )}
-                    </CollapsibleSection>
+                            ))}
+                        </CollapsibleSection>
+                    )}
 
                     <View style={{ height: 100 }} />
 

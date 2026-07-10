@@ -117,6 +117,10 @@ export const AppRegistry = {
   registerHeadlessTask: () => undefined,
 };
 
+export const NativeModules = {
+  EXDevLauncher: null,
+};
+
 export const Dimensions = {
   get: () => ({ width: 390, height: 844 }),
 };
@@ -124,6 +128,7 @@ export const Dimensions = {
 export const Keyboard = {
   addListener: () => ({ remove: () => {} }),
   dismiss: () => {},
+  isVisible: () => false,
 };
 
 export const PanResponder = {

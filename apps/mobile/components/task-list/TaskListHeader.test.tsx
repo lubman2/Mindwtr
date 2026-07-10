@@ -18,6 +18,7 @@ vi.mock('react-native', () => ({
 
 vi.mock('lucide-react-native', () => ({
   ArrowUpDown: () => React.createElement('span', { 'data-icon': 'arrow-up-down' }),
+  Folder: () => React.createElement('span', { 'data-icon': 'folder' }),
   SlidersHorizontal: () => React.createElement('span', { 'data-icon': 'sliders-horizontal' }),
   X: () => React.createElement('span', { 'data-icon': 'x' }),
 }));
@@ -43,11 +44,12 @@ const renderHeader = (overrides: Partial<React.ComponentProps<typeof TaskListHea
     onOpenSort={vi.fn()}
     showHeader={false}
     showSort
-    sortByLabel="Created (newest)"
+    sortByLabel="Newest"
     t={(key) => ({
       'common.clear': 'Clear',
       'common.tasks': 'tasks',
       'filters.label': 'Filters',
+      'list.groupBy': 'Group',
       'sort.label': 'Sort',
     }[key] ?? key)}
     themeColors={themeColors}
@@ -60,7 +62,7 @@ describe('TaskListHeader', () => {
   it('keeps the sort control visible for compact headerless task lists', () => {
     const html = renderHeader();
 
-    expect(html).toContain('aria-label="Sort: Created (newest)"');
+    expect(html).toContain('aria-label="Sort: Newest"');
     expect(html).toContain('data-icon="arrow-up-down"');
     expect(html).toContain('aria-label="Filters"');
     expect(html).toContain('data-icon="sliders-horizontal"');
@@ -104,5 +106,17 @@ describe('TaskListHeader', () => {
     expect(html).toContain('data-icon="arrow-up-down"');
     expect(html).toContain('data-icon="sliders-horizontal"');
     expect(html.indexOf('data-icon="sliders-horizontal"')).toBeLessThan(html.indexOf('Process Inbox'));
+  });
+
+  it('renders a group control alongside sort and filter controls', () => {
+    const html = renderHeader({
+      groupByLabel: 'Tags',
+      onOpenGroup: vi.fn(),
+    });
+
+    expect(html).toContain('aria-label="Group: Tags"');
+    expect(html).toContain('data-icon="folder"');
+    expect(html.indexOf('data-icon="arrow-up-down"')).toBeLessThan(html.indexOf('data-icon="folder"'));
+    expect(html.indexOf('data-icon="folder"')).toBeLessThan(html.indexOf('data-icon="sliders-horizontal"'));
   });
 });

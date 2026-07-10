@@ -198,7 +198,8 @@ export function matchesTask(term: SearchTerm, task: Task, projectById: Map<strin
         result = matchesText(task.title, value)
             || matchesText(task.description, value)
             || matchesChecklist(task.checklist, value)
-            || matchesText(task.location, value);
+            || matchesText(task.location, value)
+            || matchesText(task.assignedTo, value);
     } else if (field === 'checklist') {
         result = value.trim().length > 0 && matchesChecklist(task.checklist, value);
     } else if (field === 'id') {

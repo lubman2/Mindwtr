@@ -11,12 +11,17 @@ const GITHUB_RELEASES_URL =
   "https://github.com/dongdongbh/Mindwtr/releases/latest";
 const MS_STORE_PRODUCT_ID = "9N0V5B0B6FRX";
 const MS_STORE_URL = `ms-windows-store://pdp/?ProductId=${MS_STORE_PRODUCT_ID}`;
+const MS_STORE_UPDATES_URL = "ms-windows-store://downloadsandupdates";
 const WINGET_MANIFESTS_API =
   "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/d/dongdongbh/Mindwtr";
 const WINGET_PACKAGE_URL =
   "https://github.com/microsoft/winget-pkgs/tree/master/manifests/d/dongdongbh/Mindwtr";
 const HOMEBREW_CASK_API = "https://formulae.brew.sh/api/cask/mindwtr.json";
 const HOMEBREW_CASK_URL = "https://formulae.brew.sh/cask/mindwtr";
+const CHOCOLATEY_PACKAGE_API =
+  "https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20%27mindwtr%27%20and%20IsLatestVersion";
+const CHOCOLATEY_PACKAGE_URL =
+  "https://community.chocolatey.org/packages/mindwtr";
 const AUR_SOURCE_RPC_API =
   "https://aur.archlinux.org/rpc/?v=5&type=info&arg%5B%5D=mindwtr";
 const AUR_SOURCE_PACKAGE_URL = "https://aur.archlinux.org/packages/mindwtr";
@@ -37,6 +42,8 @@ export type InstallSource =
   | "github-release"
   | "microsoft-store"
   | "winget"
+  | "scoop"
+  | "chocolatey"
   | "homebrew"
   | "mac-app-store"
   | "aur"
@@ -53,9 +60,11 @@ const FLATPAK_INSTALL_SOURCE_PREFIX = "flatpak:";
 export type UpdateSource =
   | "github-release"
   | "winget"
+  | "chocolatey"
   | "homebrew"
   | "aur"
-  | "app-store";
+  | "app-store"
+  | "microsoft-store";
 
 export interface UpdateInfo {
   hasUpdate: boolean;
@@ -80,15 +89,25 @@ type SourceVersionResult = {
   releaseUrl: string;
 };
 
+export type MicrosoftStoreUpdateInfo = {
+  hasUpdate: boolean;
+  latestVersion: string | null;
+};
+
+type MicrosoftStoreUpdateProvider = () => Promise<MicrosoftStoreUpdateInfo>;
+
 type CheckForUpdatesOptions = {
   installSource?: InstallSource;
+  microsoftStoreUpdateProvider?: MicrosoftStoreUpdateProvider;
 };
 
 const isManagedInstallSource = (installSource: InstallSource): boolean => {
   return (
+    installSource === "microsoft-store" ||
     installSource === "mac-app-store" ||
     installSource === "homebrew" ||
     installSource === "winget" ||
+    installSource === "chocolatey" ||
     installSource === "aur-bin" ||
     installSource === "aur-source" ||
     installSource === "aur"
@@ -305,6 +324,11 @@ export function normalizeInstallSource(
       return "microsoft-store";
     case "winget":
       return "winget";
+    case "scoop":
+      return "scoop";
+    case "chocolatey":
+    case "choco":
+      return "chocolatey";
     case "homebrew":
       return "homebrew";
     case "mac-app-store":
@@ -374,6 +398,27 @@ const fetchHomebrewLatestVersion = async (): Promise<SourceVersionResult> => {
     source: "homebrew",
     version: normalizeComparableVersion(version),
     releaseUrl: HOMEBREW_CASK_URL,
+  };
+};
+
+const fetchChocolateyLatestVersion = async (): Promise<SourceVersionResult> => {
+  const response = await fetchForUpdates(CHOCOLATEY_PACKAGE_API, {
+    headers: {
+      Accept: "application/atom+xml",
+      "User-Agent": "Mindwtr-App",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Chocolatey API error: ${response.status}`);
+  }
+  const payload = await response.text();
+  const match = payload.match(/Packages\(Id='mindwtr',Version='([^']+)'\)/i);
+  const version = normalizeComparableVersion(match?.[1] ?? "");
+  if (!version) throw new Error("Chocolatey API returned no version.");
+  return {
+    source: "chocolatey",
+    version,
+    releaseUrl: CHOCOLATEY_PACKAGE_URL,
   };
 };
 
@@ -481,6 +526,35 @@ const fetchAppStoreLatestVersion = async (): Promise<SourceVersionResult> => {
   throw new Error("Unable to fetch App Store version.");
 };
 
+
+const normalizeMicrosoftStoreUpdateInfo = (
+  value: unknown,
+): MicrosoftStoreUpdateInfo => {
+  const payload = value as Partial<MicrosoftStoreUpdateInfo> | null | undefined;
+  return {
+    hasUpdate: Boolean(payload?.hasUpdate),
+    latestVersion:
+      typeof payload?.latestVersion === "string" && payload.latestVersion.trim()
+        ? normalizeComparableVersion(payload.latestVersion)
+        : null,
+  };
+};
+
+const fetchMicrosoftStoreUpdateInfo = async (
+  provider?: MicrosoftStoreUpdateProvider,
+): Promise<MicrosoftStoreUpdateInfo> => {
+  if (provider) {
+    return normalizeMicrosoftStoreUpdateInfo(await provider());
+  }
+  if (!isTauriRuntime()) {
+    throw new Error("Microsoft Store update checks require the desktop app.");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return normalizeMicrosoftStoreUpdateInfo(
+    await invoke<MicrosoftStoreUpdateInfo>("check_microsoft_store_update"),
+  );
+};
+
 const fetchSourceVersion = async (
   installSource: InstallSource,
 ): Promise<SourceVersionResult | null> => {
@@ -489,6 +563,10 @@ const fetchSourceVersion = async (
       return fetchHomebrewLatestVersion();
     case "winget":
       return fetchWingetLatestVersion();
+    // Scoop has no canonical feed (any bucket can carry the manifest), so a
+    // manual check reports the GitHub release and defers installs to `scoop update`.
+    case "chocolatey":
+      return fetchChocolateyLatestVersion();
     case "aur":
     case "aur-bin":
     case "aur-source":
@@ -516,6 +594,43 @@ export async function checkForUpdates(
   let githubRelease: GitHubRelease | null = null;
 
   try {
+    if (installSource === "microsoft-store") {
+      const storeInfo = await fetchMicrosoftStoreUpdateInfo(
+        options.microsoftStoreUpdateProvider,
+      );
+      try {
+        githubRelease = await fetchGithubLatestRelease();
+      } catch (error) {
+        reportError("Failed to fetch GitHub release notes for Microsoft Store update", error, {
+          toast: false,
+        });
+      }
+      const githubLatestVersion = githubRelease
+        ? normalizeComparableVersion(githubRelease.tag_name)
+        : "";
+      const latestVersion = storeInfo.hasUpdate
+        ? storeInfo.latestVersion ?? githubLatestVersion ?? cleanCurrentVersion
+        : cleanCurrentVersion;
+      const assets = (githubRelease?.assets || []).map((asset) => ({
+        name: asset.name,
+        url: asset.browser_download_url,
+      }));
+      return {
+        hasUpdate: storeInfo.hasUpdate,
+        currentVersion: cleanCurrentVersion,
+        latestVersion,
+        releaseUrl: MS_STORE_UPDATES_URL,
+        latestReleasedAt: githubRelease?.published_at || null,
+        releaseNotes: githubRelease?.body || "",
+        downloadUrl: null,
+        platform,
+        assets,
+        source: "microsoft-store",
+        installSource,
+        sourceFallback: false,
+      };
+    }
+
     if (
       installSource !== "unknown" &&
       installSource !== "direct" &&
@@ -642,10 +757,12 @@ export {
   APP_STORE_LISTING_URL,
   AUR_BIN_PACKAGE_URL,
   AUR_SOURCE_PACKAGE_URL,
+  CHOCOLATEY_PACKAGE_URL,
   FLATHUB_PACKAGE_URL,
   GITHUB_RELEASES_URL,
   HOMEBREW_CASK_URL,
   MS_STORE_URL,
+  MS_STORE_UPDATES_URL,
   SNAPCRAFT_PACKAGE_URL,
   WINGET_PACKAGE_URL,
 };

@@ -1,4 +1,4 @@
-import { act, createEvent, fireEvent, render, screen } from '@testing-library/react';
+import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Area, Project, Task } from '@mindwtr/core';
 
@@ -18,6 +18,8 @@ const storeMocks = vi.hoisted(() => {
             allContexts: Array.from(new Set(taskStoreState.tasks.flatMap((task) => task.contexts ?? []))).sort(),
             allTags: Array.from(new Set(taskStoreState.tasks.flatMap((task) => task.tags ?? []))).sort(),
             projectMap: new Map(taskStoreState.projects.map((project) => [project.id, project])),
+            sequentialProjectIds: new Set(taskStoreState.projects.filter((project) => project.isSequential).map((project) => project.id)),
+            sequentialWithinSectionProjectIds: new Set(taskStoreState.projects.filter((project) => project.isSequential && project.sequentialScope === 'section').map((project) => project.id)),
         }),
         projects: [] as Project[],
         setError: vi.fn(),
@@ -191,6 +193,7 @@ describe('CalendarView', () => {
                 id: 'month-start-task',
                 title: 'Month start task',
                 dueDate: '2026-04-01T12:00:00',
+                startTime: '2026-04-01T12:00:00',
             }),
             makeTask({
                 id: 'today-task',
@@ -495,6 +498,111 @@ describe('CalendarView', () => {
             timeEstimate: '1hr',
         }));
         expect(storeMocks.taskStoreState.addTask).not.toHaveBeenCalled();
+    });
+
+    it('plans unscheduled next actions from the calendar side panel', async () => {
+        storeMocks.taskStoreState.tasks = [
+            makeTask({
+                id: 'task-plan',
+                title: 'Draft planning memo',
+            }),
+            makeTask({
+                id: 'task-deadline',
+                title: 'Review deadline brief',
+                dueDate: '2026-04-10T17:00:00.000Z',
+            }),
+            makeTask({
+                id: 'task-scheduled',
+                title: 'Already scheduled',
+                startTime: '2026-04-04T09:00:00.000Z',
+            }),
+            makeTask({
+                id: 'task-focused',
+                title: 'Focused today',
+                isFocusedToday: true,
+            }),
+        ];
+
+        renderCalendar();
+        await flushCalendarEffects();
+
+        const panel = screen.getByText('Plan next actions').closest('aside') as HTMLElement;
+        expect(within(panel).getByText('Draft planning memo')).toBeInTheDocument();
+        expect(within(panel).getByText('Review deadline brief')).toBeInTheDocument();
+        expect(within(panel).queryByText('Already scheduled')).not.toBeInTheDocument();
+        expect(within(panel).queryByText('Focused today')).not.toBeInTheDocument();
+
+        await selectDay('4');
+        const planTitle = panel.querySelector('[data-task-id="task-plan"]') as HTMLElement;
+        const planCard = planTitle.parentElement as HTMLElement;
+        await act(async () => {
+            fireEvent.click(within(planCard).getByRole('button', { name: 'Schedule' }));
+            await Promise.resolve();
+        });
+        await act(async () => {
+            fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+            await Promise.resolve();
+        });
+
+        expect(storeMocks.taskStoreState.updateTask).toHaveBeenCalledWith('task-plan', expect.objectContaining({
+            startTime: new Date(2026, 3, 4, 8, 0).toISOString(),
+        }));
+    });
+
+
+    it('explains disabled planning schedule buttons until a day is selected', async () => {
+        storeMocks.taskStoreState.tasks = [
+            makeTask({
+                id: 'task-plan',
+                title: 'Draft planning memo',
+            }),
+        ];
+
+        renderCalendar();
+        await flushCalendarEffects();
+
+        const panel = screen.getByText('Plan next actions').closest('aside') as HTMLElement;
+        const planTitle = within(panel).getByText('Draft planning memo');
+        const planCard = planTitle.closest('.rounded-md') as HTMLElement;
+        const disabledHintTarget = within(planCard).getByTitle('Select a day to plan first.');
+        const scheduleButton = within(disabledHintTarget).getByRole('button', { name: 'Schedule' });
+
+        expect(scheduleButton).toBeDisabled();
+        expect(within(planCard).getByText('Select a day to plan first.')).toHaveClass('sr-only');
+
+        await selectDay('4');
+
+        expect(within(planCard).queryByTitle('Select a day to plan first.')).not.toBeInTheDocument();
+        expect(within(planCard).getByRole('button', { name: 'Schedule' })).toBeEnabled();
+    });
+
+    it('collapses and expands the calendar planning panel', async () => {
+        storeMocks.taskStoreState.tasks = [
+            makeTask({
+                id: 'task-plan',
+                title: 'Draft planning memo',
+            }),
+        ];
+
+        renderCalendar();
+        await flushCalendarEffects();
+
+        expect(screen.getByText('Draft planning memo')).toBeInTheDocument();
+        await act(async () => {
+            fireEvent.click(screen.getByRole('button', { name: 'Collapse planning panel' }));
+            await Promise.resolve();
+        });
+
+        expect(screen.queryByText('Draft planning memo')).not.toBeInTheDocument();
+        expect(window.localStorage.getItem('mindwtr.calendar.planningPanelCollapsed')).toBe('true');
+
+        await act(async () => {
+            fireEvent.click(screen.getByRole('button', { name: 'Expand planning panel' }));
+            await Promise.resolve();
+        });
+
+        expect(screen.getByText('Draft planning memo')).toBeInTheDocument();
+        expect(window.localStorage.getItem('mindwtr.calendar.planningPanelCollapsed')).toBe('false');
     });
 
     it('shows date-only start times as all-day scheduled tasks on the calendar', async () => {

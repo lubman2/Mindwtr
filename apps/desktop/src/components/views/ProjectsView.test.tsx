@@ -141,7 +141,6 @@ vi.mock('./projects/useProjectsViewStore', () => ({
         addSection: vi.fn(),
         updateSection: vi.fn(),
         deleteSection: vi.fn(),
-        addTask: vi.fn(),
         toggleProjectFocus: vi.fn(),
         allTasks: [],
         highlightTaskId: null,

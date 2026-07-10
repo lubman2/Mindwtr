@@ -18,6 +18,12 @@ type DataMetadataCacheEntry = {
     size: number;
 };
 
+export type DataFileMetadata = {
+    etag: string;
+    lastModified: string;
+    size: number;
+};
+
 type DataFileIdentity = {
     ctimeMs: number;
     ino: number;
@@ -191,13 +197,23 @@ const getDataMetadata = (filePath: string, stat: Stats): DataMetadataCacheEntry 
     return entry;
 };
 
-export const dataMetadataResponse = (filePath: string): Response => {
+export const getDataFileMetadata = (filePath: string): DataFileMetadata => {
     const stat = lstatSync(filePath);
     const metadata = getDataMetadata(filePath, stat);
+    return {
+        etag: metadata.etag,
+        lastModified: metadata.lastModified,
+        size: metadata.size,
+    };
+};
+
+export const dataMetadataResponse = (filePath: string): Response => {
+    const metadata = getDataFileMetadata(filePath);
     const headers = new Headers({
         'Access-Control-Allow-Origin': corsOrigin,
         'Access-Control-Allow-Headers': 'Authorization, Content-Type',
         'Access-Control-Allow-Methods': 'GET,HEAD,PUT,POST,PATCH,DELETE,OPTIONS',
+        'Access-Control-Expose-Headers': 'ETag, Last-Modified, Content-Length',
         'Content-Length': String(metadata.size),
         'ETag': metadata.etag,
         'Last-Modified': metadata.lastModified,
@@ -230,6 +246,7 @@ export const __serverDataCacheTestUtils = {
     },
     dataMetadataResponse,
     getDataCacheMaxEntries: () => DATA_CACHE_MAX_ENTRIES,
+    getDataFileMetadata,
     getDataMetadataCacheSize: () => dataMetadataCache.size,
     getParsedDataCacheSize: () => parsedDataCache.size,
     getValidatedDataCacheSize: () => validatedDataCache.size,

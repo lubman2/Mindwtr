@@ -61,10 +61,10 @@ const createMergeStats = (conflictIds: string[] = []): MergeStats => {
     };
 };
 
-const renderLayout = () => render(
+const renderLayout = (currentView = 'inbox', onViewChange = vi.fn()) => render(
     <LanguageProvider>
-        <KeybindingProvider currentView="inbox" onNavigate={onNavigate}>
-            <Layout currentView="inbox" onViewChange={vi.fn()}>
+        <KeybindingProvider currentView={currentView} onNavigate={onNavigate}>
+            <Layout currentView={currentView} onViewChange={onViewChange}>
                 <div>Main content</div>
             </Layout>
         </KeybindingProvider>
@@ -80,13 +80,14 @@ const resetStores = () => {
 };
 
 beforeEach(() => {
+    window.localStorage.clear();
     resetStores();
     act(() => {
         useTaskStore.setState((state) => ({
             ...state,
-            tasks: [],
-            projects: [],
-            areas: [],
+            _allTasks: [],
+            _allProjects: [],
+            _allAreas: [],
             settings: {
                 ...state.settings,
                 sidebarCollapsed: false,
@@ -119,6 +120,46 @@ afterEach(() => {
     vi.clearAllMocks();
 });
 
+describe('Layout sidebar archive section', () => {
+    it('keeps archive visible by default on a fresh sidebar', () => {
+        const { container, getByRole } = renderLayout();
+
+        expect(getByRole('button', { name: 'Archive' })).toHaveAttribute('aria-expanded', 'true');
+        expect(container.querySelector('#sidebar-section-archive')).not.toHaveClass('hidden');
+        expect(getByRole('button', { name: 'Done' })).toBeInTheDocument();
+    });
+
+    it('expands archive when the active view lives in archive', async () => {
+        const { container, getByRole } = renderLayout('trash');
+
+        await waitFor(() => {
+            expect(getByRole('button', { name: 'Archive' })).toHaveAttribute('aria-expanded', 'true');
+            expect(container.querySelector('#sidebar-section-archive')).not.toHaveClass('hidden');
+        });
+        expect(getByRole('button', { name: 'Trash' })).toHaveAttribute('aria-current', 'page');
+    });
+
+    it('respects a stored collapsed archive preference', () => {
+        window.localStorage.setItem('mindwtr:sidebar:collapsedSections', JSON.stringify(['archive']));
+
+        const { container, getByRole } = renderLayout();
+
+        expect(getByRole('button', { name: 'Archive' })).toHaveAttribute('aria-expanded', 'false');
+        expect(container.querySelector('#sidebar-section-archive')).toHaveClass('hidden');
+    });
+
+    it('uses the full archive header row as the collapse target', () => {
+        const { container, getByRole } = renderLayout();
+        const archiveHeader = getByRole('button', { name: 'Archive' });
+
+        expect(archiveHeader).toHaveAttribute('aria-controls', 'sidebar-section-archive');
+        fireEvent.click(archiveHeader);
+
+        expect(archiveHeader).toHaveAttribute('aria-expanded', 'false');
+        expect(container.querySelector('#sidebar-section-archive')).toHaveClass('hidden');
+    });
+});
+
 describe('Layout Obsidian nav visibility', () => {
     it('opens global inbox capture from the visible Add Task button', () => {
         const quickAddListener = vi.fn();
@@ -127,8 +168,8 @@ describe('Layout Obsidian nav visibility', () => {
         const addTaskButton = getByRole('button', { name: 'Add Task (Inbox)' });
 
         expect(addTaskButton).toHaveAttribute('title', 'Add Task (Inbox)');
-        expect(addTaskButton).toHaveClass('border');
-        expect(addTaskButton).not.toHaveClass('bg-primary');
+        expect(addTaskButton).toHaveClass('bg-primary/5');
+        expect(addTaskButton).toHaveClass('text-primary');
 
         fireEvent.click(addTaskButton);
 
@@ -181,6 +222,28 @@ describe('Layout sync conflict surface', () => {
         const { getByText } = renderLayout();
 
         expect(getByText('Synced')).toBeInTheDocument();
+    });
+
+    it('runs manual sync from the sidebar sync button', async () => {
+        const showToast = vi.fn();
+        const performSyncSpy = vi.spyOn(SyncService, 'performSync').mockResolvedValue({
+            success: true,
+        } as Awaited<ReturnType<typeof SyncService.performSync>>);
+        act(() => {
+            useUiStore.setState((state) => ({
+                ...state,
+                showToast,
+            }));
+        });
+
+        const { getByRole } = renderLayout();
+
+        fireEvent.click(getByRole('button', { name: /Sync now/i }));
+
+        await waitFor(() => expect(performSyncSpy).toHaveBeenCalledTimes(1));
+        expect(showToast).toHaveBeenCalledWith('Sync completed', 'success');
+
+        performSyncSpy.mockRestore();
     });
 
     it('shows a toast when a new sync conflict status is present', () => {
@@ -266,7 +329,7 @@ describe('Layout collapsed sidebar area filter', () => {
         act(() => {
             useTaskStore.setState((state) => ({
                 ...state,
-                areas: [
+                _allAreas: [
                     { id: 'area-work', name: 'Work', color: '#3b82f6', order: 0, createdAt: '', updatedAt: '' },
                 ],
                 settings: {

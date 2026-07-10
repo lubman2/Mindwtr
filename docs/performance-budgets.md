@@ -29,7 +29,7 @@ Budgets are intentionally explicit and conservative. They should only change in 
 | Search/filter/sort derivation | 30ms | 130ms | 650ms | 50k <= 12x 10k |
 | One-task normalized update | 20ms | 80ms | 350ms | 50k <= 10x 10k |
 
-The absolute budgets catch obvious regressions. The growth guard catches bad scaling, especially O(n^2) patterns that may still pass on small datasets.
+The absolute budgets catch obvious regressions. The growth guard catches bad scaling, especially O(n^2) patterns that may still pass on small datasets. Growth comparisons use a 5ms denominator floor so very fast 10k measurements do not fail only because of runner timing noise.
 
 ## When To Add A Budget
 

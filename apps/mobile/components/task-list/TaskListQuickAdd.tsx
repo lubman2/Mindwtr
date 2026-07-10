@@ -1,9 +1,11 @@
 import React from 'react';
 import { ActivityIndicator, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { translateWithFallback } from '@mindwtr/core';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
 import { CheckCircle2, Pencil, Plus, Sparkles } from 'lucide-react-native';
 
 import { styles } from './task-list.styles';
+import { FocusStarIcon } from '../FocusStarIcon';
 
 type ThemeColors = {
   border: string;
@@ -31,12 +33,16 @@ type TaskListQuickAddProps = {
   enableCopilot: boolean;
   handleAddAndEditTask?: () => void | Promise<void>;
   handleAddTask: () => void | Promise<void>;
+  focusNewTask: boolean;
+  canFocusNewTask: boolean;
+  focusNewTaskDisabledReason?: string;
   inputRef?: React.RefObject<TextInput | null>;
   newTaskTitle: string;
   onApplyCopilot: () => void;
   onChangeText: (text: string) => void;
   onInputFocus?: (targetInput?: number | string) => void;
   onSelectionChange: (selection: { end: number; start: number }) => void;
+  onToggleFocusNewTask: () => void;
   projectId?: string;
   setTypeaheadIndex: (index: number) => void;
   showQuickAddHelp: boolean;
@@ -61,12 +67,16 @@ export function TaskListQuickAdd({
   enableCopilot,
   handleAddAndEditTask,
   handleAddTask,
+  focusNewTask,
+  canFocusNewTask,
+  focusNewTaskDisabledReason,
   inputRef,
   newTaskTitle,
   onApplyCopilot,
   onChangeText,
   onInputFocus,
   onSelectionChange,
+  onToggleFocusNewTask,
   projectId,
   setTypeaheadIndex,
   showQuickAddHelp,
@@ -79,6 +89,7 @@ export function TaskListQuickAdd({
   typeaheadOpen,
   typeaheadOptions,
 }: TaskListQuickAddProps) {
+  const filledButton = useFilledButtonColors();
   const resolveText = (key: string, fallback: string) => {
     return translateWithFallback(t, key, fallback);
   };
@@ -88,6 +99,10 @@ export function TaskListQuickAdd({
   const inputLabel = title ? `${addTaskLabel}: ${title}` : resolveText('quickAdd.inputLabel', 'Task title');
   const inputHint = resolveText('quickAdd.inputHint', 'Type a task title, then press add or the return key.');
   const addDisabled = !newTaskTitle.trim();
+  const focusDisabled = !focusNewTask && !canFocusNewTask;
+  const focusLabel = focusNewTask
+    ? resolveText('agenda.removeFromFocus', "Remove from today's focus")
+    : (focusDisabled ? (focusNewTaskDisabledReason || resolveText('agenda.addToFocus', "Add to today's focus")) : resolveText('agenda.addToFocus', "Add to today's focus"));
 
   return (
     <>
@@ -118,6 +133,27 @@ export function TaskListQuickAdd({
           accessibilityHint={inputHint}
         />
         {trailingAccessory}
+        <TouchableOpacity
+          onPress={onToggleFocusNewTask}
+          style={[
+            styles.addAndEditButton,
+            { backgroundColor: themeColors.inputBg, borderColor: focusNewTask ? themeColors.tint : themeColors.border },
+            focusDisabled && styles.addButtonDisabled,
+          ]}
+          disabled={focusDisabled}
+          accessibilityLabel={focusLabel}
+          accessibilityRole="button"
+          accessibilityState={{ selected: focusNewTask, disabled: focusDisabled }}
+          activeOpacity={0.85}
+          hitSlop={8}
+        >
+          <FocusStarIcon
+            focused={focusNewTask}
+            inactiveColor={themeColors.secondaryText}
+            disabled={focusDisabled}
+            size={20}
+          />
+        </TouchableOpacity>
         {handleAddAndEditTask ? (
           <TouchableOpacity
             onPress={() => { void handleAddAndEditTask(); }}
@@ -140,7 +176,7 @@ export function TaskListQuickAdd({
           onPress={() => { void handleAddTask(); }}
           style={[
             styles.addButton,
-            { backgroundColor: themeColors.tint },
+            { backgroundColor: filledButton.backgroundColor },
             addDisabled && styles.addButtonDisabled,
           ]}
           disabled={addDisabled}
@@ -150,7 +186,7 @@ export function TaskListQuickAdd({
           activeOpacity={0.85}
           hitSlop={8}
         >
-          <Plus size={22} color={themeColors.onTint} strokeWidth={2.6} />
+          <Plus size={22} color={filledButton.textColor ?? themeColors.onTint} strokeWidth={2.6} />
         </TouchableOpacity>
       </View>
       {typeaheadOpen && trigger && typeaheadOptions.length > 0 && (

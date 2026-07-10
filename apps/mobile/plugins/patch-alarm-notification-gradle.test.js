@@ -8,6 +8,7 @@ const {
   applyAlarmDuplicateToastPatchToSource,
   applyAlarmTimingPatchToSource,
   applyAlarmReminderBehaviorPatchToSource,
+  applyAlarmLockScreenPrivacyPatchToSource,
   applyAlarmAudioInterfacePatchToSource,
   applyAlarmDismissReceiverPatchToSource,
   applyAlarmReceiverPatchToSource,
@@ -78,6 +79,16 @@ describe('patch-alarm-notification-gradle', () => {
         this.stopAlarmSound();
 
         calendar.add(Calendar.MINUTE, alarm.getSnoozeInterval());
+
+        setAlarmFromCalendar(alarm, calendar);
+
+        long time = System.currentTimeMillis() / 1000;
+
+        alarm.setAlarmId((int) time);
+
+        getAlarmDB().update(alarm);
+
+        Log.e(TAG, "snooze data - " + alarm.toString());
     }
 }`;
 
@@ -91,6 +102,14 @@ describe('patch-alarm-notification-gradle', () => {
     expect(output).not.toContain('alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, calendar.getTimeInMillis(), alarmIntent);');
     expect(output).toContain('Calendar calendar = Calendar.getInstance();');
     expect(output).not.toContain('Calendar calendar = getCalendarFromAlarm(alarm);');
+    expect(output).toContain('int firedNotificationId = alarm.getAlarmId();');
+    expect(output).toContain('getNotificationManager().cancel(firedNotificationId);');
+    expect(output.indexOf('int firedNotificationId = alarm.getAlarmId();')).toBeLessThan(output.indexOf('alarm.setAlarmId((int) time);'));
+    // Snooze schedules an independent alarm row so the JS reschedule cycle cannot reap it.
+    expect(output).toContain('int snoozedAlarmRowId = getAlarmDB().insert(alarm);');
+    expect(output).toContain('alarm.setId(snoozedAlarmRowId);');
+    expect(output).not.toContain('getAlarmDB().update(alarm);');
+    expect(output.indexOf('getNotificationManager().cancel(firedNotificationId);')).toBeGreaterThan(output.indexOf('int snoozedAlarmRowId = getAlarmDB().insert(alarm);'));
   });
 
   it('patches AlarmUtil reminder behavior away from alarm semantics', () => {
@@ -130,6 +149,19 @@ describe('patch-alarm-notification-gradle', () => {
     expect(output).toContain('.setSound(playSound ? android.provider.Settings.System.DEFAULT_NOTIFICATION_URI : null)');
     expect(output).toContain('mChannel.enableVibration(alarm.isVibrate());');
     expect(output).toContain('mChannel.setSound(playSound ? android.provider.Settings.System.DEFAULT_NOTIFICATION_URI : null, null);');
+  });
+
+  it('marks reminder notifications private so the lock screen can redact them', () => {
+    const input = `            NotificationCompat.Builder mBuilder = new NotificationCompat.Builder(mContext, channelID)
+                    .setSmallIcon(smallIconResId)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setCategory(NotificationCompat.CATEGORY_REMINDER);`;
+
+    const output = applyAlarmLockScreenPrivacyPatchToSource(input);
+
+    expect(output).toContain('.setVisibility(NotificationCompat.VISIBILITY_PRIVATE)');
+    expect(output).not.toContain('VISIBILITY_PUBLIC');
+    expect(applyAlarmLockScreenPrivacyPatchToSource(output)).toBe(output);
   });
 
   it('patches AudioInterface fallback sound away from the alarm tone', () => {

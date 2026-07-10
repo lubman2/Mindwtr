@@ -2,11 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
     APP_STORE_LISTING_URL,
+    CHOCOLATEY_PACKAGE_URL,
     checkForUpdates,
     compareVersions,
     getFlatpakInstallChannel,
     HOMEBREW_CASK_URL,
-    MS_STORE_URL,
+    MS_STORE_UPDATES_URL,
     normalizeInstallSource,
     verifyDownloadChecksum,
     WINGET_PACKAGE_URL,
@@ -25,7 +26,9 @@ import {
     getInstallSourceOrFallback,
     isTauriRuntime,
 } from '../../../lib/runtime';
+import { isAutoUpdateCheckAllowed } from '../../../lib/desktop-update-targets';
 import { reportError } from '../../../lib/report-error';
+import { resolveDesktopAnalyticsVersion } from '../../../lib/analytics-heartbeat';
 import { getLogPath } from '../../../lib/app-log';
 import { measureSettingsOpenStep } from '../../../lib/settings-open-diagnostics';
 import type { SettingsLabels } from './labels';
@@ -55,6 +58,10 @@ export function useSettingsAboutPage({
     const [appVersion, setAppVersion] = useState('0.1.0');
     const [logPath, setLogPath] = useState('');
     const [installSource, setInstallSource] = useState<InstallSource>('unknown');
+    // The background update check must not run before detection settles: the
+    // initial 'unknown' would pass the quiet-channel gate and phone GitHub even
+    // on installs (e.g. Scoop) that must stay offline unless asked.
+    const [installSourceResolved, setInstallSourceResolved] = useState(false);
     const [installChannel, setInstallChannel] = useState<string | null>(null);
     const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -87,6 +94,7 @@ export function useSettingsAboutPage({
         if (!isTauri) {
             setInstallSource('github-release');
             setInstallChannel(null);
+            setInstallSourceResolved(true);
             return;
         }
         let cancelled = false;
@@ -100,11 +108,13 @@ export function useSettingsAboutPage({
                 if (!cancelled) {
                     setInstallSource(source);
                     setInstallChannel(channel);
+                    setInstallSourceResolved(true);
                 }
             } catch (error) {
                 if (!cancelled) {
                     setInstallSource('unknown');
                     setInstallChannel(null);
+                    setInstallSourceResolved(true);
                 }
                 reportError('Failed to detect install source', error);
             }
@@ -125,7 +135,7 @@ export function useSettingsAboutPage({
             if (cancelled) return;
             measureSettingsOpenStep('app-version', async () => {
                 const { getVersion } = await import('@tauri-apps/api/app');
-                return await getVersion();
+                return resolveDesktopAnalyticsVersion(await getVersion());
             })
                 .then((version) => {
                     if (!cancelled) setAppVersion(version);
@@ -180,6 +190,11 @@ export function useSettingsAboutPage({
 
     useEffect(() => {
         if (!isTauri || !appVersion || appVersion === 'web') return;
+        // Quiet channels (e.g. Scoop) never phone home on their own; updates
+        // are only checked when the user clicks the button. Wait for install
+        // source detection so a quiet channel is never checked as 'unknown'.
+        if (!installSourceResolved) return;
+        if (!isAutoUpdateCheckAllowed(installSource)) return;
         let lastCheck = 0;
         try {
             lastCheck = Number(
@@ -214,7 +229,7 @@ export function useSettingsAboutPage({
         return () => {
             cancelled = true;
         };
-    }, [appVersion, installSource, isTauri, persistUpdateBadge]);
+    }, [appVersion, installSource, installSourceResolved, isTauri, persistUpdateBadge]);
 
     const openLink = useCallback(async (url: string): Promise<boolean> => {
         const nextUrl = url.trim();
@@ -324,7 +339,7 @@ export function useSettingsAboutPage({
     const handleDownloadUpdate = useCallback(async () => {
         const targetUrl = preferredDownloadUrl;
         if (installSource === 'microsoft-store') {
-            await openLink(MS_STORE_URL);
+            await openLink(MS_STORE_UPDATES_URL);
             setDownloadNotice(t.storeUpdateHint);
             return;
         }
@@ -345,6 +360,15 @@ export function useSettingsAboutPage({
             setDownloadNotice(
                 'Update via winget: winget upgrade --id dongdongbh.Mindwtr --exact',
             );
+            return;
+        }
+        if (installSource === 'scoop') {
+            setDownloadNotice('Update via Scoop: scoop update mindwtr');
+            return;
+        }
+        if (installSource === 'chocolatey') {
+            await openLink(CHOCOLATEY_PACKAGE_URL);
+            setDownloadNotice('Update via Chocolatey: choco upgrade mindwtr');
             return;
         }
         if (updateInfo?.platform === 'macos') {
@@ -417,6 +441,8 @@ export function useSettingsAboutPage({
 
     const installChannelDisplay = useMemo(() => {
         if (installSource === 'portable') return 'Portable';
+        if (installSource === 'scoop') return 'Scoop';
+        if (installSource === 'chocolatey') return 'Chocolatey';
         if (installSource !== 'flatpak') return null;
         if (!installChannel) return 'Flatpak';
         return `Flatpak (${installChannel})`;

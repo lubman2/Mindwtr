@@ -94,6 +94,6 @@ test('filters trashed tasks by search query', async ({ page }) => {
     const searchInput = page.getByPlaceholder(/search/i).first();
     await searchInput.fill('Alpha');
 
-    await expect(page.locator('h3', { hasText: 'Trash Keep Alpha' })).toBeVisible();
-    await expect(page.locator('h3', { hasText: 'Trash Keep Beta' })).toHaveCount(0);
+    await expect(page.locator('h4', { hasText: 'Trash Keep Alpha' })).toBeVisible();
+    await expect(page.locator('h4', { hasText: 'Trash Keep Beta' })).toHaveCount(0);
 });

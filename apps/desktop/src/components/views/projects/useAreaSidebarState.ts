@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { useSensor, useSensors, PointerSensor, type DragEndEvent } from '@dnd-kit/core';
 import { arrayMove } from '@dnd-kit/sortable';
 import type { Area, AppData } from '@mindwtr/core';
-import { AREA_FILTER_ALL, AREA_FILTER_NONE, resolveAreaFilter } from '../../../lib/area-filter';
+import { AREA_FILTER_ALL, AREA_FILTER_NONE, resolveAreaFilter } from '@mindwtr/core';
 import { reportError } from '../../../lib/report-error';
 import type { ConfirmationRequestOptions } from '../../../hooks/useConfirmDialog';
 import {
@@ -77,9 +77,12 @@ export function useAreaSidebarState({
     };
 
     const handleDeleteArea = async (areaId: string) => {
+        const areaDeleteConfirm = t('areas.deleteConfirm');
         const confirmed = await requestConfirmation({
             title: t('projects.areaLabel'),
-            description: t('projects.deleteConfirm'),
+            description: areaDeleteConfirm === 'areas.deleteConfirm'
+                ? 'Delete this area? Projects and tasks in this area will be kept and moved to unassigned.'
+                : areaDeleteConfirm,
             confirmLabel: t('common.delete') || 'Delete',
             cancelLabel: t('common.cancel') || 'Cancel',
         });

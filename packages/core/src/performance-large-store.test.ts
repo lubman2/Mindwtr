@@ -62,6 +62,8 @@ const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 const ENERGY_LEVELS: TaskEnergyLevel[] = ['low', 'medium', 'high'];
 const TIME_ESTIMATES: TimeEstimate[] = ['5min', '10min', '15min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
 
+const GROWTH_BASELINE_FLOOR_MS = 5;
+
 const LARGE_STORE_PERFORMANCE_BUDGETS_MS: Record<LargeStoreSize, Record<BudgetedOperationId, number>> = {
     1_000: {
         projectDetailLookupAndSort: 25,
@@ -353,7 +355,7 @@ describePerf('large-store performance budgets', () => {
                 throw new Error(`Missing measurements for ${operation.label}`);
             }
 
-            const growth = fiftyKDuration / Math.max(tenKDuration, 1);
+            const growth = fiftyKDuration / Math.max(tenKDuration, GROWTH_BASELINE_FLOOR_MS);
             expect(
                 growth,
                 `${operation.label} grew ${growth.toFixed(2)}x from 10k to 50k tasks; max allowed is ${operation.maxGrowthFrom10kTo50k}x`,

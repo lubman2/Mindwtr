@@ -1,6 +1,7 @@
 import {
     applyMarkdownPairInsertion,
     applyMarkdownUrlPaste,
+    type MarkdownAssistOptions,
     type MarkdownSelection,
     type MarkdownToolbarResult,
 } from '@mindwtr/core';
@@ -25,7 +26,7 @@ const replaceSelectionWithText = (value: string, selection: MarkdownSelection, t
     `${value.slice(0, selection.start)}${text}${value.slice(selection.end)}`
 );
 
-export const createIgnoredNativePairChange = (
+const createIgnoredNativePairChange = (
     previousValue: string,
     key: string,
     baseSelection: MarkdownSelection,
@@ -47,6 +48,42 @@ export const createIgnoredNativePairChange = (
         appliedValue: result.value,
         selection: result.selection,
     };
+};
+
+const getInsertedTextFromChange = (previousValue: string, nextValue: string): string | null => {
+    let start = 0;
+    while (
+        start < previousValue.length
+        && start < nextValue.length
+        && previousValue[start] === nextValue[start]
+    ) {
+        start += 1;
+    }
+
+    let previousEnd = previousValue.length;
+    let nextEnd = nextValue.length;
+    while (
+        previousEnd > start
+        && nextEnd > start
+        && previousValue[previousEnd - 1] === nextValue[nextEnd - 1]
+    ) {
+        previousEnd -= 1;
+        nextEnd -= 1;
+    }
+
+    const insertedText = nextValue.slice(start, nextEnd);
+    return insertedText.length > 0 ? insertedText : null;
+};
+
+export const createIgnoredNativePairChangeFromTextChange = (
+    previousValue: string,
+    nextValue: string,
+    baseSelection: MarkdownSelection,
+    result: MarkdownToolbarResult,
+): IgnoredNativePairChange | null => {
+    const insertedText = getInsertedTextFromChange(previousValue, nextValue);
+    if (!insertedText) return null;
+    return createIgnoredNativePairChange(previousValue, insertedText, baseSelection, result);
 };
 
 export const shouldIgnoreNativePairChange = (
@@ -105,8 +142,15 @@ export const applyMarkdownUrlPasteWithSelectionFallback = (
     nextValue: string,
     primarySelection: MarkdownSelection,
     fallbackSelection?: MarkdownSelection | null,
+    options?: MarkdownAssistOptions,
 ): MarkdownSelectionReplacement | null => (
-    applyWithSelectionCandidates(previousValue, nextValue, primarySelection, fallbackSelection, applyMarkdownUrlPaste)
+    applyWithSelectionCandidates(
+        previousValue,
+        nextValue,
+        primarySelection,
+        fallbackSelection,
+        (prev, next, selection) => applyMarkdownUrlPaste(prev, next, selection, options),
+    )
 );
 
 export const applyMarkdownPairInsertionWithSelectionFallback = (
@@ -114,32 +158,13 @@ export const applyMarkdownPairInsertionWithSelectionFallback = (
     nextValue: string,
     primarySelection: MarkdownSelection,
     fallbackSelection?: MarkdownSelection | null,
+    options?: MarkdownAssistOptions,
 ): MarkdownSelectionReplacement | null => (
-    applyWithSelectionCandidates(previousValue, nextValue, primarySelection, fallbackSelection, applyMarkdownPairInsertion)
+    applyWithSelectionCandidates(
+        previousValue,
+        nextValue,
+        primarySelection,
+        fallbackSelection,
+        (prev, next, selection) => applyMarkdownPairInsertion(prev, next, selection, options),
+    )
 );
-
-export const applyMarkdownPairKeyPressWithSelectionFallback = (
-    previousValue: string,
-    key: string,
-    primarySelection: MarkdownSelection,
-    fallbackSelection?: MarkdownSelection | null,
-): MarkdownSelectionReplacement | null => {
-    if (!key || key.length > 1) return null;
-
-    const selections = getSelectionCandidates(primarySelection, fallbackSelection);
-    const orderedSelections = [
-        ...selections.filter(isRangeSelection),
-        ...selections.filter((selection) => !isRangeSelection(selection)),
-    ];
-    for (const selection of orderedSelections) {
-        const nextValue = `${previousValue.slice(0, selection.start)}${key}${previousValue.slice(selection.end)}`;
-        const result = applyMarkdownPairInsertion(previousValue, nextValue, selection);
-        if (result) {
-            return {
-                result,
-                baseSelection: selection,
-            };
-        }
-    }
-    return null;
-};

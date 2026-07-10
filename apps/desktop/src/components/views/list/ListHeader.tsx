@@ -1,7 +1,10 @@
-import { ChevronDown, ChevronsUpDown, List, SlidersHorizontal } from 'lucide-react';
+import { ArrowUpDown, CheckSquare, ChevronDown, ChevronsUpDown, List, SlidersHorizontal } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import type { TaskSortBy } from '@mindwtr/core';
-import type { NextGroupBy } from './next-grouping';
+import type { TaskListGroupBy } from './next-grouping';
+import { GroupBySelect } from './GroupBySelect';
+
+const DEFAULT_GROUP_BY_OPTIONS: TaskListGroupBy[] = ['none', 'context', 'area', 'project', 'tag', 'energy', 'priority', 'person'];
 
 type ListHeaderProps = {
     title: string;
@@ -14,8 +17,9 @@ type ListHeaderProps = {
     sortBy: TaskSortBy;
     onChangeSortBy: (value: TaskSortBy) => void;
     showGroupBy?: boolean;
-    groupBy?: NextGroupBy;
-    onChangeGroupBy?: (value: NextGroupBy) => void;
+    groupBy?: TaskListGroupBy;
+    groupByOptions?: TaskListGroupBy[];
+    onChangeGroupBy?: (value: TaskListGroupBy) => void;
     selectionMode: boolean;
     onToggleSelection: () => void;
     showListDetails: boolean;
@@ -37,6 +41,7 @@ export function ListHeader({
     onChangeSortBy,
     showGroupBy = false,
     groupBy = 'none',
+    groupByOptions = DEFAULT_GROUP_BY_OPTIONS,
     onChangeGroupBy,
     selectionMode,
     onToggleSelection,
@@ -50,6 +55,10 @@ export function ListHeader({
         const value = t('list.density');
         return value === 'list.density' ? 'Density' : value;
     })();
+    const sortLabel = (() => {
+        const value = t('sort.label');
+        return value === 'sort.label' ? 'Sort' : value;
+    })();
     const densityLabel = densityMode === 'compact'
         ? (() => {
             const value = t('list.densityCompact');
@@ -59,34 +68,6 @@ export function ListHeader({
             const value = t('list.densityComfortable');
             return value === 'list.densityComfortable' ? 'Comfortable' : value;
         })();
-    const groupLabel = (() => {
-        const value = t('list.groupBy');
-        return value === 'list.groupBy' ? 'Group' : value;
-    })();
-    const noGroupingLabel = (() => {
-        const value = t('list.groupByNone');
-        return value === 'list.groupByNone' ? 'No grouping' : value;
-    })();
-    const groupByContextLabel = (() => {
-        const value = t('list.groupByContext');
-        return value === 'list.groupByContext' ? 'Context' : value;
-    })();
-    const groupByAreaLabel = (() => {
-        const value = t('list.groupByArea');
-        return value === 'list.groupByArea' ? 'Area' : value;
-    })();
-    const groupByProjectLabel = (() => {
-        const value = t('list.groupByProject');
-        return value === 'list.groupByProject' ? 'Project' : value;
-    })();
-    const groupByPriorityLabel = (() => {
-        const value = t('filters.priority');
-        return value === 'filters.priority' ? 'Priority' : value;
-    })();
-    const groupByEnergyLabel = (() => {
-        const value = t('focus.group.energy');
-        return value === 'focus.group.energy' ? 'Energy' : value;
-    })();
     const controlBaseClass = "h-9 text-xs border transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40";
     const controlMutedClass = "bg-card text-muted-foreground border-border hover:bg-muted/70 hover:text-foreground";
     const controlActiveClass = "bg-primary/10 text-primary border-primary";
@@ -114,16 +95,34 @@ export function ListHeader({
             </div>
 
             <div className="flex flex-wrap items-center gap-2 xl:justify-end">
-                <div className="relative min-w-[172px]">
+                <button
+                    type="button"
+                    onClick={onToggleSelection}
+                    className={cn(
+                        controlBaseClass,
+                        "inline-flex items-center gap-1.5 rounded-lg px-3",
+                        selectionMode
+                            ? controlActiveClass
+                            : controlMutedClass
+                    )}
+                >
+                    <CheckSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                    {selectionMode ? t('bulk.exitSelect') : t('bulk.select')}
+                </button>
+                <div className={cn(controlBaseClass, controlMutedClass, "relative flex min-w-[160px] items-center rounded-lg pl-2") }>
+                    <ArrowUpDown
+                        className="mr-1.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                        aria-hidden="true"
+                        data-testid="list-sort-icon"
+                    />
+                    <span className="mr-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        {sortLabel}
+                    </span>
                     <select
                         value={sortBy}
                         onChange={(e) => onChangeSortBy(e.target.value as TaskSortBy)}
-                        aria-label={t('sort.label')}
-                        className={cn(
-                            controlBaseClass,
-                            controlMutedClass,
-                            "w-full appearance-none rounded-lg pl-3 pr-9 text-foreground"
-                        )}
+                        aria-label={sortLabel}
+                        className="h-full min-w-0 flex-1 appearance-none bg-transparent pr-8 text-xs text-foreground focus:outline-none"
                     >
                         <option value="default">{t('sort.default')}</option>
                         <option value="due">{t('sort.due')}</option>
@@ -139,43 +138,14 @@ export function ListHeader({
                     />
                 </div>
                 {showGroupBy && onChangeGroupBy && (
-                    <div className="relative min-w-[132px]">
-                        <select
-                            value={groupBy}
-                            onChange={(e) => onChangeGroupBy(e.target.value as NextGroupBy)}
-                            aria-label={groupLabel}
-                            className={cn(
-                                controlBaseClass,
-                                controlMutedClass,
-                                "w-full appearance-none rounded-lg pl-3 pr-9 text-foreground"
-                            )}
-                        >
-                            <option value="none">{noGroupingLabel}</option>
-                            <option value="context">{groupByContextLabel}</option>
-                            <option value="area">{groupByAreaLabel}</option>
-                            <option value="project">{groupByProjectLabel}</option>
-                            <option value="energy">{groupByEnergyLabel}</option>
-                            <option value="priority">{groupByPriorityLabel}</option>
-                        </select>
-                        <ChevronDown
-                            className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-                            aria-hidden="true"
-                        />
-                    </div>
+                    <GroupBySelect
+                        value={groupBy}
+                        axes={groupByOptions}
+                        onChange={onChangeGroupBy}
+                        t={t}
+                        className="min-w-[180px]"
+                    />
                 )}
-                <button
-                    type="button"
-                    onClick={onToggleSelection}
-                    className={cn(
-                        controlBaseClass,
-                        "rounded-lg px-3",
-                        selectionMode
-                            ? controlActiveClass
-                            : controlMutedClass
-                    )}
-                >
-                    {selectionMode ? t('bulk.exitSelect') : t('bulk.select')}
-                </button>
                 <button
                     type="button"
                     onClick={onToggleDetails}

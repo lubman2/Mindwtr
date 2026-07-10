@@ -10,11 +10,14 @@ import * as Calendar from 'expo-calendar';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
+    buildCalendarPushEventFields,
     expandCalendarRecurringTasks,
     getProjectedRecurringTaskId,
+    getTaskCalendarOccurrenceDate,
     hasTimeComponent,
     isProjectedRecurringTask,
     isProjectedRecurringTaskId,
+    safeFormatDate,
     safeParseDate,
     timeEstimateToMinutes,
     useTaskStore,
@@ -41,6 +44,7 @@ const CALENDAR_SYNC_CONCURRENCY = 4;
 const MANAGED_CALENDAR_TITLE = 'Mindwtr';
 const MANAGED_CALENDAR_NAME = 'mindwtr';
 const DEFAULT_MANAGED_CALENDAR_COLOR = '#3B82F6';
+const PROJECTED_RECURRENCE_EVENT_DATE_FORMAT = 'PP';
 
 export const CALENDAR_PUSH_COLOR_OPTIONS = [
     '#3B82F6',
@@ -379,6 +383,15 @@ export const updateMindwtrCalendarColor = async (color: string): Promise<boolean
         const target = calendars.find((calendar) => storedCalendarId && calendar.id === storedCalendarId)
             ?? calendars.find(isAppCreatedMindwtrCalendar);
         if (!target || !isWritableCalendar(target)) return false;
+
+        // Android's CalendarProvider only stores a calendar's color at creation
+        // time, and expo-calendar's update path never writes CALENDAR_COLOR, so
+        // updating it in place never reaches third-party calendar apps (#726).
+        // Recreate the managed calendar with the freshly stored color instead.
+        if (Platform.OS === 'android') {
+            return await recreateManagedMindwtrCalendar();
+        }
+
         await Calendar.updateCalendarAsync(target.id, { color: normalized });
         return true;
     } catch (error) {
@@ -389,6 +402,26 @@ export const updateMindwtrCalendarColor = async (color: string): Promise<boolean
         return false;
     }
 };
+
+/**
+ * Deletes and recreates the managed "Mindwtr" calendar so a color change takes
+ * effect on Android. The provider ignores post-creation color updates, so the
+ * only way to change the color third-party calendar apps render is to drop the
+ * calendar and create a fresh one with the already-stored color, then re-push
+ * its events. Serialized on the calendar sync queue so it cannot race a
+ * concurrent push and duplicate events (#743). Returns true when a new managed
+ * calendar was created.
+ */
+async function recreateManagedMindwtrCalendar(): Promise<boolean> {
+    let recreatedId: string | null = null;
+    await enqueueCalendarSync(async () => {
+        await deleteMindwtrCalendar();
+        recreatedId = await ensureMindwtrCalendar();
+        if (!recreatedId) return;
+        await runFullCalendarSyncUnsafe();
+    });
+    return recreatedId !== null;
+}
 
 async function resolveCalendarPushTarget(): Promise<CalendarPushTarget | null> {
     const selectedId = await getCalendarPushTargetCalendarId();
@@ -488,8 +521,20 @@ export const deleteMindwtrCalendar = async (): Promise<void> => {
 
 // MARK: - Per-task sync
 
-function formatCalendarEventTitle(title: string): string {
-    return title.trim() || 'Task';
+function formatProjectedRecurrenceEventDate(task: Task): string {
+    return safeFormatDate(getTaskCalendarOccurrenceDate(task), PROJECTED_RECURRENCE_EVENT_DATE_FORMAT);
+}
+
+function formatCalendarEventTitle(title: string, occurrenceDateLabel = ''): string {
+    const trimmed = title.trim() || 'Task';
+    return occurrenceDateLabel ? `${trimmed} (${occurrenceDateLabel})` : trimmed;
+}
+
+function formatProjectedRecurrenceNote(task: Task): string {
+    const occurrenceDateLabel = formatProjectedRecurrenceEventDate(task);
+    return occurrenceDateLabel
+        ? `Projected recurring occurrence for ${occurrenceDateLabel}. Complete the current Mindwtr task to create the real next task.`
+        : 'Projected recurring occurrence. Complete the current Mindwtr task to create the real next task.';
 }
 
 function buildEventDetails(task: Task) {
@@ -498,14 +543,21 @@ function buildEventDetails(task: Task) {
     const dateValue = task.startTime ?? task.dueDate;
     const parsed = safeParseDate(dateValue);
     const startDate = parsed ?? new Date();
-    const title = formatCalendarEventTitle(task.title);
+    const projectedOccurrenceDateLabel = isProjectedRecurringTask(task)
+        ? formatProjectedRecurrenceEventDate(task)
+        : '';
+    const title = formatCalendarEventTitle(task.title, projectedOccurrenceDateLabel);
     const location = typeof task.location === 'string' ? task.location.trim() : '';
-    const notes = [
-        isProjectedRecurringTask(task)
-            ? 'Projected recurring occurrence. Complete the current Mindwtr task to create the real next task.'
-            : '',
-        task.description ?? '',
-    ].filter(Boolean).join('\n\n');
+    const { projects, sections } = useTaskStore.getState();
+    const projectName = task.projectId
+        ? projects.find((project) => project.id === task.projectId)?.title
+        : undefined;
+    const sectionName = task.sectionId
+        ? sections.find((section) => section.id === task.sectionId)?.title
+        : undefined;
+    const leadingNote = isProjectedRecurringTask(task) ? formatProjectedRecurrenceNote(task) : undefined;
+    const { notes, url } = buildCalendarPushEventFields(task, { projectName, sectionName, leadingNote });
+
     if (hasTimeComponent(dateValue)) {
         const endDate = new Date(startDate.getTime() + timeEstimateToMinutes(task.timeEstimate) * 60 * 1000);
         return {
@@ -515,6 +567,7 @@ function buildEventDetails(task: Task) {
             allDay: false,
             notes,
             location,
+            ...(url ? { url } : {}),
         };
     }
 
@@ -527,6 +580,7 @@ function buildEventDetails(task: Task) {
         allDay: true,
         notes,
         location,
+        ...(url ? { url } : {}),
         ...(Platform.OS === 'android' ? { timeZone: 'UTC', endTimeZone: 'UTC' } : {}),
     };
 }
@@ -677,15 +731,27 @@ async function runLimitedSettled<T>(
 
 // MARK: - Full sync
 
-export const runFullCalendarSync = async (): Promise<void> => {
+// Serialize all calendar writes so a full sync and the debounced partial sync
+// (or two rapid manual refreshes) cannot race on the check-then-create path and
+// create duplicate events (#743).
+let calendarSyncQueue: Promise<void> = Promise.resolve();
+function enqueueCalendarSync(run: () => Promise<void>): Promise<void> {
+    const next = calendarSyncQueue.catch(() => undefined).then(run);
+    calendarSyncQueue = next.catch(() => undefined);
+    return next;
+}
+
+export const runFullCalendarSync = (): Promise<void> => enqueueCalendarSync(runFullCalendarSyncUnsafe);
+
+const runFullCalendarSyncUnsafe = async (): Promise<void> => {
     const enabled = await getCalendarPushEnabled();
     if (!enabled) return;
 
     const target = await resolveCalendarPushTarget();
     if (!target) return;
 
-    const { tasks } = useTaskStore.getState();
-    const calendarTasks = getCalendarPushTasks(tasks as Task[]);
+    const { _allTasks } = useTaskStore.getState();
+    const calendarTasks = getCalendarPushTasks(_allTasks as Task[]);
 
     // Sync all tasks currently in the store
     const results = await runLimitedSettled(calendarTasks, (task) => syncTaskToCalendar(task, target));
@@ -727,7 +793,10 @@ export const scheduleSyncDebounced = (taskIds: string[]): void => {
     }, SYNC_DEBOUNCE_MS);
 };
 
-const runPartialCalendarSync = async (taskIds: string[]): Promise<void> => {
+const runPartialCalendarSync = (taskIds: string[]): Promise<void> =>
+    enqueueCalendarSync(() => runPartialCalendarSyncUnsafe(taskIds));
+
+const runPartialCalendarSyncUnsafe = async (taskIds: string[]): Promise<void> => {
     const enabled = await getCalendarPushEnabled();
     if (!enabled) return;
 

@@ -59,6 +59,22 @@ export function isSelectableProjectForTaskAssignment(project: Project): boolean 
     return !project.deletedAt && status !== 'archived' && status !== 'completed';
 }
 
+export function findSelectableProjectByTitleAndArea(
+    projects: readonly Project[],
+    title: string,
+    areaId?: string
+): Project | undefined {
+    const normalizedTitle = title.trim().toLowerCase();
+    if (!normalizedTitle) return undefined;
+    const targetAreaId = areaId ?? undefined;
+    return projects.find((project) => (
+        isSelectableProjectForTaskAssignment(project)
+        && typeof project.title === 'string'
+        && project.title.trim().toLowerCase() === normalizedTitle
+        && (project.areaId ?? undefined) === targetAreaId
+    ));
+}
+
 export function isTaskInActiveProject(
     task: Task,
     projectLookup: Map<string, Project> | Record<string, Project>

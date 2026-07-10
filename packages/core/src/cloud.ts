@@ -8,7 +8,8 @@ import {
     toArrayBuffer,
     toUint8Array,
 } from './http-utils';
-import { buildHttpRemoteFileFingerprint, type RemoteFileMetadata } from './webdav';
+import type { ClockSkewWarning, MergeStats } from './sync-types';
+import { buildHttpRemoteFileFingerprint, type RemoteFileMetadata, type RemoteJsonWriteResult } from './webdav';
 
 export interface CloudOptions {
     token?: string;
@@ -19,6 +20,12 @@ export interface CloudOptions {
     onProgress?: (loaded: number, total: number) => void;
     allowInsecureHttp?: boolean;
 }
+
+export type CloudJsonWriteResult = RemoteJsonWriteResult & {
+    stats?: MergeStats;
+    clockSkewWarning?: ClockSkewWarning | null;
+    serverMergedRemoteData?: boolean;
+};
 
 function buildHeaders(options: CloudOptions): Record<string, string> {
     const headers: Record<string, string> = { ...(options.headers || {}) };
@@ -52,6 +59,51 @@ const assertCloudUrl = (url: string, options: CloudOptions): void => {
         allowAndroidEmulator: true,
         allowInsecureHttp: options.allowInsecureHttp,
     });
+};
+
+const metadataFromHeaders = (headers: Headers): RemoteFileMetadata => {
+    const etag = headers.get('etag');
+    const lastModified = headers.get('last-modified');
+    const contentLength = headers.get('content-length');
+    return {
+        exists: true,
+        fingerprint: buildHttpRemoteFileFingerprint('cloud', { etag, lastModified, contentLength }),
+        etag,
+        lastModified,
+        contentLength,
+    };
+};
+
+const parseCloudJsonWriteBody = async (res: Response): Promise<Partial<CloudJsonWriteResult>> => {
+    const text = await res.text().catch(() => '');
+    const normalized = text.startsWith('\uFEFF') ? text.slice(1).trim() : text.trim();
+    if (!normalized) return {};
+    try {
+        const parsed = JSON.parse(normalized) as Record<string, unknown>;
+        const remoteFingerprint = typeof parsed.remoteFingerprint === 'string' && parsed.remoteFingerprint.trim()
+            ? parsed.remoteFingerprint
+            : undefined;
+        const etag = typeof parsed.etag === 'string' ? parsed.etag : undefined;
+        const lastModified = typeof parsed.lastModified === 'string' ? parsed.lastModified : undefined;
+        const contentLength = typeof parsed.contentLength === 'string' ? parsed.contentLength : undefined;
+        return {
+            ...(remoteFingerprint ? { fingerprint: remoteFingerprint } : {}),
+            ...(etag !== undefined ? { etag } : {}),
+            ...(lastModified !== undefined ? { lastModified } : {}),
+            ...(contentLength !== undefined ? { contentLength } : {}),
+            ...(parsed.stats && typeof parsed.stats === 'object' ? { stats: parsed.stats as MergeStats } : {}),
+            ...(parsed.clockSkewWarning && typeof parsed.clockSkewWarning === 'object'
+                ? { clockSkewWarning: parsed.clockSkewWarning as ClockSkewWarning }
+                : parsed.clockSkewWarning === null
+                    ? { clockSkewWarning: null }
+                    : {}),
+            ...(typeof parsed.serverMergedRemoteData === 'boolean'
+                ? { serverMergedRemoteData: parsed.serverMergedRemoteData }
+                : {}),
+        };
+    } catch {
+        return {};
+    }
 };
 
 export async function cloudGetJson<T>(
@@ -132,7 +184,7 @@ export async function cloudPutJson(
     url: string,
     data: unknown,
     options: CloudOptions = {},
-): Promise<void> {
+): Promise<CloudJsonWriteResult> {
     assertCloudUrl(url, options);
     const fetcher = options.fetcher ?? fetch;
     const headers = buildHeaders(options);
@@ -154,6 +206,14 @@ export async function cloudPutJson(
     if (!res.ok) {
         throw cloudHttpError('Cloud PUT', res);
     }
+    const metadata = metadataFromHeaders(res.headers);
+    const body = await parseCloudJsonWriteBody(res);
+    return {
+        ...metadata,
+        ...body,
+        exists: true,
+        fingerprint: body.fingerprint ?? metadata.fingerprint,
+    };
 }
 
 export async function cloudPutFile(

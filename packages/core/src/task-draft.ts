@@ -1,0 +1,260 @@
+import {
+    hasTimeComponent,
+    safeFormatDate,
+    safeParseDate,
+} from './date';
+import {
+    buildRRuleString,
+    getRecurrenceCompletedOccurrencesValue,
+    getRecurrenceCountValue,
+    getRecurrenceUntilValue,
+    parseRRuleString,
+} from './recurrence';
+import type {
+    Attachment,
+    Recurrence,
+    RecurrenceRule,
+    RecurrenceStrategy,
+    Task,
+    TaskEnergyLevel,
+    TaskPriority,
+    TaskStatus,
+    TimeEstimate,
+} from './types';
+
+/**
+ * The task editor draft as one module: a single field-descriptor table drives
+ * initialization, reset, the dirty check, and the update patch. Adding an
+ * editor field means adding one descriptor here (plus its UI), instead of
+ * hand-syncing six parallel per-field lists across four files.
+ *
+ * Interface: createTaskDraft · isTaskDraftDirty · areDraftAttachmentsDirty ·
+ * taskDraftToUpdatePatch. Everything else is implementation.
+ */
+export type TaskDraft = {
+    title: string;
+    dueDate: string;
+    startTime: string;
+    relativeStartOffset: Task['relativeStartOffset'];
+    projectId: string;
+    sectionId: string;
+    areaId: string;
+    status: TaskStatus;
+    focusedToday: boolean;
+    contexts: string;
+    tags: string;
+    description: string;
+    location: string;
+    recurrence: RecurrenceRule | '';
+    recurrenceStrategy: RecurrenceStrategy;
+    recurrenceRRule: string;
+    showFutureRecurrence: boolean;
+    timeEstimate: TimeEstimate | '';
+    timeSpentMinutes: number | undefined;
+    priority: TaskPriority | '';
+    energyLevel: TaskEnergyLevel | '';
+    assignedTo: string;
+    reviewAt: string;
+    repeatReminderMinutes: number | undefined;
+};
+
+export type TaskDraftField = keyof TaskDraft;
+
+type FieldSpec<K extends TaskDraftField> = {
+    fromTask: (task: Task) => TaskDraft[K];
+    /** Custom dirty comparison; defaults to `draftValue !== fromTask(task)`. */
+    isDirty?: (draftValue: TaskDraft[K], task: Task) => boolean;
+};
+
+const trimmedDiffers = (draftValue: string, taskValue: string) => draftValue.trim() !== taskValue.trim();
+
+// Convert stored ISO or datetime-local strings into datetime-local input values.
+export function toTaskDraftDateTimeLocalValue(dateStr: string | undefined): string {
+    if (!dateStr) return '';
+    const parsed = safeParseDate(dateStr);
+    if (!parsed) return dateStr;
+    if (!hasTimeComponent(dateStr)) {
+        return safeFormatDate(parsed, 'yyyy-MM-dd', dateStr);
+    }
+    return safeFormatDate(parsed, "yyyy-MM-dd'T'HH:mm", dateStr);
+}
+
+export function getTaskDraftRecurrenceRuleValue(recurrence: Task['recurrence']): RecurrenceRule | '' {
+    if (!recurrence) return '';
+    if (typeof recurrence === 'string') return recurrence as RecurrenceRule;
+    return recurrence.rule || '';
+}
+
+export function getTaskDraftRecurrenceStrategyValue(recurrence: Task['recurrence']): RecurrenceStrategy {
+    if (recurrence && typeof recurrence === 'object' && recurrence.strategy === 'fluid') {
+        return 'fluid';
+    }
+    return 'strict';
+}
+
+export function getTaskDraftRecurrenceRRuleValue(recurrence: Task['recurrence']): string {
+    if (!recurrence || typeof recurrence === 'string') return '';
+    const rec = recurrence as Recurrence;
+    if (rec.rrule) return rec.rrule;
+    const count = getRecurrenceCountValue(recurrence);
+    const until = getRecurrenceUntilValue(recurrence);
+    if (rec.byDay && rec.byDay.length > 0) {
+        return buildRRuleString(rec.rule, rec.byDay, undefined, { count, until });
+    }
+    if (rec.byMonthDay && rec.byMonthDay.length > 0) {
+        return buildRRuleString(rec.rule, undefined, undefined, { byMonthDay: rec.byMonthDay, count, until });
+    }
+    return rec.rule ? buildRRuleString(rec.rule, undefined, undefined, { count, until }) : '';
+}
+
+const TASK_DRAFT_FIELDS: { [K in TaskDraftField]: FieldSpec<K> } = {
+    title: { fromTask: (task) => task.title },
+    dueDate: { fromTask: (task) => toTaskDraftDateTimeLocalValue(task.dueDate) },
+    startTime: { fromTask: (task) => toTaskDraftDateTimeLocalValue(task.startTime) },
+    relativeStartOffset: {
+        fromTask: (task) => task.relativeStartOffset,
+        isDirty: (value, task) =>
+            JSON.stringify(value ?? null) !== JSON.stringify(task.relativeStartOffset ?? null),
+    },
+    projectId: { fromTask: (task) => task.projectId || '' },
+    sectionId: { fromTask: (task) => task.sectionId || '' },
+    areaId: { fromTask: (task) => task.areaId || '' },
+    status: { fromTask: (task) => task.status },
+    focusedToday: { fromTask: (task) => task.isFocusedToday === true },
+    contexts: {
+        fromTask: (task) => task.contexts?.join(', ') || '',
+        isDirty: (value, task) => trimmedDiffers(value, task.contexts?.join(', ') || ''),
+    },
+    tags: {
+        fromTask: (task) => task.tags?.join(', ') || '',
+        isDirty: (value, task) => trimmedDiffers(value, task.tags?.join(', ') || ''),
+    },
+    description: { fromTask: (task) => task.description || '' },
+    location: { fromTask: (task) => task.location || '' },
+    recurrence: { fromTask: (task) => getTaskDraftRecurrenceRuleValue(task.recurrence) },
+    recurrenceStrategy: { fromTask: (task) => getTaskDraftRecurrenceStrategyValue(task.recurrence) },
+    recurrenceRRule: { fromTask: (task) => getTaskDraftRecurrenceRRuleValue(task.recurrence) },
+    showFutureRecurrence: { fromTask: (task) => Boolean(task.showFutureRecurrence) },
+    timeEstimate: { fromTask: (task) => task.timeEstimate || '' },
+    timeSpentMinutes: {
+        fromTask: (task) => task.timeSpentMinutes,
+        isDirty: (value, task) => (value ?? undefined) !== (task.timeSpentMinutes ?? undefined),
+    },
+    priority: { fromTask: (task) => task.priority || '' },
+    energyLevel: { fromTask: (task) => task.energyLevel || '' },
+    assignedTo: { fromTask: (task) => task.assignedTo || '' },
+    reviewAt: { fromTask: (task) => toTaskDraftDateTimeLocalValue(task.reviewAt) },
+    repeatReminderMinutes: {
+        fromTask: (task) => task.repeatReminderMinutes,
+        isDirty: (value, task) => (value ?? undefined) !== (task.repeatReminderMinutes ?? undefined),
+    },
+};
+
+export const TASK_DRAFT_FIELD_KEYS = Object.keys(TASK_DRAFT_FIELDS) as TaskDraftField[];
+
+export function createTaskDraft(task: Task): TaskDraft {
+    const draft = {} as TaskDraft;
+    for (const key of TASK_DRAFT_FIELD_KEYS) {
+        (draft as Record<TaskDraftField, unknown>)[key] = TASK_DRAFT_FIELDS[key].fromTask(task);
+    }
+    return draft;
+}
+
+export function isTaskDraftDirty(draft: TaskDraft, task: Task): boolean {
+    return TASK_DRAFT_FIELD_KEYS.some((key) => {
+        const spec = TASK_DRAFT_FIELDS[key] as FieldSpec<TaskDraftField>;
+        if (spec.isDirty) return spec.isDirty(draft[key], task);
+        return draft[key] !== spec.fromTask(task);
+    });
+}
+
+const attachmentFingerprint = (attachments: Attachment[] | undefined) =>
+    (attachments ?? [])
+        .map((attachment) => `${attachment.id}\0${attachment.uri ?? ''}\0${attachment.title ?? ''}`)
+        .join('\n');
+
+/** Attachments are draft-buffered outside the field table (their records are
+ *  edited via useTaskItemAttachments); they still count as pending edits. */
+export function areDraftAttachmentsDirty(editAttachments: Attachment[] | undefined, task: Task): boolean {
+    return attachmentFingerprint(editAttachments) !== attachmentFingerprint(task.attachments);
+}
+
+type TaskDraftPatchOptions = {
+    statusOverride?: TaskStatus;
+    attachments?: Attachment[];
+};
+
+/**
+ * Serialize the draft into the `updateTask` patch. Returns null when there is
+ * no usable title (empty draft title on a task that never had one).
+ */
+export function taskDraftToUpdatePatch(
+    draft: TaskDraft,
+    task: Task,
+    options: TaskDraftPatchOptions = {},
+): Partial<Task> | null {
+    const cleanedTitle = draft.title.trim() ? draft.title.trim() : task.title;
+    if (!cleanedTitle.trim()) return null;
+
+    const resolvedProjectId = draft.projectId || undefined;
+    const recurrenceValue: Recurrence | undefined = draft.recurrence
+        ? { rule: draft.recurrence, strategy: draft.recurrenceStrategy }
+        : undefined;
+    if (recurrenceValue && draft.recurrenceRRule) {
+        const parsed = parseRRuleString(draft.recurrenceRRule);
+        if (parsed.byDay && parsed.byDay.length > 0) {
+            recurrenceValue.byDay = parsed.byDay;
+        }
+        if (parsed.byMonthDay && parsed.byMonthDay.length > 0) {
+            recurrenceValue.byMonthDay = parsed.byMonthDay;
+        }
+        if (parsed.count) {
+            recurrenceValue.count = parsed.count;
+        }
+        if (parsed.until) {
+            recurrenceValue.until = parsed.until;
+        }
+        const completedOccurrences = getRecurrenceCompletedOccurrencesValue(task.recurrence);
+        if (typeof completedOccurrences === 'number') {
+            recurrenceValue.completedOccurrences = completedOccurrences;
+        }
+        recurrenceValue.rrule = draft.recurrenceRRule;
+    }
+    const splitTokens = (value: string) => value.split(',').map((token) => token.trim()).filter(Boolean);
+
+    // Attachment removal soft-deletes records, so a legitimate buffer is never
+    // shorter than the stored list. An empty/absent buffer means the caller has
+    // nothing to say about attachments — omit the key entirely; an explicit
+    // `attachments: undefined` would spread-wipe stored records and tombstones.
+    const attachmentsPatch = (options.attachments?.length ?? 0) > 0
+        ? { attachments: options.attachments }
+        : {};
+
+    return {
+        title: cleanedTitle,
+        status: options.statusOverride ?? draft.status,
+        isFocusedToday: draft.focusedToday,
+        dueDate: draft.dueDate || undefined,
+        startTime: draft.startTime || undefined,
+        relativeStartOffset: draft.relativeStartOffset,
+        projectId: resolvedProjectId,
+        // Container exclusivity: a project home clears the direct area, and a
+        // section is only valid inside its project.
+        sectionId: resolvedProjectId ? (draft.sectionId || undefined) : undefined,
+        areaId: resolvedProjectId ? undefined : (draft.areaId || undefined),
+        contexts: splitTokens(draft.contexts),
+        tags: splitTokens(draft.tags),
+        description: draft.description || undefined,
+        location: draft.location || undefined,
+        recurrence: recurrenceValue,
+        showFutureRecurrence: recurrenceValue && draft.showFutureRecurrence ? true : undefined,
+        timeEstimate: draft.timeEstimate || undefined,
+        timeSpentMinutes: draft.timeSpentMinutes || undefined,
+        priority: draft.priority || undefined,
+        energyLevel: draft.energyLevel || undefined,
+        assignedTo: draft.assignedTo.trim() || undefined,
+        reviewAt: draft.reviewAt || undefined,
+        repeatReminderMinutes: draft.repeatReminderMinutes || undefined,
+        ...attachmentsPatch,
+    };
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useTransition, useCallback, Suspense, lazy } from 'react';
+import { useEffect, useState, useRef, useTransition, useCallback, useMemo, Suspense, lazy } from 'react';
 import { Layout } from './components/Layout';
 import { ListView } from './components/views/ListView';
 import { CalendarView } from './components/views/CalendarView';
@@ -21,6 +21,7 @@ import {
     getAnnouncementDismissalStorageKey,
     isSupportedLanguage,
     recordDonationPromptShown,
+    recordDonationPromptSupportClicked,
     recordUpdateReminderChecked,
     recordUpdateReminderDismissed,
     recordUpdateReminderShown,
@@ -28,6 +29,7 @@ import {
     shouldShowDonationPrompt,
     shouldCheckUpdateReminder,
     shouldShowUpdateReminder,
+    summarizeMergeStats,
     translateWithFallback,
     useTaskStore,
     type AppAnnouncement,
@@ -52,7 +54,8 @@ import { SyncService } from './lib/sync-service';
 import type { ExternalSyncChange, ExternalSyncChangeResolution } from './lib/sync-service';
 import * as LocalDataWatcher from './lib/local-data-watcher';
 import { getInstallSourceOrFallback, isFlatpakRuntime, isTauriRuntime } from './lib/runtime';
-import { logError } from './lib/app-log';
+import { persistLastView, readRestorableLastView } from './lib/session-restore';
+import { logError, logInfo } from './lib/app-log';
 import { createDesktopAutoSyncController } from './lib/auto-sync-controller';
 import { canDesktopAutoSync } from './lib/desktop-auto-sync-eligibility';
 import { beginSettingsOpenTrace, markSettingsOpenTrace, wrapSettingsOpenImport } from './lib/settings-open-diagnostics';
@@ -75,6 +78,12 @@ import {
 } from './lib/text-size';
 import { saveStoredFullscreen } from './lib/window-state';
 import { installWebviewZoomShortcuts } from './lib/webview-zoom';
+import { isEditableManualSyncShortcutTarget, isManualSyncShortcut } from './lib/manual-sync-shortcut';
+import {
+    isDesktopSyncRuntimeActive,
+    resolveVisibilitySyncAction,
+    shouldHandleDesktopManualSyncShortcut,
+} from './lib/desktop-sync-runtime';
 import { resolveCloseBehavior } from './lib/window-behavior';
 import { handleDesktopCloseRequest } from './lib/close-request-handler';
 import { subscribeNavigateEvent } from './lib/navigation-events';
@@ -86,19 +95,12 @@ import {
     updateLocalUserPromptState,
 } from './lib/user-prompt-state';
 import {
-    APP_STORE_LISTING_URL,
-    AUR_BIN_PACKAGE_URL,
-    AUR_SOURCE_PACKAGE_URL,
     checkForUpdates,
-    FLATHUB_PACKAGE_URL,
-    GITHUB_RELEASES_URL,
-    HOMEBREW_CASK_URL,
-    MS_STORE_URL,
     normalizeInstallSource,
-    SNAPCRAFT_PACKAGE_URL,
-    WINGET_PACKAGE_URL,
     type InstallSource,
 } from './lib/update-service';
+import { getDesktopUpdateTarget, isDesktopUpdateReminderAllowed, isUpdateReminderVersionTrusted } from './lib/desktop-update-targets';
+import { usePomodoroStore } from './store/pomodoro-store';
 import {
     PROMPT_TEST_CONTROLS_ENABLED,
     subscribePromptTest,
@@ -121,18 +123,9 @@ const DONATION_PROMPT_ENABLED = (
     import.meta.env.VITE_DONATION_PROMPT_ENABLED === '1'
     || import.meta.env.VITE_DONATION_PROMPT_ENABLED === 'true'
 );
-const UPDATE_REMINDER_DESKTOP_INSTALL_SOURCES = new Set<InstallSource>([
-    'direct',
-    'portable',
-    'github-release',
-    'appimage',
-    'apt',
-    'rpm',
-]);
+const DONATION_PROMPT_STARTUP_DELAY_MS = 2000;
 const MS_STORE_REVIEW_URL = 'ms-windows-store://review/?ProductId=9N0V5B0B6FRX';
 const MAC_APP_STORE_REVIEW_URL = 'macappstore://itunes.apple.com/app/id6758597144?action=write-review';
-const UPDATE_NOW_ACTION_LABEL = 'Update now';
-const VIEW_RELEASE_ACTION_LABEL = 'View release';
 
 type DesktopUpdateReminderInfo = {
     currentVersion: string;
@@ -145,10 +138,6 @@ type DesktopUpdateReminderInfo = {
 
 const isDesktopDonationPromptAllowed = (installSource: string | null | undefined): boolean => (
     DONATION_PROMPT_ENABLED && normalizeInstallSource(installSource) !== 'unknown'
-);
-
-const isDesktopUpdateReminderAllowed = (installSource: InstallSource | null | undefined): boolean => (
-    Boolean(installSource && UPDATE_REMINDER_DESKTOP_INSTALL_SOURCES.has(installSource))
 );
 
 const readDesktopOnboardingDismissed = () => {
@@ -209,37 +198,6 @@ const getDesktopReviewTarget = (installSource: InstallSource | null): { label: s
     };
 };
 
-const getDesktopUpdateTarget = (installSource: InstallSource | null): { label: string; url: string } => {
-    switch (installSource) {
-        case 'microsoft-store':
-            return { label: UPDATE_NOW_ACTION_LABEL, url: MS_STORE_URL };
-        case 'mac-app-store':
-            return { label: UPDATE_NOW_ACTION_LABEL, url: APP_STORE_LISTING_URL };
-        case 'homebrew':
-            return { label: UPDATE_NOW_ACTION_LABEL, url: HOMEBREW_CASK_URL };
-        case 'winget':
-            return { label: UPDATE_NOW_ACTION_LABEL, url: WINGET_PACKAGE_URL };
-        case 'flatpak':
-            return { label: UPDATE_NOW_ACTION_LABEL, url: FLATHUB_PACKAGE_URL };
-        case 'snap':
-            return { label: UPDATE_NOW_ACTION_LABEL, url: SNAPCRAFT_PACKAGE_URL };
-        case 'aur':
-        case 'aur-source':
-            return { label: UPDATE_NOW_ACTION_LABEL, url: AUR_SOURCE_PACKAGE_URL };
-        case 'aur-bin':
-            return { label: UPDATE_NOW_ACTION_LABEL, url: AUR_BIN_PACKAGE_URL };
-        case 'direct':
-        case 'portable':
-        case 'github-release':
-        case 'appimage':
-        case 'apt':
-        case 'rpm':
-            return { label: UPDATE_NOW_ACTION_LABEL, url: GITHUB_RELEASES_URL };
-        default:
-            return { label: VIEW_RELEASE_ACTION_LABEL, url: GITHUB_RELEASES_URL };
-    }
-};
-
 const buildPromptTestReviewAnnouncement = (installSource: InstallSource | null): AppAnnouncement | null => {
     const target = getDesktopReviewTarget(installSource);
     if (!target) return null;
@@ -256,8 +214,14 @@ const buildPromptTestReviewAnnouncement = (installSource: InstallSource | null):
 };
 
 function App() {
-    const [currentView, setCurrentView] = useState(DEFAULT_DESKTOP_VIEW);
-    const [activeView, setActiveView] = useState(DEFAULT_DESKTOP_VIEW);
+    // Reopening shortly after the app closed resumes the interrupted session on
+    // the same screen; a fresh session starts on the default view (#842).
+    const [restoredLastView] = useState(() => {
+        if (import.meta.env.MODE === 'test' || import.meta.env.VITEST || process.env.NODE_ENV === 'test') return null;
+        return readRestorableLastView();
+    });
+    const [currentView, setCurrentView] = useState(restoredLastView?.view ?? DEFAULT_DESKTOP_VIEW);
+    const [activeView, setActiveView] = useState(restoredLastView?.view ?? DEFAULT_DESKTOP_VIEW);
     const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage | undefined>();
     const [settingsOnboardingHintPage, setSettingsOnboardingHintPage] = useState<
         SettingsOnboardingHintPage | undefined
@@ -338,7 +302,7 @@ function App() {
                 } else if (resolution === 'use-external') {
                     showToast('Loaded external sync file changes.', 'success');
                 } else {
-                    const conflicts = (result.stats?.tasks.conflicts || 0) + (result.stats?.projects.conflicts || 0);
+                    const conflicts = summarizeMergeStats(result.stats).conflicts;
                     showToast(
                         conflicts > 0
                             ? `Sync merged with ${conflicts} conflict${conflicts === 1 ? '' : 's'} resolved.`
@@ -399,6 +363,21 @@ function App() {
             cancelled = true;
         };
     }, [applyActiveNativeTheme, getActiveThemeMode, hasHydratedSettings]);
+
+    useEffect(() => {
+        // Hydrate the shared pomodoro store once tasks are loaded so task rows
+        // can show per-task session counts and a focus session that finished
+        // while the app was closed credits its minutes without opening Agenda.
+        if (!hasHydratedSettings || isLoading) return;
+        const { settings: currentSettings } = useTaskStore.getState();
+        if (currentSettings.features?.pomodoro !== true) return;
+        const pomodoroState = usePomodoroStore.getState();
+        if (pomodoroState.hasHydrated) return;
+        pomodoroState.hydratePomodoro({
+            autoStartBreaks: currentSettings.gtd?.pomodoro?.autoStartBreaks === true,
+            autoStartFocus: currentSettings.gtd?.pomodoro?.autoStartFocus === true,
+        });
+    }, [hasHydratedSettings, isLoading]);
 
     useEffect(() => {
         if (!hasHydratedSettings || !isTauriRuntime()) return;
@@ -499,6 +478,22 @@ function App() {
     const translateOrFallback = useCallback((key: string, fallback: string) => {
         return translateWithFallback(t, key, fallback);
     }, [t]);
+
+    const donationPromptAnnouncement = useMemo<AppAnnouncement>(() => ({
+        ...DONATION_PROMPT_ANNOUNCEMENT,
+        title: translateOrFallback('donationPrompt.title', DONATION_PROMPT_ANNOUNCEMENT.title),
+        body: translateOrFallback('donationPrompt.body', DONATION_PROMPT_ANNOUNCEMENT.body),
+        dismissLabel: translateOrFallback(
+            'donationPrompt.dismiss',
+            DONATION_PROMPT_ANNOUNCEMENT.dismissLabel ?? DONATION_PROMPT_ANNOUNCEMENT.title,
+        ),
+        action: DONATION_PROMPT_ANNOUNCEMENT.action
+            ? {
+                ...DONATION_PROMPT_ANNOUNCEMENT.action,
+                label: translateOrFallback('donationPrompt.action', DONATION_PROMPT_ANNOUNCEMENT.action.label),
+            }
+            : undefined,
+    }), [translateOrFallback]);
 
     const hideToTray = useCallback(async () => {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
@@ -618,11 +613,15 @@ function App() {
             flushPendingSave,
             reportError,
             onSyncFailure: handleSyncFailure,
-            isRuntimeActive: () => isActiveRef.current && isTauriRuntime(),
+            isRuntimeActive: () => isDesktopSyncRuntimeActive(isActiveRef.current),
             shouldPauseWindowSync: () => (
                 useTaskStore.getState().editLockCount > 0
                 || useUiStore.getState().editingTaskId !== null
             ),
+            hasPendingLocalChanges: () => SyncService.hasPendingLocalChangesForAutoSync(),
+            logInfo: (message, extra) => {
+                void logInfo(message, { scope: 'sync', extra });
+            },
         });
 
         const focusListener = () => {
@@ -633,6 +632,24 @@ function App() {
             autoSyncController.handleBlur();
         };
 
+        const manualSyncShortcutListener = (event: KeyboardEvent) => {
+            if (!shouldHandleDesktopManualSyncShortcut({
+                isEditableTarget: isEditableManualSyncShortcutTarget(event.target),
+                isShortcut: isManualSyncShortcut(event),
+            })) return;
+            event.preventDefault();
+            void autoSyncController.requestSync(0).catch((error) => reportError('Sync failed', error));
+        };
+
+        const visibilityListener = () => {
+            const action = resolveVisibilitySyncAction(document.visibilityState);
+            if (action === 'focus') {
+                autoSyncController.handleFocus();
+            } else if (action === 'blur') {
+                autoSyncController.handleBlur();
+            }
+        };
+
         const storeUnsubscribe = useTaskStore.subscribe((state, prevState) => {
             if (state.lastDataChangeAt === prevState.lastDataChangeAt) return;
             autoSyncController.handleDataChange();
@@ -640,6 +657,8 @@ function App() {
 
         window.addEventListener('focus', focusListener);
         window.addEventListener('blur', blurListener);
+        window.addEventListener('keydown', manualSyncShortcutListener);
+        document.addEventListener('visibilitychange', visibilityListener);
         autoSyncController.scheduleInitialSync();
 
         return () => {
@@ -649,6 +668,8 @@ function App() {
             window.removeEventListener('beforeunload', handleUnload);
             window.removeEventListener('focus', focusListener);
             window.removeEventListener('blur', blurListener);
+            window.removeEventListener('keydown', manualSyncShortcutListener);
+            document.removeEventListener('visibilitychange', visibilityListener);
             if (unlistenClose) {
                 unlistenClose();
             }
@@ -917,6 +938,7 @@ function App() {
             setSettingsInitialPage(undefined);
             setSettingsOnboardingHintPage(undefined);
         }
+        persistLastView(nextView, useUiStore.getState().projectView.selectedProjectId);
         setCurrentView(nextView);
         if (nextView === 'settings') {
             beginSettingsOpenTrace('handleViewChange');
@@ -932,6 +954,29 @@ function App() {
         if (isObsidianEnabled || currentView !== 'obsidian') return;
         handleViewChange('settings');
     }, [currentView, handleViewChange, isObsidianEnabled]);
+
+    // Restore the project that was open when the interrupted session ended.
+    useEffect(() => {
+        if (restoredLastView?.view !== 'projects' || !restoredLastView.projectId) return;
+        useUiStore.getState().setProjectView({ selectedProjectId: restoredLastView.projectId });
+    }, []);
+
+    // The saved timestamp must reflect when the session ended, not the last
+    // in-app navigation: refresh it whenever the window hides or closes.
+    useEffect(() => {
+        const refreshLastView = () => {
+            persistLastView(currentView, useUiStore.getState().projectView.selectedProjectId);
+        };
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') refreshLastView();
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        window.addEventListener('beforeunload', refreshLastView);
+        return () => {
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            window.removeEventListener('beforeunload', refreshLastView);
+        };
+    }, [currentView]);
 
     useEffect(() => {
         if (!hasHydratedSettings || isLoading) return;
@@ -1088,8 +1133,21 @@ function App() {
             handleViewChange('settings');
             return;
         }
+        try {
+            updateLocalUserPromptState((state) => recordDonationPromptSupportClicked(state, Date.now()));
+        } catch (error) {
+            void logError(error, { scope: 'prompt-state', step: 'recordDonationSupportClicked' });
+        }
         void openAnnouncementUrl(action.url);
     }, [dismissDonationPrompt, handleViewChange, openAnnouncementUrl]);
+
+    const recordDonationPromptVisible = useCallback(() => {
+        try {
+            updateLocalUserPromptState((state) => recordDonationPromptShown(state, Date.now()));
+        } catch (error) {
+            void logError(error, { scope: 'prompt-state', step: 'recordDonationShown' });
+        }
+    }, []);
 
     const dismissUpdateReminder = useCallback(() => {
         const latestVersion = updateReminderInfo?.latestVersion;
@@ -1272,15 +1330,8 @@ function App() {
         if (!shouldShowDonationPrompt({ nowMs, promptState, donationAllowed: true })) return;
 
         const timer = window.setTimeout(() => {
-            try {
-                updateLocalUserPromptState((state) => recordDonationPromptShown(state, nowMs));
-            } catch (error) {
-                setDonationDismissedInSession(true);
-                void logError(error, { scope: 'prompt-state', step: 'recordDonationShown' });
-                return;
-            }
             setDonationPromptOpen(true);
-        }, 250);
+        }, DONATION_PROMPT_STARTUP_DELAY_MS);
         return () => window.clearTimeout(timer);
     }, [
         announcementOpen,
@@ -1341,6 +1392,7 @@ function App() {
                 const currentVersion = await getVersion();
                 const info = await checkForUpdates(currentVersion, { installSource: desktopInstallSource });
                 if (cancelled || !info.hasUpdate) return;
+                if (!isUpdateReminderVersionTrusted(desktopInstallSource, info.source)) return;
                 const latestPromptState = readLocalUserPromptState();
                 if (!shouldShowUpdateReminder({
                     nowMs: Date.now(),
@@ -1495,7 +1547,7 @@ function App() {
                         onDismiss={dismissAppAnnouncement}
                     />
                     <AppAnnouncementModal
-                        announcement={DONATION_PROMPT_ANNOUNCEMENT}
+                        announcement={donationPromptAnnouncement}
                         isOpen={
                             donationPromptOpen
                             && !announcementOpen
@@ -1505,6 +1557,7 @@ function App() {
                         }
                         onAction={handleDonationPromptAction}
                         onDismiss={dismissDonationPrompt}
+                        onShown={recordDonationPromptVisible}
                     />
                     <AppAnnouncementModal
                         announcement={updateReminderInfo ? buildUpdateReminderAnnouncement(updateReminderInfo) : null}

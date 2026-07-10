@@ -4,6 +4,7 @@ import {
     formatFocusTimeEstimateLabel,
     getFocusTokenOptions,
     groupFocusTasksByContext,
+    groupFocusTasksByTag,
     NO_PROJECT_FILTER_ID,
     splitFocusedTasks,
     taskMatchesFocusFilters,
@@ -54,16 +55,32 @@ describe('getFocusTokenOptions', () => {
 });
 
 describe('groupFocusTasksByContext', () => {
-    it('groups tasks under primary context headers and keeps context-less tasks first', () => {
+    it('groups tasks under every matching context and keeps context-less tasks first', () => {
         const noContext = { id: 'no-context', contexts: [], tags: [] };
-        const work = { id: 'work', contexts: ['@work', '@deep'], tags: [] };
+        const work = { id: 'work', contexts: ['@work', '@deep', '@work'], tags: [] };
         const home = { id: 'home', contexts: ['@home'], tags: [] };
 
         const groups = groupFocusTasksByContext([work, noContext, home] as any, 'No context');
 
-        expect(groups.map((group) => group.title)).toEqual(['No context', '@home', '@work']);
+        expect(groups.map((group) => group.title)).toEqual(['No context', '@deep', '@home', '@work']);
         expect(groups[0]).toMatchObject({ id: 'context:none', muted: true });
-        expect(groups[2]?.tasks.map((task) => task.id)).toEqual(['work']);
+        expect(groups.find((group) => group.id === 'context:@deep')?.tasks.map((task) => task.id)).toEqual(['work']);
+        expect(groups.find((group) => group.id === 'context:@work')?.tasks.map((task) => task.id)).toEqual(['work']);
+    });
+});
+
+describe('groupFocusTasksByTag', () => {
+    it('groups tasks under every matching tag and keeps untagged tasks muted first', () => {
+        const noTag = { id: 'no-tag', contexts: [], tags: [] };
+        const multi = { id: 'multi', contexts: [], tags: ['#work', '#deep', '#work'] };
+        const home = { id: 'home', contexts: [], tags: ['#home'] };
+
+        const groups = groupFocusTasksByTag([multi, noTag, home] as any, 'No tags');
+
+        expect(groups.map((group) => group.title)).toEqual(['No tags', '#deep', '#home', '#work']);
+        expect(groups[0]).toMatchObject({ id: 'tag:none', muted: true });
+        expect(groups.find((group) => group.id === 'tag:#deep')?.tasks.map((task) => task.id)).toEqual(['multi']);
+        expect(groups.find((group) => group.id === 'tag:#work')?.tasks.map((task) => task.id)).toEqual(['multi']);
     });
 });
 

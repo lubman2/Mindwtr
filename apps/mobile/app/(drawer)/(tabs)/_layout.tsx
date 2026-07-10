@@ -12,20 +12,21 @@ import { MobileAreaSwitcher } from '@/components/mobile-area-switcher';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
 import { useMobileSyncBadge } from '@/hooks/use-mobile-sync-badge';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useThemeTokens } from '@/hooks/use-theme-tokens';
 import { MOBILE_HOME_TAB_ROUTE } from '@/lib/home-route';
 import { useLanguage } from '../../../contexts/language-context';
 import { QuickCaptureSheet } from '@/components/quick-capture-sheet';
 import { QuickCaptureProvider } from '../../../contexts/quick-capture-context';
-import { useTaskStore, type MobileQuickAccessView, type SavedSearch, type Task } from '@mindwtr/core';
+import { getDefaultTaskAreaMode, useTaskStore, type MobileQuickAccessView, type SavedSearch, type Task } from '@mindwtr/core';
 import {
   coerceMobileQuickAccessView,
   MOBILE_QUICK_ACCESS_STACK_ROUTE,
   MOBILE_QUICK_ACCESS_TAB_ROUTE,
 } from '@/lib/mobile-quick-access-view';
+import { COMPACT_NAV_TEXT_MAX_SCALE } from '@/constants/text-scale';
 
 type IconSymbolName = Parameters<typeof IconSymbol>[0]['name'];
 type Translate = (key: string) => string;
-const COMPACT_NAV_TEXT_MAX_SCALE = 1.15;
 
 type MoreDestination = {
   id: string;
@@ -118,10 +119,10 @@ function MoreSheetCompactItem({
       </View>
       <Text
         style={[styles.moreCompactLabel, { color: tc.secondaryText }]}
-        numberOfLines={1}
+        numberOfLines={2}
         adjustsFontSizeToFit
-        minimumFontScale={0.76}
-        maxFontSizeMultiplier={COMPACT_NAV_TEXT_MAX_SCALE}
+        minimumFontScale={0.72}
+        maxFontSizeMultiplier={1}
       >
         {item.displayLabel ?? item.label}
       </Text>
@@ -260,7 +261,7 @@ function MoreNavigationSheet({
     { id: 'trash', label: t('nav.trash'), icon: 'trash.fill', iconColor: iconColors.trash, route: '/trash' },
     { id: 'archived', label: t('nav.archived'), icon: 'archivebox.fill', iconColor: iconColors.archived, route: '/archived' },
     { id: 'done', label: t('nav.done'), icon: 'checkmark.circle.fill', iconColor: iconColors.done, route: '/done' },
-    { id: 'reference', label: t('nav.reference'), displayLabel: 'Refer', icon: 'book.closed.fill', iconColor: iconColors.reference, route: '/reference' },
+    { id: 'reference', label: t('nav.reference'), icon: 'book.closed.fill', iconColor: iconColors.reference, route: '/reference' },
     { id: 'settings', label: t('nav.settings'), icon: 'gearshape.fill', iconColor: iconColors.settings, route: '/settings' },
   ];
 
@@ -354,6 +355,9 @@ function NativeTabBar({
   iconTint,
   inactiveTint,
   tc,
+  captureBg,
+  captureFg,
+  captureRadius,
   tabBarHeight,
   tabBarBottomInset,
   tabBarBottomOffset,
@@ -372,6 +376,9 @@ function NativeTabBar({
   iconTint: string;
   inactiveTint: string;
   tc: { cardBg: string; border: string; onTint: string; tint: string };
+  captureBg: string;
+  captureFg: string;
+  captureRadius: number;
   tabBarHeight: number;
   tabBarBottomInset: number;
   tabBarBottomOffset: number;
@@ -437,11 +444,11 @@ function NativeTabBar({
                 { paddingTop: iconLift, transform: [{ translateY: tabItemTopOffset }] },
               ]}
             >
-              <View style={[styles.captureButtonInner, { backgroundColor: tc.tint }]}>
+              <View style={[styles.captureButtonInner, { backgroundColor: captureBg, borderRadius: captureRadius }]}>
                 {defaultAutoRecord ? (
-                  <Mic size={22} color={tc.onTint} strokeWidth={2.5} />
+                  <Mic size={22} color={captureFg} strokeWidth={2.5} />
                 ) : (
-                  <Plus size={22} color={tc.onTint} strokeWidth={3} />
+                  <Plus size={22} color={captureFg} strokeWidth={3} />
                 )}
               </View>
             </TouchableOpacity>
@@ -519,10 +526,13 @@ function NativeTabBar({
 
 export default function TabLayout() {
   const tc = useThemeColors();
+  const tokens = useThemeTokens();
   const { t } = useLanguage();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { settings } = useTaskStore();
+  const { selectedAreaIdForNewTasks } = useMobileAreaFilter();
+  const defaultAreaMode = getDefaultTaskAreaMode(settings);
   const androidNavInset = Platform.OS === 'android' && insets.bottom >= 20
     ? Math.max(0, insets.bottom - 12)
     : 0;
@@ -550,15 +560,15 @@ export default function TabLayout() {
   const [moreSheetVisible, setMoreSheetVisible] = useState(false);
   const [moreSheetCloseRequestId, setMoreSheetCloseRequestId] = useState(0);
   const longPressRef = useRef(false);
-  const { selectedAreaIdForNewTasks } = useMobileAreaFilter();
-
   const withSelectedArea = useCallback((initialProps?: Partial<Task> | null): Partial<Task> | undefined => {
     const nextInitialProps = initialProps ? { ...initialProps } : {};
-    if (!nextInitialProps.projectId && !nextInitialProps.areaId && selectedAreaIdForNewTasks) {
+    const hasProject = typeof nextInitialProps.projectId === 'string' && nextInitialProps.projectId.trim().length > 0;
+    const hasArea = Object.prototype.hasOwnProperty.call(nextInitialProps, 'areaId');
+    if (!hasProject && !hasArea && defaultAreaMode === 'active' && selectedAreaIdForNewTasks) {
       nextInitialProps.areaId = selectedAreaIdForNewTasks;
     }
     return Object.keys(nextInitialProps).length > 0 ? nextInitialProps : undefined;
-  }, [selectedAreaIdForNewTasks]);
+  }, [defaultAreaMode, selectedAreaIdForNewTasks]);
 
   const openQuickCapture = useCallback((options?: { initialValue?: string; initialProps?: Partial<Task>; autoRecord?: boolean }) => {
     setCaptureState((prev) => ({
@@ -594,7 +604,14 @@ export default function TabLayout() {
 
   const iconTint = tc.tabIconSelected;
   const inactiveTint = tc.tabIconDefault;
-  const captureColor = tc.tint;
+  // Material 3: capture is Mindwtr's most important action, so the FAB uses the
+  // high-emphasis M3 FAB role (primary/onPrimary) rather than the deliberately
+  // subdued primaryContainer — keeping it the visual top of the action hierarchy.
+  // Other primary buttons stay primaryContainer (canonical). Non-Material themes
+  // keep today's primary tint + 10px radius. M3 also applies the "large" radius.
+  const captureBg = tokens.isMaterial && tokens.roles ? tokens.roles.primary : tc.tint;
+  const captureFg = tokens.isMaterial && tokens.roles ? tokens.roles.onPrimary : tc.onTint;
+  const captureRadius = tokens.isMaterial ? tokens.shape.large : 10;
   const defaultCapture = settings.gtd?.defaultCaptureMethod ?? 'text';
   const defaultAutoRecord = defaultCapture === 'audio';
   const quickAccessView = coerceMobileQuickAccessView(settings.appearance?.mobileQuickAccessView);
@@ -611,6 +628,9 @@ export default function TabLayout() {
             iconTint={iconTint}
             inactiveTint={inactiveTint}
             tc={{ cardBg: tc.cardBg, border: tc.border, onTint: tc.onTint, tint: tc.tint }}
+            captureBg={captureBg}
+            captureFg={captureFg}
+            captureRadius={captureRadius}
             tabBarHeight={tabBarHeight}
             tabBarBottomInset={tabBarBottomInset}
             tabBarBottomOffset={tabBarBottomOffset}
@@ -735,11 +755,11 @@ export default function TabLayout() {
               accessibilityLabel={defaultAutoRecord ? t('quickAdd.audioCaptureLabel') : t('nav.addTask')}
               style={styles.captureButton}
             >
-              <View style={[styles.captureButtonInner, { backgroundColor: captureColor }]}>
+              <View style={[styles.captureButtonInner, { backgroundColor: captureBg, borderRadius: captureRadius }]}>
                 {defaultAutoRecord ? (
-                  <Mic size={22} color={tc.onTint} strokeWidth={2.5} />
+                  <Mic size={22} color={captureFg} strokeWidth={2.5} />
                 ) : (
-                  <Plus size={22} color={tc.onTint} strokeWidth={3} />
+                  <Plus size={22} color={captureFg} strokeWidth={3} />
                 )}
               </View>
             </TouchableOpacity>
@@ -961,9 +981,7 @@ const styles = StyleSheet.create({
   },
   moreUtilityRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    columnGap: 6,
-    rowGap: 8,
+    gap: 4,
   },
   moreUtilityStripContent: {
     flexDirection: 'row',
@@ -975,13 +993,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 58,
-    paddingHorizontal: 6,
+    paddingHorizontal: 2,
     paddingVertical: 4,
   },
   moreUtilityRowItem: {
-    flexGrow: 1,
-    flexBasis: '30%',
-    minWidth: 92,
+    flex: 1,
+    minWidth: 0,
   },
   moreUtilityScrollItem: {
     width: 76,

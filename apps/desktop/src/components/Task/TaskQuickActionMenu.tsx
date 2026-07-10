@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
-import { BookOpen, Calendar, CalendarClock, ChevronRight, Copy, MapPin, Star, Tag, Trash2 } from 'lucide-react';
+import { BookOpen, Calendar, CalendarClock, ChevronRight, Copy, FolderPlus, MapPin, Pencil, Tag, Trash2 } from 'lucide-react';
 import {
+    getAdvancedReviewDate,
     hasTimeComponent,
     isDueForReview,
     safeFormatDate,
@@ -15,6 +16,7 @@ import {
 
 import { reportError } from '../../lib/report-error';
 import { cn } from '../../lib/utils';
+import { FocusStarIcon } from '../FocusStarIcon';
 import { Button } from '../ui/Button';
 import { AreaSelector } from '../ui/AreaSelector';
 import { normalizeDateInputValue } from './task-item-helpers';
@@ -46,7 +48,9 @@ interface TaskQuickActionMenuProps {
         onToggle: () => void;
     };
     onClose: () => void;
+    onRename?: () => void;
     onDuplicate: () => void;
+    onPromoteToProject?: () => void;
     onDelete: () => void;
     onStatusChange: (status: TaskStatus) => void;
     onCreateArea: (name: string) => Promise<string | null>;
@@ -88,7 +92,9 @@ export function TaskQuickActionMenu({
     readOnly,
     focusAction,
     onClose,
+    onRename,
     onDuplicate,
+    onPromoteToProject,
     onDelete,
     onStatusChange,
     onCreateArea,
@@ -96,6 +102,7 @@ export function TaskQuickActionMenu({
 }: TaskQuickActionMenuProps) {
     const menuRef = useRef<HTMLDivElement | null>(null);
     const panelRef = useRef<HTMLDivElement | null>(null);
+    const initialLayoutScrollSettledRef = useRef(false);
     const startButtonRef = useRef<HTMLButtonElement | null>(null);
     const dueButtonRef = useRef<HTMLButtonElement | null>(null);
     const reviewButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -124,10 +131,13 @@ export function TaskQuickActionMenu({
     const areaLabel = tFallback(t, 'taskEdit.areaLabel', 'Area');
     const contextsLabel = tFallback(t, 'taskEdit.contextsLabel', 'Contexts');
     const noAreaLabel = tFallback(t, 'taskEdit.noAreaOption', 'No Area');
+    const renameLabel = tFallback(t, 'task.renameTitle', 'Rename task');
     const duplicateLabel = tFallback(t, 'projects.duplicate', 'Duplicate');
+    const promoteToProjectLabel = t('task.createProjectFromTask');
     const deleteLabel = tFallback(t, 'common.delete', 'Delete');
     const convertToReferenceLabel = tFallback(t, 'task.convertToReference', 'Convert to Reference');
     const markReviewedLabel = tFallback(t, 'review.markReviewed', 'Mark reviewed');
+    const advanceReviewLabel = tFallback(t, 'review.advanceWeek', 'Review in 1 week');
     const saveLabel = tFallback(t, 'common.save', 'Save');
     const cancelLabel = tFallback(t, 'common.cancel', 'Cancel');
     const moreOptionsLabel = tFallback(t, 'taskEdit.moreOptions', 'More options');
@@ -169,12 +179,28 @@ export function TaskQuickActionMenu({
     }, []);
 
     useEffect(() => {
+        const timer = window.setTimeout(() => {
+            initialLayoutScrollSettledRef.current = true;
+        }, 120);
+        return () => window.clearTimeout(timer);
+    }, []);
+
+    useEffect(() => {
+        const isInsideMenuSurface = (target: Node | null) => {
+            if (!target) return false;
+            if (menuRef.current?.contains(target) || panelRef.current?.contains(target)) return true;
+            const targetElement = target instanceof Element ? target : target.parentElement;
+            return Boolean(targetElement?.closest('[data-selector-dropdown="true"]'));
+        };
         const handlePointer = (event: Event) => {
             const target = event.target as Node | null;
-            if (target && (menuRef.current?.contains(target) || panelRef.current?.contains(target))) return;
+            if (isInsideMenuSurface(target)) return;
             onClose();
         };
-        const handleScrollOrResize = () => onClose();
+        const handleScrollOrResize = (event: Event) => {
+            if (event.type === 'scroll' && !initialLayoutScrollSettledRef.current) return;
+            onClose();
+        };
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.key !== 'Escape') return;
             event.preventDefault();
@@ -373,6 +399,21 @@ export function TaskQuickActionMenu({
         }
     };
 
+    const handleAdvanceReview = async () => {
+        setSavingPanel('reviewAt');
+        try {
+            const result = await onUpdateTask({ reviewAt: getAdvancedReviewDate(task.reviewAt) });
+            if (!result.success) {
+                throw new Error(result.error || 'Failed to advance task review date');
+            }
+            onClose();
+        } catch (error) {
+            reportError('Failed to advance task review date from quick actions', error);
+        } finally {
+            setSavingPanel(null);
+        }
+    };
+
     const handleAreaSave = async () => {
         setSavingPanel('area');
         try {
@@ -458,11 +499,12 @@ export function TaskQuickActionMenu({
                 >
                 {!readOnly && focusAction && renderMenuAction({
                     icon: (
-                        <Star
+                        <FocusStarIcon
                             className={cn(
                                 'h-4 w-4',
-                                focusAction.isFocused && 'fill-current text-yellow-500',
+                                focusAction.isFocused && 'text-yellow-500',
                             )}
+                            filled={focusAction.isFocused}
                         />
                     ),
                     label: focusAction.label,
@@ -475,6 +517,14 @@ export function TaskQuickActionMenu({
                     },
                 })}
                 {!readOnly && focusAction ? <div className="my-1 h-px bg-border/70" role="separator" /> : null}
+                {!readOnly && onRename && renderMenuAction({
+                    icon: <Pencil className="h-4 w-4" />,
+                    label: renameLabel,
+                    onClick: () => {
+                        onRename();
+                        onClose();
+                    },
+                })}
                 {!readOnly && renderMenuAction({
                     ref: startButtonRef,
                     icon: <Calendar className="h-4 w-4" />,
@@ -503,6 +553,11 @@ export function TaskQuickActionMenu({
                     icon: <CalendarClock className="h-4 w-4" />,
                     label: markReviewedLabel,
                     onClick: () => { void handleMarkReviewed(); },
+                })}
+                {!readOnly && canMarkReviewed && renderMenuAction({
+                    icon: <CalendarClock className="h-4 w-4" />,
+                    label: advanceReviewLabel,
+                    onClick: () => { void handleAdvanceReview(); },
                 })}
                 {!readOnly && canEditArea && renderMenuAction({
                     ref: areaButtonRef,
@@ -534,6 +589,14 @@ export function TaskQuickActionMenu({
                     label: duplicateLabel,
                     onClick: () => {
                         onDuplicate();
+                        onClose();
+                    },
+                })}
+                {!readOnly && onPromoteToProject && renderMenuAction({
+                    icon: <FolderPlus className="h-4 w-4" />,
+                    label: promoteToProjectLabel,
+                    onClick: () => {
+                        onPromoteToProject();
                         onClose();
                     },
                 })}

@@ -1,4 +1,4 @@
-import type { AppData, Area, Project, Section, Task, TaskStatus } from '../types';
+import type { AppData, Area, Person, Project, Section, Task, TaskStatus } from '../types';
 import type { StoreActionResult, TaskStore } from '../store-types';
 import { normalizeTagId } from '../store-helpers';
 
@@ -8,6 +8,8 @@ export type ProjectActions = Pick<
     | 'updateProject'
     | 'deleteProject'
     | 'restoreProject'
+    | 'purgeProject'
+    | 'purgeDeletedProjects'
     | 'duplicateProject'
     | 'toggleProjectFocus'
     | 'addSection'
@@ -21,6 +23,12 @@ export type ProjectActions = Pick<
     | 'reorderAreas'
     | 'reorderProjects'
     | 'reorderProjectTasks'
+    | 'reorderBoardTasks'
+    | 'addPerson'
+    | 'updatePerson'
+    | 'renamePerson'
+    | 'deletePerson'
+    | 'restorePerson'
     | 'deleteTag'
     | 'renameTag'
     | 'deleteContext'
@@ -39,6 +47,8 @@ export type ProjectCoreActions = Pick<
     | 'updateProject'
     | 'deleteProject'
     | 'restoreProject'
+    | 'purgeProject'
+    | 'purgeDeletedProjects'
     | 'duplicateProject'
     | 'toggleProjectFocus'
 >;
@@ -47,11 +57,13 @@ export type SectionActions = Pick<ProjectActions, 'addSection' | 'updateSection'
 
 export type AreaActions = Pick<ProjectActions, 'addArea' | 'updateArea' | 'deleteArea' | 'restoreArea' | 'reorderAreas'>;
 
-export type OrderingActions = Pick<ProjectActions, 'reorderProjects' | 'reorderProjectTasks' | 'reorderSections'>;
+export type OrderingActions = Pick<ProjectActions, 'reorderProjects' | 'reorderProjectTasks' | 'reorderBoardTasks' | 'reorderSections'>;
+
+export type PeopleActions = Pick<ProjectActions, 'addPerson' | 'updatePerson' | 'renamePerson' | 'deletePerson' | 'restorePerson'>;
 
 export type TaxonomyActions = Pick<ProjectActions, 'deleteTag' | 'renameTag' | 'deleteContext' | 'renameContext'>;
 
-export type { AppData, Area, Project, Section, Task, TaskStatus };
+export type { AppData, Area, Person, Project, Section, Task, TaskStatus };
 
 export const actionOk = (extra?: Omit<StoreActionResult, 'success'>): StoreActionResult => ({ success: true, ...extra });
 export const actionFail = (error: string): StoreActionResult => ({ success: false, error });

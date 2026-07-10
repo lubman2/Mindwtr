@@ -435,3 +435,104 @@ export function isSlotFreeForDay(options: IsSlotFreeOptions): boolean {
     });
     return !intervals.some((interval) => overlaps(startMs, endMs, interval.start, interval.end));
 }
+
+// MARK: - Calendar push event content (shared by mobile + desktop push)
+
+// Only external schemes resolve from an external calendar (e.g. Outlook/Exchange);
+// internal `mindwtr://` links are dropped from pushed events.
+const CALENDAR_PUSH_LINK_SCHEME_RE = /^(?:https?|mailto):/i;
+
+function getCalendarPushLinkUris(attachments: Task['attachments']): string[] {
+    const seen = new Set<string>();
+    const links: string[] = [];
+    for (const attachment of attachments ?? []) {
+        if (attachment.deletedAt) continue;
+        if (attachment.kind !== 'link') continue;
+        const uri = typeof attachment.uri === 'string' ? attachment.uri.trim() : '';
+        if (!uri || !CALENDAR_PUSH_LINK_SCHEME_RE.test(uri)) continue;
+        if (seen.has(uri)) continue;
+        seen.add(uri);
+        links.push(uri);
+    }
+    return links;
+}
+
+function formatCalendarPushStatusLabel(status: Task['status']): string {
+    const normalized = String(status ?? '').trim();
+    if (!normalized) return '';
+    return normalized
+        .split('-')
+        .map((part) => (part ? part[0]!.toUpperCase() + part.slice(1) : part))
+        .join(' ');
+}
+
+function formatCalendarPushEffortLabel(timeEstimate: Task['timeEstimate']): string {
+    if (!timeEstimate) return '';
+    const minutes = timeEstimateToMinutes(timeEstimate);
+    if (!Number.isFinite(minutes) || minutes <= 0) return '';
+    if (minutes < 60) return `${minutes} min`;
+    const hours = minutes / 60;
+    const rounded = Number.isInteger(hours) ? String(hours) : hours.toFixed(1);
+    return `${rounded} h`;
+}
+
+export interface CalendarPushEventContext {
+    projectName?: string | null;
+    sectionName?: string | null;
+    /** Prepended note, e.g. the projected-recurrence explanation. */
+    leadingNote?: string | null;
+    /** Localized status label; falls back to a capitalized status token. */
+    statusLabel?: string | null;
+    /** Localized effort label; falls back to a minutes/hours label. */
+    effortLabel?: string | null;
+}
+
+export interface CalendarPushEventFields {
+    notes: string;
+    /** Primary external link for the event URL field (platforms that support it). */
+    url: string | null;
+}
+
+/**
+ * Builds the shared notes body and primary URL for a task pushed to an external
+ * calendar. Both the mobile (expo-calendar) and desktop (system calendar) push
+ * paths consume this so event content stays identical across platforms (#743).
+ *
+ * Metadata (project › section, status, effort) plus any external links are
+ * surfaced in the notes; status/effort are omitted when not meaningful. The
+ * primary external link is also returned for the native URL field where
+ * supported.
+ */
+export function buildCalendarPushEventFields(
+    task: Pick<Task, 'attachments' | 'description' | 'status' | 'timeEstimate'>,
+    context: CalendarPushEventContext = {},
+): CalendarPushEventFields {
+    const links = getCalendarPushLinkUris(task.attachments);
+
+    const metaLines: string[] = [];
+    const projectName = context.projectName?.trim();
+    const sectionName = context.sectionName?.trim();
+    if (projectName) {
+        metaLines.push(sectionName ? `Project: ${projectName} › ${sectionName}` : `Project: ${projectName}`);
+    }
+    const statusLabel = context.statusLabel?.trim() || formatCalendarPushStatusLabel(task.status);
+    if (statusLabel) metaLines.push(`Status: ${statusLabel}`);
+    // timeEstimateToMinutes defaults to 30 for an undefined estimate, so only
+    // emit an effort line when the task actually carries one.
+    if (task.timeEstimate) {
+        const effortLabel = context.effortLabel?.trim() || formatCalendarPushEffortLabel(task.timeEstimate);
+        if (effortLabel) metaLines.push(`Effort: ${effortLabel}`);
+    }
+
+    const blocks = [
+        context.leadingNote?.trim() || '',
+        metaLines.join('\n'),
+        task.description?.trim() || '',
+        links.length > 0 ? links.map((link) => `Link: ${link}`).join('\n') : '',
+    ].filter(Boolean);
+
+    return {
+        notes: blocks.join('\n\n'),
+        url: links[0] ?? null,
+    };
+}

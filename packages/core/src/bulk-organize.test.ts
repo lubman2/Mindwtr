@@ -82,4 +82,18 @@ describe('bulk organize', () => {
         expect(parseBulkOrganizeTokenInput('@home computer,computer', '@')).toEqual(['@home', '@computer']);
         expect(parseBulkOrganizeTokenInput('#launch inbox,launch', '#')).toEqual(['#launch', '#inbox']);
     });
+
+    it('keeps the current status when the input omits status', () => {
+        const updates = buildBulkOrganizeTaskUpdate(baseTask('1'), {
+            contexts: ['@office'],
+        });
+        expect('status' in updates).toBe(false);
+        expect(updates.contexts).toEqual(['@home', '@office']);
+    });
+
+    it('skips tasks entirely when an all-keep input has nothing to change', () => {
+        const tasksById = new Map([['1', baseTask('1')]]);
+        const updates = buildBulkOrganizeTaskUpdates(['1'], tasksById, {});
+        expect(updates).toEqual([]);
+    });
 });

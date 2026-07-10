@@ -4,6 +4,8 @@ import {
     applyMarkdownKeyboardShortcut,
     applyMarkdownToolbarAction,
     continueMarkdownOnTextChange,
+    isMarkdownEditorAssistEnabled,
+    useTaskStore,
     type MarkdownSelection,
     type MarkdownToolbarActionId,
     type MarkdownToolbarResult,
@@ -11,10 +13,9 @@ import {
 } from '@mindwtr/core';
 
 import {
-    applyMarkdownPairKeyPressWithSelectionFallback,
     applyMarkdownPairInsertionWithSelectionFallback,
     applyMarkdownUrlPasteWithSelectionFallback,
-    createIgnoredNativePairChange,
+    createIgnoredNativePairChangeFromTextChange,
     shouldIgnoreNativePairChange,
     type IgnoredNativePairChange,
     isRangeSelection,
@@ -193,21 +194,23 @@ export function useTaskDescriptionEditor({
     const handleDescriptionChange = React.useCallback((text: string) => {
         const ignoredNativeChange = ignoredNativePairChangeRef.current;
         if (ignoredNativeChange) {
-            ignoredNativePairChangeRef.current = null;
             if (shouldIgnoreNativePairChange(text, descriptionDraftRef.current, ignoredNativeChange)) {
                 restoreDescriptionSelection(ignoredNativeChange.selection);
                 return;
             }
+            ignoredNativePairChangeRef.current = null;
         }
 
         const currentSelection = descriptionSelectionRef.current;
         const previousValue = descriptionDraftRef.current;
         const fallbackSelection = lastDescriptionRangeRef.current;
+        const assistEnabled = isMarkdownEditorAssistEnabled(useTaskStore.getState().settings);
         const pastedUrl = applyMarkdownUrlPasteWithSelectionFallback(
             previousValue,
             text,
             currentSelection,
             fallbackSelection,
+            { assist: assistEnabled },
         );
         if (pastedUrl) {
             lastDescriptionRangeRef.current = null;
@@ -223,8 +226,15 @@ export function useTaskDescriptionEditor({
             text,
             currentSelection,
             fallbackSelection,
+            { assist: assistEnabled },
         );
         if (pairedInsertion) {
+            ignoredNativePairChangeRef.current = createIgnoredNativePairChangeFromTextChange(
+                previousValue,
+                text,
+                pairedInsertion.baseSelection,
+                pairedInsertion.result,
+            );
             lastDescriptionRangeRef.current = isRangeSelection(pairedInsertion.result.selection)
                 ? pairedInsertion.result.selection
                 : null;
@@ -239,6 +249,7 @@ export function useTaskDescriptionEditor({
             descriptionDraftRef.current,
             text,
             descriptionSelectionRef.current,
+            { assist: assistEnabled },
         );
         if (continued) {
             lastDescriptionRangeRef.current = null;
@@ -253,32 +264,11 @@ export function useTaskDescriptionEditor({
         applyDescriptionValue(text);
     }, [applyDescriptionValue, descriptionDraftRef, restoreDescriptionSelection]);
 
+    // Auto-pairing intentionally lives only in handleDescriptionChange. On Android the
+    // keyPress event is synthesized from the same native edit as the text change (and
+    // preventDefault cannot cancel it), so pairing here too processes one keystroke
+    // twice — IME-specific echo orders then double the pair (#565).
     const handleDescriptionKeyPress = React.useCallback((event: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
-        const pairedInsertion = applyMarkdownPairKeyPressWithSelectionFallback(
-            descriptionDraftRef.current,
-            event.nativeEvent.key,
-            descriptionSelectionRef.current,
-            lastDescriptionRangeRef.current,
-        );
-        if (pairedInsertion) {
-            event.preventDefault?.();
-            ignoredNativePairChangeRef.current = createIgnoredNativePairChange(
-                descriptionDraftRef.current,
-                event.nativeEvent.key,
-                pairedInsertion.baseSelection,
-                pairedInsertion.result,
-            );
-            lastDescriptionRangeRef.current = isRangeSelection(pairedInsertion.result.selection)
-                ? pairedInsertion.result.selection
-                : null;
-            applyDescriptionValue(pairedInsertion.result.value, {
-                baseSelection: pairedInsertion.baseSelection,
-                nextSelection: pairedInsertion.result.selection,
-            });
-            restoreDescriptionSelection(pairedInsertion.result.selection);
-            return;
-        }
-
         const next = applyMarkdownKeyboardShortcut(
             descriptionDraftRef.current,
             descriptionSelectionRef.current,

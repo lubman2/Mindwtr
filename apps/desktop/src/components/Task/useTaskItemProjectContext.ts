@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Project, Section, Task, Area } from '@mindwtr/core';
-import { getFrequentTaskTokens, getUsedTaskTokens, useTaskStore } from '@mindwtr/core';
+import { getFrequentTaskTokens, getPersonOptionNames, getUsedTaskTokens, useTaskStore } from '@mindwtr/core';
 
 type UseTaskItemProjectContextParams = {
     task: Task;
@@ -75,7 +75,7 @@ export function useTaskItemProjectContext({
 
     useEffect(() => {
         if (!isEditing && !loadTokenOptions) return;
-        const { tasks: storeTasks, projects: storeProjects } = useTaskStore.getState();
+        const { tasks: storeTasks, projects: storeProjects, people: storePeople } = useTaskStore.getState();
         if (isEditing) {
             if (editProjectId) {
                 setEditAreaId('');
@@ -118,14 +118,7 @@ export function useTaskItemProjectContext({
         setPopularTagOptions(frequentTagOptions);
         setAllContexts(sortTokenOptions(allContextOptions));
         setPopularContextOptions(frequentContextOptions);
-        setAssignedToOptions(
-            Array.from(new Set(
-                storeTasks
-                    .filter((candidate) => !candidate.deletedAt)
-                    .map((candidate) => candidate.assignedTo?.trim())
-                    .filter((value): value is string => Boolean(value))
-            )).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
-        );
+        setAssignedToOptions(getPersonOptionNames(storePeople, storeTasks));
     }, [editProjectId, isEditing, loadTokenOptions, project, setEditAreaId, task.id, task.projectId]);
 
     return {

@@ -7,6 +7,10 @@ on:
         description: 'Release tag (e.g., v0.2.3)'
         required: false
         type: string
+      version_code:
+        description: 'Android versionCode to apply before building, usually from the standard Android release preflight'
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -33,12 +37,14 @@ jobs:
       # Keep Metro/JS bundling stable on CI during release builds.
       NODE_OPTIONS: --max-old-space-size=6144
       DROPBOX_APP_KEY: ${{ vars.DROPBOX_APP_KEY || secrets.DROPBOX_APP_KEY }}
-      FEEDBACK_ENDPOINT_URL: ${{ vars.FEEDBACK_ENDPOINT_URL || vars.VITE_FEEDBACK_ENDPOINT_URL || 'https://mindwtr-feedback.mindwtr.workers.dev' }}
+      FEEDBACK_ENDPOINT_URL: ${{ vars.FEEDBACK_ENDPOINT_URL || vars.VITE_FEEDBACK_ENDPOINT_URL || 'https://feedback.mindwtr.app' }}
       DONATION_PROMPT_ENABLED: "true"
 
     steps:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.tag || github.event.inputs.tag || github.ref }}
 
       - name: Install pinned Node.js (match reproducible recipe)
         run: |
@@ -73,6 +79,28 @@ jobs:
           INPUT_TAG="${{ inputs.tag || github.event.inputs.tag }}"
           GITHUB_EVENT_INPUTS_TAG="${{ github.event.inputs.tag }}"
           scripts/ci/resolve-release-version.sh "$INPUT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Apply resolved Android versionCode
+        if: ${{ inputs.version_code != '' }}
+        env:
+          REQUESTED_VERSION_CODE: ${{ inputs.version_code }}
+          ALLOW_UNTRACKED_VERSION_CODE: ${{ contains(inputs.tag || github.event.inputs.tag || github.ref_name, '-') && 'true' || 'false' }}
+          WRITE_APP_JSON: "1"
+        run: node scripts/ci/android-version-code-policy.js
+
+      - name: Verify committed release version matches the tag
+        run: |
+          TAG="${{ inputs.tag || github.event.inputs.tag || github.ref_name }}"
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "No release tag ('$TAG'); skipping release-version check."; exit 0 ;;
+          esac
+          COMMITTED=$(node -p "require('./apps/mobile/release-version.json').releaseVersion")
+          if [ "v$COMMITTED" != "$TAG" ] && [ "$COMMITTED" != "$TAG" ]; then
+            echo "apps/mobile/release-version.json says '$COMMITTED' but the tag is '$TAG'."
+            echo "Run scripts/bump-version.sh so env-free FOSS builds self-report the right version."
+            exit 1
+          fi
 
       - name: Build FOSS Android APK (Gradle, arm64-v8a only)
         timeout-minutes: 30

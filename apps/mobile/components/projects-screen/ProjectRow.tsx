@@ -2,9 +2,10 @@ import React, { useRef } from 'react';
 import { Alert, Pressable, Text, TouchableOpacity, View } from 'react-native';
 import { type Project } from '@mindwtr/core';
 import * as Haptics from 'expo-haptics';
-import { Copy, Trash2, Star, AlertTriangle } from 'lucide-react-native';
+import { Copy, Trash2, AlertTriangle } from 'lucide-react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 
+import { FocusStarIcon } from '@/components/FocusStarIcon';
 import { projectsScreenStyles as styles } from '@/components/projects-screen/projects-screen.styles';
 import type { ProjectTaskSummary } from './project-list-model';
 
@@ -31,6 +32,9 @@ type ProjectRowProps = {
 };
 
 const ROW_ACTION_HIT_SLOP = { top: 12, bottom: 12, left: 12, right: 12 } as const;
+const PROJECT_SWIPE_FRICTION = 1.25;
+const PROJECT_SWIPE_OPEN_THRESHOLD = 72;
+const PROJECT_SWIPE_DRAG_OFFSET = 28;
 
 function getStatusLabel(status: Project['status'], t: (key: string) => string) {
     if (status === 'active') return t('status.active');
@@ -130,12 +134,10 @@ export function ProjectRow({
                 accessibilityState={{ selected: project.isFocused, disabled: !project.isFocused && focusedCount >= 5 }}
                 hitSlop={ROW_ACTION_HIT_SLOP}
             >
-                <Star
-                    size={22}
-                    color={project.isFocused ? '#F59E0B' : tc.secondaryText}
-                    fill={project.isFocused ? '#F59E0B' : 'transparent'}
-                    strokeWidth={2}
-                    style={{ opacity: project.isFocused ? 1 : focusedCount >= 5 ? 0.3 : 0.6 }}
+                <FocusStarIcon
+                    focused={project.isFocused === true}
+                    inactiveColor={tc.secondaryText}
+                    disabled={!project.isFocused && focusedCount >= 5}
                 />
             </TouchableOpacity>
             <TouchableOpacity
@@ -204,6 +206,11 @@ export function ProjectRow({
             ref={swipeableRef}
             renderLeftActions={renderLeftActions}
             renderRightActions={renderRightActions}
+            friction={PROJECT_SWIPE_FRICTION}
+            leftThreshold={PROJECT_SWIPE_OPEN_THRESHOLD}
+            rightThreshold={PROJECT_SWIPE_OPEN_THRESHOLD}
+            dragOffsetFromLeftEdge={PROJECT_SWIPE_DRAG_OFFSET}
+            dragOffsetFromRightEdge={PROJECT_SWIPE_DRAG_OFFSET}
             overshootLeft={false}
             overshootRight={false}
         >

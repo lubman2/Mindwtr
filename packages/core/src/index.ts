@@ -17,11 +17,13 @@ export type {
     InboxProcessingMode,
     FilterSettings,
     PendingRemoteAttachmentDelete,
+    Person,
     Project,
     ProjectSequentialScope,
     GtdSettings,
     MigrationSettings,
     MobileQuickAccessView,
+    MultiValueFilterMatchMode,
     NotificationSettings,
     Recurrence,
     RecurrenceByDay,
@@ -57,6 +59,11 @@ export type {
 } from './types';
 
 export {
+    decodeUriSafe,
+    sleep,
+} from './async-utils';
+
+export {
     noopStorage,
     SEARCH_RESULT_LIMIT,
 } from './storage';
@@ -75,6 +82,14 @@ export type {
     RangeSelectionOptions,
     RangeSelectionResult,
 } from './range-selection';
+
+export {
+    getTaskMetadataFilterVisibility,
+} from './task-metadata-filter-visibility';
+export type {
+    TaskMetadataFilterVisibility,
+    TaskMetadataFilterVisibilityOptions,
+} from './task-metadata-filter-visibility';
 
 export {
     buildBulkOrganizeTaskUpdate,
@@ -102,6 +117,8 @@ export {
     comparePromptVersions,
     DONATION_PROMPT_MIN_ACTIVE_DAYS,
     DONATION_PROMPT_MIN_DAYS_SINCE_FIRST_SEEN,
+    DONATION_PROMPT_REPEAT_COOLDOWN_MS,
+    DONATION_PROMPT_SUPPORT_CLICK_COOLDOWN_MS,
     PROMPT_COORDINATOR_COOLDOWN_MS,
     STORE_REVIEW_ATTEMPT_COOLDOWN_MS,
     STORE_REVIEW_MIN_ACTIVE_DAYS,
@@ -112,6 +129,7 @@ export {
     UPDATE_REMINDER_PATCH_GRACE_MS,
     getPromptLocalDayKey,
     recordDonationPromptShown,
+    recordDonationPromptSupportClicked,
     recordPromptActivity,
     recordStoreReviewPromptAttempt,
     recordUpdateReminderChecked,
@@ -167,9 +185,14 @@ export type {
 } from './store-types';
 
 export {
+    withTimeout,
+} from './store-helpers';
+
+export {
     appendSyncHistory,
     CLOCK_SKEW_THRESHOLD_MS,
-    filterDeleted,
+    createSyncCycleExecutor,
+    executeSyncCycle,
     mergeAppData,
     mergeAppDataWithStats,
     normalizeAppData,
@@ -186,6 +209,8 @@ export type {
     MergeResult,
     MergeStats,
     SyncCycleIO,
+    SyncCycleExecutor,
+    SyncCycleOperation,
     SyncCycleResult,
     SyncHistoryEntry,
     SyncStep,
@@ -204,6 +229,8 @@ export type {
 
 export {
     repairMergedSyncReferences,
+    sanitizeAttachmentCloudKeyForSyncMerge,
+    sanitizeAttachmentUriForSyncMerge,
 } from './sync-normalization';
 
 export {
@@ -219,6 +246,7 @@ export {
     normalizeWebdavUrl,
     persistExternalCalendars,
     sanitizeAppDataForRemote,
+    toStableSyncJson as toStableJson,
     toStableSyncJson,
 } from './sync-helpers';
 export type {
@@ -227,10 +255,21 @@ export type {
 } from './sync-helpers';
 
 export {
+    buildConflictDiagnosticsLogExtra,
+    buildMergeSummaryLog,
+    buildPendingAttachmentUploadLogExtra,
+    summarizeMergeStats,
+} from './sync-log-utils';
+export type {
+    MergeStatsSummary,
+} from './sync-log-utils';
+
+export {
     CLOUD_PROVIDER_DROPBOX,
     CLOUD_PROVIDER_SELF_HOSTED,
     createAbortableFetch,
     DEFAULT_ATTACHMENT_CLEANUP_INTERVAL_MS,
+    ensureFreshLocalSyncSnapshot,
     getInMemoryAppDataSnapshot,
     LocalSyncAbort,
     normalizeCloudProvider,
@@ -238,6 +277,7 @@ export {
 } from './sync-client-helpers';
 export type {
     CloudProvider,
+    LocalSyncSnapshotFreshnessOptions,
 } from './sync-client-helpers';
 
 export {
@@ -269,10 +309,12 @@ export {
     isLikelyOfflineSyncError,
     isRemoteSyncBackend,
     isSyncFilePath,
+    LEGACY_SYNC_FILE_NAME,
     normalizePath,
     normalizeSyncBackend,
     resolveSyncBackend,
     sanitizeSyncErrorMessage,
+    SYNC_FILE_NAME,
 } from './sync-service-utils';
 export type {
     AutoSyncConfig,
@@ -281,11 +323,20 @@ export type {
 } from './sync-service-utils';
 
 export {
+    buildFastSyncScope,
+    parseFastSyncState,
+    serializeFastSyncState,
+} from './sync-fast-sync';
+export type {
+    FastSyncScopeContext,
+    FastSyncState,
+} from './sync-fast-sync';
+
+export {
     buildTaskUpdatesFromSpeechResult,
-    extractWaitingPerson,
     FOCUS_NEXT_DUE_SOON_WINDOW_DAYS,
-    buildTasksByProjectId,
     FOCUS_ELIGIBILITY_ACTIVE_STATUSES,
+    getCalendarPlanningCandidates,
     getChecklistProgress,
     getProjectDeadlineBoosts,
     getFocusSequentialFirstTaskIds,
@@ -303,14 +354,17 @@ export {
     isTaskFutureStart,
     rescheduleTask,
     shouldShowTaskForStart,
+    sortDoneTasksForListView,
     sortFocusNextActions,
     sortTasks,
     sortTasksBy,
+    sortTasksByBoardOrder,
     sortTasksBySavedPreference,
     splitCompletedTasks,
     STATUS_COLORS,
 } from './task-utils';
 export type {
+    CalendarPlanningCandidateOptions,
     ProjectDeadlineBoost,
     SpeechResultLike,
     TaskFocusEligibilityOptions,
@@ -318,6 +372,22 @@ export type {
     TaskFocusEligibilityResult,
     SpeechUpdatePlan,
 } from './task-utils';
+
+export {
+    areDraftAttachmentsDirty,
+    createTaskDraft,
+    getTaskDraftRecurrenceRRuleValue,
+    getTaskDraftRecurrenceRuleValue,
+    getTaskDraftRecurrenceStrategyValue,
+    isTaskDraftDirty,
+    taskDraftToUpdatePatch,
+    toTaskDraftDateTimeLocalValue,
+    TASK_DRAFT_FIELD_KEYS,
+} from './task-draft';
+export type {
+    TaskDraft,
+    TaskDraftField,
+} from './task-draft';
 
 export {
     collectTaskTokenUsage,
@@ -330,6 +400,16 @@ export {
 export type {
     TaskTokenUsage,
 } from './task-token-usage';
+
+export {
+    getPersonNameKey,
+    getPersonOptionNames,
+    getPersonSuggestionNames,
+    normalizePeopleForLoad,
+    normalizePersonName,
+    normalizePersonNote,
+    normalizePersonReferenceLink,
+} from './people';
 
 export {
     buildBulkTaskTokenUpdates,
@@ -395,15 +475,20 @@ export {
     createCurrentRecurringCalendarTask,
     expandCalendarRecurringTasks,
     createProjectedRecurringTask,
+    formatRecurrenceLabel,
     getProjectedRecurringTaskId,
+    getProjectedRecurringTaskCalendarDate,
+    getRecurringTaskPreviewDate,
     getRecurrenceCompletedOccurrencesValue,
     getRecurrenceCountValue,
     getRecurrenceUntilValue,
+    getTaskCalendarOccurrenceDate,
     isProjectedRecurringTask,
     isProjectedRecurringTaskId,
     isRecurrenceRule,
     normalizeRecurrenceForLoad,
     parseRRuleString,
+    RECURRENCE_INTERVAL_MAX,
     RECURRENCE_RULES,
 } from './recurrence';
 export type {
@@ -421,12 +506,15 @@ export {
 } from './recurrence-constants';
 
 export {
+    DEFAULT_REVIEW_ADVANCE_DAYS,
+    getAdvancedReviewDate,
     getStaleItems,
 } from './review-utils';
 
 export {
     filterProjectsBySelectedArea,
     filterProjectsNeedingNextAction,
+    findSelectableProjectByTitleAndArea,
     getProjectNextActionCandidates,
     getProjectNextActionPromptData,
     getProjectsByArea,
@@ -449,6 +537,7 @@ export {
 } from './focus-utils';
 
 export {
+    generateDeterministicUUID,
     generateUUID,
 } from './uuid';
 
@@ -462,6 +551,7 @@ export {
     getCalendarMonthIndex,
     getCalendarYear,
     getQuickDate,
+    getSystemWeekStart,
     getWeekStartsOnIndex,
     hasTimeComponent,
     isDueForReview,
@@ -473,6 +563,7 @@ export {
     normalizeCalendarSystemSetting,
     normalizeDateFormatSetting,
     normalizeTimeFormatSetting,
+    normalizeWeekStartPreference,
     normalizeWeekStartSetting,
     QUICK_DATE_PRESETS,
     parseCalendarInputDate,
@@ -490,6 +581,7 @@ export type {
     DateFormatSetting,
     QuickDatePreset,
     TimeFormatSetting,
+    WeekStartPreference,
     WeekStartSetting,
     WeekStartsOnIndex,
 } from './date';
@@ -498,6 +590,7 @@ export {
     getQuickAddProjectInitialProps,
     parseQuickAdd,
     parseQuickAddDateCommands,
+    splitQuickAddBulkLines,
 } from './quick-add';
 export type {
     QuickAddDateCommandsResult,
@@ -517,9 +610,17 @@ export type {
 } from './area-filter';
 
 export {
+    dedupeLiveAreasByName,
+    getDefaultTaskAreaMode,
+    normalizeAreaNameKey,
+    resolveDefaultNewTaskAreaId,
+} from './area-utils';
+
+export {
     addCalendarMinutes,
     buildCalendarQuickAddTaskDraft,
     buildCalendarEventTaskDraft,
+    buildCalendarPushEventFields,
     CALENDAR_TIME_ESTIMATE_OPTIONS,
     createCustomTimeEstimate,
     customTimeEstimateToMinutes,
@@ -547,11 +648,22 @@ export type {
 } from './calendar-scheduling';
 
 export {
+    getDueReminderRepeatTimes,
     getNextScheduledAt,
     getUpcomingSchedules,
     isDueWithinMinutes,
+    normalizeRepeatReminderMinutes,
     parseTimeOfDay,
+    REPEAT_REMINDER_INTERVAL_OPTIONS,
+    REPEAT_REMINDER_MAX_OCCURRENCES,
+    REPEAT_REMINDER_MAX_WINDOW_MINUTES,
 } from './schedule-utils';
+
+export {
+    addTimeSpentMinutes,
+    normalizeTimeSpentMinutes,
+    TIME_SPENT_MAX_MINUTES,
+} from './time-spent';
 
 export {
     getDailyDigestSummary,
@@ -577,6 +689,7 @@ export type {
 
 export {
     applyFilter,
+    createTaskFilterPredicate,
     hasActiveFilterCriteria,
     normalizeDateRange,
     normalizeFilterCriteria,
@@ -607,13 +720,14 @@ export {
     applyMarkdownUrlPaste,
     continueMarkdownOnEnter,
     continueMarkdownOnTextChange,
-    extractChecklistFromMarkdown,
     getActiveMarkdownReferenceQuery,
     getInlineMarkdownPreview,
     insertMarkdownReferenceAtQuery,
+    isMarkdownEditorAssistEnabled,
     MARKDOWN_TOOLBAR_ACTIONS,
     normalizeMarkdownInternalLinks,
     parseInlineMarkdown,
+    parsePastedChecklistItems,
     parseMarkdownReferenceHref,
     parseMarkdownReferenceToken,
     sanitizeMarkdownReferenceLabel,
@@ -621,12 +735,11 @@ export {
     serializeMarkdownReference,
     serializeMarkdownReferenceHref,
     stripMarkdown,
-    syncMarkdownChecklistCompletion,
-    syncMarkdownChecklistWithCanonical,
 } from './markdown';
 export type {
     ActiveMarkdownReferenceQuery,
     InlineToken,
+    MarkdownAssistOptions,
     MarkdownChecklistItem,
     MarkdownReference,
     MarkdownReferenceEntityType,
@@ -647,11 +760,13 @@ export {
     extractObsidianWikiLinks,
     normalizeObsidianRelativePath,
     normalizeObsidianTagValue,
+    parseObsidianDataviewData,
     parseObsidianNoteFrontmatter,
     parseObsidianTasksFromMarkdown,
     uniqueObsidianStrings,
 } from './obsidian-parser';
 export type {
+    ObsidianDataviewData,
     ObsidianFrontmatter,
     ObsidianSourceRef,
     ObsidianTask,
@@ -684,6 +799,7 @@ export {
 } from './webdav';
 export type {
     RemoteFileMetadata,
+    RemoteJsonWriteResult,
     WebDavOptions,
 } from './webdav';
 
@@ -696,6 +812,7 @@ export {
     cloudPutJson,
 } from './cloud';
 export type {
+    CloudJsonWriteResult,
     CloudOptions,
 } from './cloud';
 
@@ -758,6 +875,8 @@ export {
 } from './cloudkit-attachments';
 
 export {
+    DEFAULT_MAX_FILE_SIZE_BYTES,
+    markAttachmentUnrecoverable,
     validateAttachmentForUpload,
 } from './attachment-validation';
 export type {
@@ -776,13 +895,35 @@ export type {
 } from './attachment-progress';
 
 export {
+    collectAttachmentsById,
+    normalizePendingRemoteDeletes,
+    reportProgress,
+    runAttachmentTransferLifecycle,
+    validateAttachmentHash,
+} from './attachment-transfer';
+export type {
+    AttachmentTransferLifecycleOptions,
+} from './attachment-transfer';
+
+export {
+    applyAttachmentCleanupResult,
     findDeletedAttachmentsForFileCleanup,
+    findLiveAttachmentResourceReferences,
     findOrphanedAttachments,
+    isAttachmentCloudResourceReferenced,
+    isAttachmentLocalResourceReferenced,
+    normalizeAttachmentCleanupUri,
+    PENDING_REMOTE_ATTACHMENT_DELETE_MAX_AGE_MS,
+    PENDING_REMOTE_ATTACHMENT_DELETE_MAX_ATTEMPTS,
+    prunePendingRemoteAttachmentDeletes,
     removeAttachmentsByIdFromData,
     removeOrphanedAttachmentsFromData,
+    shouldRetainPendingRemoteAttachmentDelete,
 } from './attachment-cleanup';
 export type {
+    AttachmentCleanupApplyResult,
     CleanupResult,
+    LiveAttachmentResourceReferences,
 } from './attachment-cleanup';
 
 export {
@@ -802,6 +943,12 @@ export {
 export type {
     ExternalCalendarColor,
 } from './external-calendar-colors';
+
+export {
+    computeRelativeStartTime,
+    normalizeRelativeStartOffset,
+    resolveRelativeStartUpdates,
+} from './task-relative-start';
 
 export {
     normalizeTaskForLoad,
@@ -850,6 +997,7 @@ export {
     ANTHROPIC_COPILOT_DEFAULT_MODEL,
     ANTHROPIC_DEFAULT_MODEL,
     ANTHROPIC_MODEL_OPTIONS,
+    COPILOT_REASONING_EFFORT,
     DEFAULT_ANTHROPIC_THINKING_BUDGET,
     DEFAULT_GEMINI_THINKING_BUDGET,
     DEFAULT_REASONING_EFFORT,
@@ -862,7 +1010,9 @@ export {
     getModelOptions,
     OPENAI_COPILOT_DEFAULT_MODEL,
     OPENAI_DEFAULT_MODEL,
+    OPENAI_FAST_MODEL,
     OPENAI_MODEL_OPTIONS,
+    OPENAI_SMART_MODEL,
 } from './ai/catalog';
 
 export {
@@ -888,6 +1038,8 @@ export {
 export {
     mapSqliteTaskRow,
     SqliteAdapter,
+    TASK_SQLITE_COLUMNS,
+    taskToSqliteRow,
 } from './sqlite-adapter';
 export type {
     CalendarSyncEntry,
@@ -913,6 +1065,33 @@ export type {
     LogPayload,
 } from './logger';
 
+
+export {
+    beginPerformanceLogMeasurement,
+    buildPerformanceLogContext,
+    buildPerformanceLogEntry,
+    buildPerformanceLogLine,
+    isPerformanceOperation,
+    isPerformancePlatform,
+    isPerformanceRoute,
+    PERFORMANCE_LOG_CONTEXT_KEYS,
+    PERFORMANCE_LOG_FORBIDDEN_CONTEXT_KEYS,
+    PERFORMANCE_LOG_MESSAGE,
+    PERFORMANCE_LOG_OPERATIONS,
+    PERFORMANCE_LOG_PLATFORMS,
+    PERFORMANCE_LOG_ROUTES,
+    PERFORMANCE_LOG_SCOPE,
+} from './performance-log';
+export type {
+    PerformanceLogEntry,
+    PerformanceLogInput,
+    PerformanceLogMeasurementFinishInput,
+    PerformanceLogMeasurementInput,
+    PerformanceOperation,
+    PerformancePlatform,
+    PerformanceRoute,
+} from './performance-log';
+
 export {
     addBreadcrumb,
     clearBreadcrumbs,
@@ -928,8 +1107,10 @@ export {
     getPomodoroPhaseSeconds,
     getPomodoroPresetOptions,
     POMODORO_PRESETS,
+    recordPomodoroFocusSessions,
     resetPomodoroState,
     sanitizePomodoroDurations,
+    sanitizePomodoroSessionHistory,
     tickPomodoroState,
 } from './pomodoro';
 export type {
@@ -939,6 +1120,7 @@ export type {
     PomodoroEvent,
     PomodoroPhase,
     PomodoroPreset,
+    PomodoroSessionHistory,
     PomodoroState,
     PomodoroTickResult,
 } from './pomodoro';
@@ -970,6 +1152,23 @@ export {
 } from './dropbox-sync-utils';
 
 export {
+    deleteDropboxFile,
+    downloadDropboxAppData,
+    downloadDropboxFile,
+    DropboxConflictError,
+    DropboxFileNotFoundError,
+    DropboxUnauthorizedError,
+    getDropboxAppDataMetadata,
+    isDropboxUnauthorizedError,
+    testDropboxAccess,
+    uploadDropboxAppData,
+    uploadDropboxFile,
+} from './dropbox';
+export type {
+    DropboxDownloadResult,
+} from './dropbox';
+
+export {
     BACKUP_FILE_PREFIX,
     createBackupFileName,
     prepareRestoredBackupDataForSync,
@@ -991,6 +1190,16 @@ export type {
     TodoistImportProjectPreview,
 } from './todoist-import';
 export type {
+    ParsedTickTickArea,
+    ParsedTickTickImportData,
+    ParsedTickTickProject,
+    ParsedTickTickTask,
+    TickTickImportExecutionResult,
+    TickTickImportParseResult,
+    TickTickImportPreview,
+    TickTickImportProjectPreview,
+} from './ticktick-import';
+export type {
     DgtImportExecutionResult,
     DgtImportParseResult,
     DgtImportPreview,
@@ -1010,3 +1219,15 @@ export type {
     ParsedOmniFocusProject,
     ParsedOmniFocusTask,
 } from './omnifocus-import';
+
+export {
+    MIND_SWEEP_GROUPS,
+    getMindSweepGroups,
+    type MindSweepGroup,
+    type MindSweepGroupScope,
+    type MindSweepScope,
+} from './mind-sweep';
+
+export * from './focus-star';
+export * from './capture';
+export * from './session-restore';

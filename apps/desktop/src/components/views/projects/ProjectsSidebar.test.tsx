@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { Project } from '@mindwtr/core';
+import type { Area, Project } from '@mindwtr/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ProjectsSidebar } from './ProjectsSidebar';
@@ -94,10 +94,13 @@ function SidebarHarness() {
                 isCreating={false}
                 isCreatingProject={false}
                 newProjectTitle=""
+                newProjectAreaId=""
+                areaOptions={[]}
                 onStartCreate={vi.fn()}
                 onCancelCreate={vi.fn()}
                 onCreateProject={vi.fn()}
                 onChangeNewProjectTitle={vi.fn()}
+                onChangeNewProjectAreaId={vi.fn()}
                 onSelectTag={vi.fn()}
                 groupedActiveProjects={[[noAreaId, projects]]}
                 groupedDeferredProjects={[]}
@@ -116,9 +119,8 @@ function SidebarHarness() {
                 projects={projects}
                 focusedProjectCount={projects.filter((project) => project.isFocused && !project.deletedAt).length}
                 toggleProjectFocus={vi.fn()}
-                updateProject={vi.fn()}
-                reorderProjects={vi.fn()}
                 onDuplicateProject={vi.fn()}
+                draggingSection={null}
             />
         </div>
     );
@@ -141,10 +143,13 @@ function renderSidebarWithSpy(onSelectProject = vi.fn()) {
             isCreating={false}
             isCreatingProject={false}
             newProjectTitle=""
+            newProjectAreaId=""
+            areaOptions={[]}
             onStartCreate={vi.fn()}
             onCancelCreate={vi.fn()}
             onCreateProject={vi.fn()}
             onChangeNewProjectTitle={vi.fn()}
+            onChangeNewProjectAreaId={vi.fn()}
             onSelectTag={vi.fn()}
             groupedActiveProjects={[[noAreaId, projects]]}
             groupedDeferredProjects={[]}
@@ -163,9 +168,8 @@ function renderSidebarWithSpy(onSelectProject = vi.fn()) {
             projects={projects}
             focusedProjectCount={projects.filter((project) => project.isFocused && !project.deletedAt).length}
             toggleProjectFocus={vi.fn()}
-            updateProject={vi.fn()}
-            reorderProjects={vi.fn()}
             onDuplicateProject={vi.fn()}
+            draggingSection={null}
         />
     );
 
@@ -173,6 +177,122 @@ function renderSidebarWithSpy(onSelectProject = vi.fn()) {
 }
 
 describe('ProjectsSidebar', () => {
+    it('keeps project creation visible as an inline field below the filters', () => {
+        const onCreateProject = vi.fn((event: FormEvent) => event.preventDefault());
+        const onChangeNewProjectTitle = vi.fn();
+
+        render(
+            <ProjectsSidebar
+                t={t}
+                selectedTag={allTagsId}
+                noAreaId={noAreaId}
+                allTagsId={allTagsId}
+                noTagsId={noTagsId}
+                tagOptions={{ list: [], hasNoTags: true }}
+                isCreating={false}
+                isCreatingProject={false}
+                newProjectTitle=""
+                newProjectAreaId=""
+                areaOptions={[]}
+                onStartCreate={vi.fn()}
+                onCancelCreate={vi.fn()}
+                onCreateProject={onCreateProject}
+                onChangeNewProjectTitle={onChangeNewProjectTitle}
+                onChangeNewProjectAreaId={vi.fn()}
+                onSelectTag={vi.fn()}
+                groupedActiveProjects={[[noAreaId, [buildProject('project-alpha', 'Alpha', 0)]]]}
+                groupedDeferredProjects={[]}
+                groupedArchivedProjects={[]}
+                areaById={new Map()}
+                collapsedAreas={{}}
+                onToggleAreaCollapse={vi.fn()}
+                showDeferredProjects={false}
+                onToggleDeferredProjects={vi.fn()}
+                showArchivedProjects={false}
+                onToggleArchivedProjects={vi.fn()}
+                selectedProjectId={null}
+                onSelectProject={vi.fn()}
+                getProjectColor={(project) => project.color}
+                tasksByProject={{}}
+                projects={[buildProject('project-alpha', 'Alpha', 0)]}
+                focusedProjectCount={0}
+                toggleProjectFocus={vi.fn()}
+                onDuplicateProject={vi.fn()}
+                draggingSection={null}
+            />
+        );
+
+        const projectName = screen.getByLabelText('Project name');
+
+        expect(projectName).toBeInTheDocument();
+
+        fireEvent.change(projectName, { target: { value: 'New project' } });
+        expect(onChangeNewProjectTitle).toHaveBeenCalledWith('New project');
+    });
+
+    it('lets the user pick an area while creating a project', () => {
+        const onChangeNewProjectAreaId = vi.fn();
+        const areas: Area[] = [
+            { id: 'area-work', name: 'Work', order: 0, createdAt: now, updatedAt: now },
+            { id: 'area-home', name: 'Home', order: 1, createdAt: now, updatedAt: now },
+        ];
+
+        render(
+            <ProjectsSidebar
+                t={t}
+                selectedTag={allTagsId}
+                noAreaId={noAreaId}
+                allTagsId={allTagsId}
+                noTagsId={noTagsId}
+                tagOptions={{ list: [], hasNoTags: true }}
+                isCreating={true}
+                isCreatingProject={false}
+                newProjectTitle=""
+                newProjectAreaId=""
+                areaOptions={areas}
+                onStartCreate={vi.fn()}
+                onCancelCreate={vi.fn()}
+                onCreateProject={vi.fn((event: FormEvent) => event.preventDefault())}
+                onChangeNewProjectTitle={vi.fn()}
+                onChangeNewProjectAreaId={onChangeNewProjectAreaId}
+                onSelectTag={vi.fn()}
+                groupedActiveProjects={[]}
+                groupedDeferredProjects={[]}
+                groupedArchivedProjects={[]}
+                areaById={new Map(areas.map((area) => [area.id, area]))}
+                collapsedAreas={{}}
+                onToggleAreaCollapse={vi.fn()}
+                showDeferredProjects={false}
+                onToggleDeferredProjects={vi.fn()}
+                showArchivedProjects={false}
+                onToggleArchivedProjects={vi.fn()}
+                selectedProjectId={null}
+                onSelectProject={vi.fn()}
+                getProjectColor={(project) => project.color}
+                tasksByProject={{}}
+                projects={[]}
+                focusedProjectCount={0}
+                toggleProjectFocus={vi.fn()}
+                onDuplicateProject={vi.fn()}
+                draggingSection={null}
+            />
+        );
+
+        const areaSelect = screen.getByLabelText('Area');
+        expect(areaSelect).toBeInTheDocument();
+        expect(screen.getByRole('option', { name: 'No area' })).toBeInTheDocument();
+        expect(screen.getByRole('option', { name: 'Work' })).toBeInTheDocument();
+
+        fireEvent.change(areaSelect, { target: { value: 'area-home' } });
+        expect(onChangeNewProjectAreaId).toHaveBeenCalledWith('area-home');
+    });
+
+    it('hides the area picker while creating when no areas exist', () => {
+        renderSidebarWithSpy();
+
+        expect(screen.queryByLabelText('Area')).not.toBeInTheDocument();
+    });
+
     it('selects a project on primary mouse down so blur-driven rerenders cannot swallow the switch', () => {
         const { onSelectProject } = renderSidebarWithSpy();
 
@@ -211,10 +331,13 @@ describe('ProjectsSidebar', () => {
                 isCreating={false}
                 isCreatingProject={false}
                 newProjectTitle=""
+                newProjectAreaId=""
+                areaOptions={[]}
                 onStartCreate={vi.fn()}
                 onCancelCreate={vi.fn()}
                 onCreateProject={vi.fn()}
                 onChangeNewProjectTitle={vi.fn()}
+                onChangeNewProjectAreaId={vi.fn()}
                 onSelectTag={vi.fn()}
                 groupedActiveProjects={[[noAreaId, [buildProject('project-long', longTitle, 0)]]]}
                 groupedDeferredProjects={[]}
@@ -233,9 +356,8 @@ describe('ProjectsSidebar', () => {
                 projects={[buildProject('project-long', longTitle, 0)]}
                 focusedProjectCount={0}
                 toggleProjectFocus={vi.fn()}
-                updateProject={vi.fn()}
-                reorderProjects={vi.fn()}
                 onDuplicateProject={vi.fn()}
+                draggingSection={null}
             />
         );
 
@@ -274,10 +396,13 @@ describe('ProjectsSidebar', () => {
                 isCreating={false}
                 isCreatingProject={false}
                 newProjectTitle=""
+                newProjectAreaId=""
+                areaOptions={[]}
                 onStartCreate={vi.fn()}
                 onCancelCreate={vi.fn()}
                 onCreateProject={vi.fn()}
                 onChangeNewProjectTitle={vi.fn()}
+                onChangeNewProjectAreaId={vi.fn()}
                 onSelectTag={vi.fn()}
                 groupedActiveProjects={[]}
                 groupedDeferredProjects={[[noAreaId, [waitingProject]]]}
@@ -296,9 +421,8 @@ describe('ProjectsSidebar', () => {
                 projects={[waitingProject, archivedProject]}
                 focusedProjectCount={0}
                 toggleProjectFocus={vi.fn()}
-                updateProject={vi.fn()}
-                reorderProjects={vi.fn()}
                 onDuplicateProject={vi.fn()}
+                draggingSection={null}
             />
         );
 
@@ -331,10 +455,13 @@ describe('ProjectsSidebar', () => {
                 isCreating={false}
                 isCreatingProject={false}
                 newProjectTitle=""
+                newProjectAreaId=""
+                areaOptions={[]}
                 onStartCreate={vi.fn()}
                 onCancelCreate={vi.fn()}
                 onCreateProject={vi.fn()}
                 onChangeNewProjectTitle={vi.fn()}
+                onChangeNewProjectAreaId={vi.fn()}
                 onSelectTag={vi.fn()}
                 groupedActiveProjects={[[areaId, [activeProject]]]}
                 groupedDeferredProjects={[[areaId, [waitingProject]]]}
@@ -353,9 +480,8 @@ describe('ProjectsSidebar', () => {
                 projects={[activeProject, waitingProject]}
                 focusedProjectCount={0}
                 toggleProjectFocus={vi.fn()}
-                updateProject={vi.fn()}
-                reorderProjects={vi.fn()}
                 onDuplicateProject={vi.fn()}
+                draggingSection={null}
             />
         );
 

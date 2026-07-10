@@ -1,9 +1,11 @@
 import { type Area, type Project, type ProjectSequenceTaskCue, type StoreActionResult, type Task } from '@mindwtr/core';
+import { useDraggable } from '@dnd-kit/core';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, Trash2 } from 'lucide-react';
 import { TaskItem } from '../../TaskItem';
 import { AreaColorPicker } from './AreaColorPicker';
+import type { ProjectAreaSection } from './project-area-collapse';
 
 type AreaRowProps = {
     area: Area;
@@ -81,12 +83,20 @@ export function SortableAreaRow({
 
 export function SortableProjectRow({
     projectId,
+    section,
     children,
 }: {
     projectId: string;
-    children: (props: { handle: React.ReactNode; isDragging: boolean }) => React.ReactNode;
+    section: ProjectAreaSection;
+    children: (props: { handle: React.ReactNode; isDragging: boolean; isTaskOver: boolean }) => React.ReactNode;
 }) {
-    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: projectId });
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging, isOver, active } = useSortable({
+        id: projectId,
+        data: { type: 'project', section },
+    });
+    const isTaskOver = isOver
+        && (active?.data.current as { type?: string } | undefined)?.type === 'task'
+        && section !== 'archived';
     const style = {
         transform: CSS.Transform.toString(transform),
         transition,
@@ -109,7 +119,7 @@ export function SortableProjectRow({
 
     return (
         <div ref={setNodeRef} style={style}>
-            {children({ handle, isDragging })}
+            {children({ handle, isDragging, isTaskOver: Boolean(isTaskOver) })}
         </div>
     );
 }
@@ -127,11 +137,12 @@ export function SortableProjectTaskRow({
 }) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
         id: task.id,
+        data: { type: 'task', sortable: true },
     });
     const style = {
         transform: CSS.Transform.toString(transform),
         transition,
-        opacity: isDragging ? 0.6 : 1,
+        opacity: isDragging ? 0.45 : 1,
     };
 
     const isAvailableNextAction = sequenceCue === 'available';
@@ -141,6 +152,58 @@ export function SortableProjectTaskRow({
 
     return (
         <div ref={setNodeRef} style={style} className="flex items-start gap-2">
+            <div
+                className={taskContainerClassName}
+                title={isAvailableNextAction ? availableSequenceLabel : undefined}
+            >
+                <TaskItem
+                    task={task}
+                    project={project}
+                    enableDoubleClickEdit
+                    showProjectBadgeInActions={false}
+                    showProjectBadgeInMetadata={false}
+                    dragHandle={(
+                        <button
+                            type="button"
+                            {...attributes}
+                            {...listeners}
+                            onClick={(event) => event.stopPropagation()}
+                            className="h-6 w-6 rounded-md border border-transparent text-muted-foreground/80 hover:text-foreground hover:bg-muted/70 hover:border-border/70 flex items-center justify-center transition-colors"
+                            title="Drag"
+                        >
+                            <GripVertical className="w-3 h-3" />
+                        </button>
+                    )}
+                />
+            </div>
+        </div>
+    );
+}
+
+// Task row for non-default sort modes: draggable to the sidebar (move to another
+// project or area) but not sortable, so the list itself is never a drop target.
+export function DraggableProjectTaskRow({
+    task,
+    project,
+    sequenceCue,
+    availableSequenceLabel,
+}: {
+    task: Task;
+    project: Project;
+    sequenceCue?: ProjectSequenceTaskCue;
+    availableSequenceLabel: string;
+}) {
+    const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+        id: task.id,
+        data: { type: 'task', sortable: false },
+    });
+    const isAvailableNextAction = sequenceCue === 'available';
+    const taskContainerClassName = isAvailableNextAction
+        ? 'flex-1 min-w-0 -mx-2 -my-1 rounded-lg border border-primary/20 bg-primary/[0.04] px-2 py-1'
+        : 'flex-1 min-w-0';
+
+    return (
+        <div ref={setNodeRef} style={{ opacity: isDragging ? 0.45 : 1 }} className="flex items-start gap-2">
             <div
                 className={taskContainerClassName}
                 title={isAvailableNextAction ? availableSequenceLabel : undefined}

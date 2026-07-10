@@ -39,7 +39,7 @@ vi.mock('react-native-widgetkit', () => ({
     setItem: mockIosWidgetSetItem,
 }));
 
-import { updateMobileWidgetFromData } from './widget-service';
+import { resetMobileWidgetRenderCache, updateMobileWidgetFromData } from './widget-service';
 
 type WidgetElement = ReactElement<{
     children?: WidgetElement | WidgetElement[];
@@ -88,6 +88,23 @@ describe('widget-service', () => {
         mockIosWidgetReloadTimelines.mockReset();
         mockIosWidgetSetItem.mockReset();
         mockRequestWidgetUpdate.mockReset();
+        resetMobileWidgetRenderCache();
+    });
+
+    it('skips the native render when nothing any widget shows changed (#766)', async () => {
+        const data = buildData(3);
+        expect(await updateMobileWidgetFromData(data)).toBe(true);
+        expect(mockRequestWidgetUpdate).toHaveBeenCalledTimes(1);
+
+        expect(await updateMobileWidgetFromData({ ...data, tasks: data.tasks.map((task) => ({ ...task })) })).toBe(true);
+        expect(mockRequestWidgetUpdate).toHaveBeenCalledTimes(1);
+
+        const changed = {
+            ...data,
+            tasks: data.tasks.map((task, index) => (index === 0 ? { ...task, title: 'Renamed' } : task)),
+        };
+        expect(await updateMobileWidgetFromData(changed)).toBe(true);
+        expect(mockRequestWidgetUpdate).toHaveBeenCalledTimes(2);
     });
 
     it('uses Android widget height to render more rows during app-driven updates', async () => {
@@ -199,22 +216,24 @@ describe('widget-service', () => {
         expect(countRenderedTaskRows(renderedTree)).toBe(2);
     });
 
-    it('writes family-specific iOS payloads using adaptive task limits', async () => {
+    it('writes family-specific iOS payloads with per-size item budgets', async () => {
         mockPlatform.OS = 'ios';
         mockIosWidgetSetItem.mockResolvedValue(undefined);
 
-        const didUpdate = await updateMobileWidgetFromData(buildData(9));
+        const didUpdate = await updateMobileWidgetFromData(buildData(30));
 
         expect(didUpdate).toBe(true);
         expect(mockRequestWidgetUpdate).not.toHaveBeenCalled();
-        expect(mockIosWidgetSetItem).toHaveBeenCalledTimes(4);
+        expect(mockIosWidgetSetItem).toHaveBeenCalledTimes(5);
         const payloadByKey = new Map(
             mockIosWidgetSetItem.mock.calls.map(([key, value]) => [key, JSON.parse(value as string)])
         );
         expect(payloadByKey.get('mindwtr-ios-widget-payload-small')?.items).toHaveLength(3);
         expect(payloadByKey.get('mindwtr-ios-widget-payload-medium')?.items).toHaveLength(5);
-        expect(payloadByKey.get('mindwtr-ios-widget-payload-large')?.items).toHaveLength(8);
-        expect(payloadByKey.get('mindwtr-ios-widget-payload')?.items).toHaveLength(5);
+        expect(payloadByKey.get('mindwtr-ios-widget-payload-large')?.items).toHaveLength(12);
+        expect(payloadByKey.get('mindwtr-ios-widget-payload-extra-large')?.items).toHaveLength(24);
+        expect(payloadByKey.get('mindwtr-ios-widget-payload')?.items).toHaveLength(12);
         expect(mockIosWidgetReloadTimelines).toHaveBeenCalledWith('MindwtrTasksWidget');
+        expect(mockIosWidgetReloadTimelines).toHaveBeenCalledWith('MindwtrFocusLockWidget');
     });
 });

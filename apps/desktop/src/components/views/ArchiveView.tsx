@@ -1,6 +1,6 @@
 import { memo, useMemo, useState, useEffect, useCallback, useLayoutEffect, useRef, type UIEvent } from 'react';
 import { ErrorBoundary } from '../ErrorBoundary';
-import { shallow, useTaskStore, sortTasksBy, safeFormatDate } from '@mindwtr/core';
+import { shallow, useTaskStore, sortTasksBy, safeFormatDate, tFallback } from '@mindwtr/core';
 import type { Task, TaskSortBy } from '@mindwtr/core';
 
 import { Undo2, Trash2 } from 'lucide-react';
@@ -8,6 +8,8 @@ import { useLanguage } from '../../contexts/language-context';
 import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
 import { useConfirmDialog } from '../../hooks/useConfirmDialog';
+import { PromptModal } from '../PromptModal';
+import { toDateTimeLocalValue } from '../Task/task-item-helpers';
 import {
     LIST_VIRTUALIZATION_THRESHOLD,
     LIST_VIRTUAL_ROW_ESTIMATE,
@@ -19,6 +21,7 @@ type ArchiveTaskRowInnerProps = {
     task: Task;
     onRestore: (taskId: string) => void;
     onDelete: (taskId: string) => void;
+    onEditCompletedAt: (taskId: string) => void;
     t: (key: string) => string;
 };
 
@@ -26,14 +29,17 @@ const ArchiveTaskRowInner = memo(function ArchiveTaskRowInner({
     task,
     onRestore,
     onDelete,
+    onEditCompletedAt,
     t,
 }: ArchiveTaskRowInnerProps) {
     const handleRestore = useCallback(() => onRestore(task.id), [onRestore, task.id]);
     const handleDelete = useCallback(() => onDelete(task.id), [onDelete, task.id]);
+    const handleEditCompletedAt = useCallback(() => onEditCompletedAt(task.id), [onEditCompletedAt, task.id]);
     const completionTimestamp = task.completedAt || task.updatedAt;
     const completedLabel = t('list.done') || 'Completed';
-    const metadataParts = [
-        `${completedLabel}: ${completionTimestamp ? safeFormatDate(completionTimestamp, 'Pp', completionTimestamp) : 'Unknown'}`,
+    const editCompletedAtLabel = tFallback(t, 'task.editCompletedAt', 'Edit completion time');
+    const completedText = `${completedLabel}: ${completionTimestamp ? safeFormatDate(completionTimestamp, 'Pp', completionTimestamp) : 'Unknown'}`;
+    const otherMetadataParts = [
         task.dueDate ? `${t('taskEdit.dueDateLabel')}: ${safeFormatDate(task.dueDate, 'P')}` : '',
         ...(task.contexts ?? []),
     ].filter(Boolean);
@@ -43,7 +49,16 @@ const ArchiveTaskRowInner = memo(function ArchiveTaskRowInner({
             <div>
                 <h3 className="font-medium text-foreground line-through opacity-70">{task.title}</h3>
                 <p className="text-xs text-muted-foreground mt-1">
-                    {metadataParts.join(' • ')}
+                    <button
+                        type="button"
+                        onClick={handleEditCompletedAt}
+                        title={editCompletedAtLabel}
+                        aria-label={editCompletedAtLabel}
+                        className="hover:text-foreground hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 transition-colors"
+                    >
+                        {completedText}
+                    </button>
+                    {otherMetadataParts.length > 0 ? ` • ${otherMetadataParts.join(' • ')}` : ''}
                 </p>
             </div>
             <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -76,6 +91,7 @@ const VirtualArchiveTaskRow = memo(function VirtualArchiveTaskRow({
     top,
     onRestore,
     onDelete,
+    onEditCompletedAt,
     onMeasure,
     t,
 }: VirtualArchiveTaskRowProps) {
@@ -91,7 +107,7 @@ const VirtualArchiveTaskRow = memo(function VirtualArchiveTaskRow({
     return (
         <div ref={rowRef} style={{ position: 'absolute', top, left: 0, right: 0 }}>
             <div className="border-b border-border/30">
-                <ArchiveTaskRowInner task={task} onRestore={onRestore} onDelete={onDelete} t={t} />
+                <ArchiveTaskRowInner task={task} onRestore={onRestore} onDelete={onDelete} onEditCompletedAt={onEditCompletedAt} t={t} />
             </div>
         </div>
     );
@@ -111,6 +127,7 @@ export function ArchiveView() {
     const { t } = useLanguage();
     const { requestConfirmation, confirmModal } = useConfirmDialog();
     const [searchQuery, setSearchQuery] = useState('');
+    const [completedAtTaskId, setCompletedAtTaskId] = useState<string | null>(null);
     const listScrollRef = useRef<HTMLDivElement>(null);
     const rowHeightsRef = useRef<Map<string, number>>(new Map());
     const [measureVersion, setMeasureVersion] = useState(0);
@@ -181,6 +198,19 @@ export function ArchiveView() {
         updateTask(taskId, { status: 'inbox' }); // Restore to inbox? Or previous status? Inbox is safest.
     }, [updateTask]);
 
+    const handleEditCompletedAt = useCallback((taskId: string) => {
+        setCompletedAtTaskId(taskId);
+    }, []);
+
+    const applyCompletedAt = useCallback((value: string) => {
+        const taskId = completedAtTaskId;
+        setCompletedAtTaskId(null);
+        if (!taskId) return;
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return;
+        updateTask(taskId, { completedAt: parsed.toISOString() });
+    }, [completedAtTaskId, updateTask]);
+
     const handleDelete = useCallback(async (taskId: string) => {
         const task = _allTasks.find((item) => item.id === taskId);
         if (!task) return;
@@ -236,6 +266,7 @@ export function ArchiveView() {
                                     onMeasure={handleVirtualRowMeasure}
                                     onRestore={handleRestore}
                                     onDelete={handleDelete}
+                                    onEditCompletedAt={handleEditCompletedAt}
                                     t={t}
                                 />
                             );
@@ -249,6 +280,7 @@ export function ArchiveView() {
                                 task={task}
                                 onRestore={handleRestore}
                                 onDelete={handleDelete}
+                                onEditCompletedAt={handleEditCompletedAt}
                                 t={t}
                             />
                         ))}
@@ -257,6 +289,23 @@ export function ArchiveView() {
             </div>
             </div>
             {confirmModal}
+            {completedAtTaskId && (
+                <PromptModal
+                    isOpen
+                    title={tFallback(t, 'task.completedAtPromptTitle', 'Completion time')}
+                    defaultValue={toDateTimeLocalValue(
+                        (() => {
+                            const task = _allTasks.find((item) => item.id === completedAtTaskId);
+                            return task ? (task.completedAt || task.updatedAt) : undefined;
+                        })()
+                    )}
+                    inputType="datetime-local"
+                    confirmLabel={t('common.save')}
+                    cancelLabel={t('common.cancel')}
+                    onCancel={() => setCompletedAtTaskId(null)}
+                    onConfirm={applyCompletedAt}
+                />
+            )}
         </ErrorBoundary>
     );
 }

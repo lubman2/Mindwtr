@@ -1,6 +1,6 @@
 import React from 'react';
 import { ScrollView, Text, TouchableOpacity, View } from 'react-native';
-import { ArrowUpDown, SlidersHorizontal, X } from 'lucide-react-native';
+import { ArrowUpDown, Folder, SlidersHorizontal, X } from 'lucide-react-native';
 
 import { styles } from './task-list.styles';
 
@@ -25,11 +25,14 @@ type TaskListHeaderProps = {
   count: number;
   headerAccessory?: React.ReactNode;
   filterActiveCount: number;
+  groupByLabel?: string;
   hasActiveFilters: boolean;
   onClearFilters: () => void;
   onOpenFilters: () => void;
+  onOpenGroup?: () => void;
   onOpenSort: () => void;
   showHeader: boolean;
+  showFilterButton?: boolean;
   showSort: boolean;
   sortByLabel: string;
   t: (key: string) => string;
@@ -42,11 +45,14 @@ export function TaskListHeader({
   count,
   headerAccessory,
   filterActiveCount,
+  groupByLabel,
   hasActiveFilters,
   onClearFilters,
   onOpenFilters,
+  onOpenGroup,
   onOpenSort,
   showHeader,
+  showFilterButton = true,
   showSort,
   sortByLabel,
   t,
@@ -54,6 +60,7 @@ export function TaskListHeader({
   title,
 }: TaskListHeaderProps) {
   const filtersLabel = t('filters.label') === 'filters.label' ? 'Filters' : t('filters.label');
+  const groupLabel = t('list.groupBy') === 'list.groupBy' ? 'Group' : t('list.groupBy');
   const clearLabel = t('filters.clear') === 'filters.clear' ? t('common.clear') : t('filters.clear');
   const removeFilterLabel = t('filters.remove') === 'filters.remove' ? 'Remove filter' : t('filters.remove');
   const sortControl = showSort ? (
@@ -70,7 +77,7 @@ export function TaskListHeader({
       <ArrowUpDown size={16} color={themeColors.secondaryText} strokeWidth={2} />
     </TouchableOpacity>
   ) : null;
-  const filterControl = (
+  const filterControl = showFilterButton ? (
     <TouchableOpacity
       onPress={onOpenFilters}
       style={[
@@ -93,7 +100,21 @@ export function TaskListHeader({
         </View>
       ) : null}
     </TouchableOpacity>
-  );
+  ) : null;
+  const groupControl = onOpenGroup ? (
+    <TouchableOpacity
+      onPress={onOpenGroup}
+      style={[
+        styles.sortButton,
+        { borderColor: themeColors.border, backgroundColor: themeColors.filterBg },
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel={`${groupLabel}: ${groupByLabel ?? ''}`}
+      hitSlop={8}
+    >
+      <Folder size={16} color={themeColors.secondaryText} strokeWidth={2} />
+    </TouchableOpacity>
+  ) : null;
   return (
     <>
       {showHeader ? (
@@ -108,15 +129,17 @@ export function TaskListHeader({
           </View>
           <View style={styles.headerActions}>
             {sortControl}
+            {groupControl}
             {filterControl}
             {headerAccessory}
           </View>
         </View>
-      ) : sortControl || filterControl || headerAccessory ? (
+      ) : sortControl || groupControl || filterControl || headerAccessory ? (
         <View style={styles.headerAccessoryRow}>
           <View style={styles.headerAccessoryLeft}>
             <View style={styles.headerAccessoryControls}>
               {sortControl}
+              {groupControl}
               {filterControl}
             </View>
           </View>

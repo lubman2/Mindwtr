@@ -2,7 +2,7 @@ import React from 'react';
 
 import { parseInlineMarkdown } from '@mindwtr/core';
 import { cn } from '../lib/utils';
-import { InternalMarkdownLink } from './InternalMarkdownLink';
+import { InternalMarkdownLink, type InternalMarkdownLinkContext, useInternalMarkdownLinkContext } from './InternalMarkdownLink';
 
 const TASK_LIST_RE = /^\s{0,3}(?:[-*+]\s+)?\[( |x|X)\]\s+(.+)$/;
 const BULLET_LIST_RE = /^\s{0,3}[-*+]\s+(.+)$/;
@@ -20,7 +20,7 @@ function isBlockBoundary(line: string): boolean {
     return false;
 }
 
-function renderInline(text: string, options?: { interactiveLinks?: boolean }): React.ReactNode[] {
+function renderInline(text: string, options: { interactiveLinks?: boolean; linkContext?: InternalMarkdownLinkContext }): React.ReactNode[] {
     return parseInlineMarkdown(text).map((token, index) => {
         if (token.type === 'text') return token.text;
         if (token.type === 'code') {
@@ -40,7 +40,7 @@ function renderInline(text: string, options?: { interactiveLinks?: boolean }): R
             return <del key={`strike-${index}`}>{token.text}</del>;
         }
         if (token.type === 'link') {
-            if (options?.interactiveLinks === false) {
+            if (options?.interactiveLinks === false || !options.linkContext) {
                 return (
                     <span key={`link-${index}`} className="text-primary underline underline-offset-2">
                         {token.text}
@@ -52,6 +52,7 @@ function renderInline(text: string, options?: { interactiveLinks?: boolean }): R
                     key={`link-${index}`}
                     href={token.href}
                     className="text-primary underline underline-offset-2 hover:opacity-90"
+                    linkContext={options.linkContext}
                 >
                     {token.text}
                 </InternalMarkdownLink>
@@ -70,10 +71,21 @@ export function InlineMarkdown({
     className?: string;
     interactiveLinks?: boolean;
 }) {
-    return <span className={className}>{renderInline(markdown || '', { interactiveLinks })}</span>;
+    if (interactiveLinks === false) {
+        return <span className={className}>{renderInline(markdown || '', { interactiveLinks: false })}</span>;
+    }
+
+    return <InteractiveInlineMarkdown markdown={markdown} className={className} />;
+}
+
+function InteractiveInlineMarkdown({ markdown, className }: { markdown: string; className?: string }) {
+    const linkContext = useInternalMarkdownLinkContext();
+
+    return <span className={className}>{renderInline(markdown || '', { linkContext })}</span>;
 }
 
 export function Markdown({ markdown, className }: { markdown: string; className?: string }) {
+    const linkContext = useInternalMarkdownLinkContext();
     const source = (markdown || '').replace(/\r\n/g, '\n');
     const lines = source.split('\n');
     const blocks: React.ReactNode[] = [];
@@ -114,7 +126,7 @@ export function Markdown({ markdown, className }: { markdown: string; className?
             const HeadingTag = level === 1 ? 'h3' : level === 2 ? 'h4' : 'h5';
             blocks.push(
                 <HeadingTag key={`h-${i}`} className={cn('font-semibold', level === 1 ? 'text-base' : 'text-sm')}>
-                    {renderInline(text)}
+                    {renderInline(text, { linkContext })}
                 </HeadingTag>
             );
             i += 1;
@@ -148,7 +160,7 @@ export function Markdown({ markdown, className }: { markdown: string; className?
                                 disabled
                                 className="mt-0.5 h-3.5 w-3.5 rounded border-border"
                             />
-                            <span>{renderInline(item.text)}</span>
+                            <span>{renderInline(item.text, { linkContext })}</span>
                         </li>
                     ))}
                 </ul>
@@ -169,7 +181,7 @@ export function Markdown({ markdown, className }: { markdown: string; className?
             blocks.push(
                 <ul key={`ul-${start}`} className="list-disc pl-5 space-y-1">
                     {items.map((item, idx) => (
-                        <li key={idx}>{renderInline(item)}</li>
+                        <li key={idx}>{renderInline(item, { linkContext })}</li>
                     ))}
                 </ul>
             );
@@ -185,7 +197,7 @@ export function Markdown({ markdown, className }: { markdown: string; className?
         if (text) {
             blocks.push(
                 <p key={`p-${i}`} className="leading-relaxed">
-                    {renderInline(text)}
+                    {renderInline(text, { linkContext })}
                 </p>
             );
         }

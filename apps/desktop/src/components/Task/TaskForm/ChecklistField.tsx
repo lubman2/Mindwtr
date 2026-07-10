@@ -20,7 +20,9 @@ import {
     applyMarkdownKeyboardShortcut,
     applyMarkdownPairInsertion,
     generateUUID,
-    syncMarkdownChecklistWithCanonical,
+    isMarkdownEditorAssistEnabled,
+    parsePastedChecklistItems,
+    useTaskStore,
     type MarkdownSelection,
     type MarkdownToolbarResult,
     type Task,
@@ -37,8 +39,6 @@ type ChecklistFieldProps = {
     t: (key: string) => string;
     taskId: string;
     checklist: Task['checklist'];
-    description?: string;
-    onDescriptionSync?: (description: string) => void;
     updateTask: (taskId: string, updates: Partial<Task>) => void;
     resetTaskChecklist: (taskId: string) => void;
 };
@@ -149,11 +149,10 @@ export function ChecklistField({
     t,
     taskId,
     checklist,
-    description,
-    onDescriptionSync,
     updateTask,
     resetTaskChecklist,
 }: ChecklistFieldProps) {
+    const markdownEditorAssist = useTaskStore((state) => isMarkdownEditorAssistEnabled(state.settings));
     const [checklistDraft, setChecklistDraft] = useState<Task['checklist']>(checklist || []);
     const checklistDraftRef = useRef<Task['checklist']>(checklist || []);
     const checklistDirtyRef = useRef(false);
@@ -161,11 +160,7 @@ export function ChecklistField({
     const checklistSelectionRefs = useRef<Array<MarkdownSelection>>([]);
     const lastChecklistPairSelectionRefs = useRef<Array<{ value: string; selection: MarkdownSelection } | null>>([]);
 
-    useEffect(() => {
-        setChecklistDraft(checklist || []);
-        checklistDraftRef.current = checklist || [];
-        checklistDirtyRef.current = false;
-    }, [taskId, checklist]);
+    const lastTaskIdRef = useRef(taskId);
 
     useEffect(() => {
         checklistInputRefs.current = [];
@@ -173,13 +168,18 @@ export function ChecklistField({
         lastChecklistPairSelectionRefs.current = [];
     }, [taskId]);
 
+    // Adopt external checklist changes, but never clobber in-progress typing:
+    // a dirty draft only resets when switching to a different task.
     useEffect(() => {
-        if (checklistDirtyRef.current) return;
+        const taskChanged = lastTaskIdRef.current !== taskId;
+        lastTaskIdRef.current = taskId;
+        if (!taskChanged && checklistDirtyRef.current) return;
         const incoming = checklist || [];
-        if (areChecklistsEqual(incoming, checklistDraftRef.current)) return;
+        if (!taskChanged && areChecklistsEqual(incoming, checklistDraftRef.current)) return;
         setChecklistDraft(incoming);
         checklistDraftRef.current = incoming;
-    }, [checklist]);
+        checklistDirtyRef.current = false;
+    }, [taskId, checklist]);
 
     const updateChecklistDraft = useCallback((next: Task['checklist']) => {
         setChecklistDraft(next);
@@ -188,15 +188,8 @@ export function ChecklistField({
     }, []);
 
     const commitChecklistUpdate = useCallback((nextChecklist: Task['checklist']) => {
-        const nextDescription = syncMarkdownChecklistWithCanonical(description, nextChecklist);
-        if (nextDescription !== description) {
-            onDescriptionSync?.(nextDescription ?? '');
-        }
-        updateTask(taskId, {
-            checklist: nextChecklist,
-            ...(nextDescription !== description ? { description: nextDescription } : {}),
-        });
-    }, [description, onDescriptionSync, taskId, updateTask]);
+        updateTask(taskId, { checklist: nextChecklist });
+    }, [taskId, updateTask]);
 
     const commitChecklistDraft = useCallback((next?: Task['checklist']) => {
         const payload = next ?? checklistDraftRef.current;
@@ -272,6 +265,47 @@ export function ChecklistField({
         restoreInputSelection(source, result.selection);
     }, [restoreInputSelection, updateChecklistItemTitle]);
 
+    const handleChecklistPaste = useCallback((index: number, event: React.ClipboardEvent<HTMLInputElement>) => {
+        const text = event.clipboardData?.getData('text/plain') ?? '';
+        const normalized = text.replace(/\r\n?/g, '\n');
+        if (!normalized.includes('\n')) return;
+        event.preventDefault();
+        const list = checklistDraftRef.current || [];
+        const current = list[index];
+        if (!current) return;
+        const selection = getInputSelection(event.currentTarget);
+        const newlineIndex = normalized.indexOf('\n');
+        const firstSegment = normalized.slice(0, newlineIndex);
+        const restItems = parsePastedChecklistItems(normalized.slice(newlineIndex + 1));
+        const replacingWholeTitle = selection.start === 0 && selection.end === current.title.length;
+        // Replacing the whole title is a list import (markers stripped); a
+        // mid-text paste splices the raw first segment like a plain text edit.
+        const firstParsed = parsePastedChecklistItems(firstSegment)[0];
+        const updatedCurrent = replacingWholeTitle
+            ? {
+                ...current,
+                title: firstParsed?.title ?? '',
+                isCompleted: current.isCompleted || (firstParsed?.isCompleted ?? false),
+            }
+            : {
+                ...current,
+                title: `${current.title.slice(0, selection.start)}${firstSegment}${current.title.slice(selection.end)}`,
+            };
+        const cursor = replacingWholeTitle ? updatedCurrent.title.length : selection.start + firstSegment.length;
+        checklistSelectionRefs.current[index] = { start: cursor, end: cursor };
+        lastChecklistPairSelectionRefs.current[index] = null;
+        const inserted = restItems.map((item) => ({
+            id: generateUUID(),
+            title: item.title,
+            isCompleted: item.isCompleted,
+        }));
+        const nextList = [...list.slice(0, index), updatedCurrent, ...inserted, ...list.slice(index + 1)];
+        setChecklistDraft(nextList);
+        checklistDraftRef.current = nextList;
+        checklistDirtyRef.current = false;
+        commitChecklistUpdate(nextList);
+    }, [commitChecklistUpdate, getInputSelection]);
+
     const handleChecklistDragEnd = useCallback((event: DragEndEvent) => {
         const { active, over } = event;
         if (!over || active.id === over.id) return;
@@ -340,6 +374,7 @@ export function ChecklistField({
                                                     item.title,
                                                     event.target.value,
                                                     previousSelection,
+                                                    { assist: markdownEditorAssist },
                                                 );
                                                 if (pairedInsertion) {
                                                     applyChecklistMarkdownResult(index, pairedInsertion, event.currentTarget, true);
@@ -348,6 +383,9 @@ export function ChecklistField({
                                                 lastChecklistPairSelectionRefs.current[index] = null;
                                                 updateChecklistItemTitle(index, event.target.value);
                                                 checklistSelectionRefs.current[index] = getInputSelection(event.currentTarget);
+                                            }}
+                                            onPaste={(event) => {
+                                                handleChecklistPaste(index, event);
                                             }}
                                             onBlur={() => {
                                                 commitChecklistDraft();
@@ -388,6 +426,7 @@ export function ChecklistField({
                                                         currentValue,
                                                         `${currentValue.slice(0, selection.start)}${event.key}${currentValue.slice(selection.end)}`,
                                                         selection,
+                                                        { assist: markdownEditorAssist },
                                                     );
                                                     if (!next) return;
                                                     event.preventDefault();

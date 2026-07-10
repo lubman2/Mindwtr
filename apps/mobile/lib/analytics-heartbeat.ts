@@ -1,5 +1,4 @@
 import { Platform } from 'react-native';
-import * as Application from 'expo-application';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import {
@@ -36,6 +35,17 @@ export function isMobileAnalyticsHeartbeatConfigured({
   return !isExpoGo && Boolean(analyticsHeartbeatUrl.trim());
 }
 
+export function resolveMobileAnalyticsVersion(
+  baseVersion: string,
+  releaseVersion?: string | null
+): string {
+  const base = String(baseVersion || '').trim() || '0.0.0';
+  const release = String(releaseVersion || '').trim().replace(/^v/i, '');
+  if (!release || release === base) return base;
+  if (release.startsWith(`${base}-`)) return release;
+  return base;
+}
+
 function canSendMobileAnalyticsHeartbeat(config: MobileAnalyticsHeartbeatConfig): boolean {
   return isMobileAnalyticsHeartbeatConfigured(config) && !__DEV__;
 }
@@ -48,13 +58,11 @@ async function getMobileAnalyticsChannel(
   if (channel) return channel;
   if (Platform.OS === 'ios') return 'app-store';
   if (Platform.OS !== 'android') return Platform.OS || 'mobile';
-  if (isFossBuild) return 'fdroid';
-  try {
-    const referrer = await Application.getInstallReferrerAsync();
-    return (referrer || '').trim() ? 'play-store' : 'android-sideload';
-  } catch {
-    return 'android-unknown';
-  }
+  // Release builds bake ANALYTICS_HEARTBEAT_CHANNEL (play-store, android-internal-test,
+  // android-direct), so this fallback only fires for builds without one. The old
+  // install-referrer probe is gone: testing-track installs carry no referrer and the
+  // API can reject, which misfiled Play testers as android-sideload/android-unknown.
+  return isFossBuild ? 'fdroid' : 'play-store';
 }
 
 async function getOrCreateAnalyticsDistinctId(): Promise<string> {

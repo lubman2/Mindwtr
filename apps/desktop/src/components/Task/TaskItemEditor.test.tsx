@@ -44,6 +44,10 @@ const baseProps: Parameters<typeof TaskItemEditor>[0] = {
     t,
     editTitle: 'Reserve acupuncture',
     setEditTitle: vi.fn(),
+    editContexts: '',
+    setEditContexts: vi.fn(),
+    editTags: '',
+    setEditTags: vi.fn(),
     autoFocusTitle: false,
     resetCopilotDraft: vi.fn(),
     aiEnabled: false,
@@ -115,6 +119,22 @@ describe('TaskItemEditor', () => {
         expect(queryByText('field:contexts')).not.toBeInTheDocument();
         expect(queryByText('field:description')).not.toBeInTheDocument();
         expect(queryByText('Location')).not.toBeInTheDocument();
+    });
+
+    it('does not render optional sections that have no fields', () => {
+        const { getByRole, queryByRole } = render(
+            <TaskItemEditor
+                {...baseProps}
+                schedulingFields={[]}
+                organizationFields={['contexts']}
+                detailsFields={[]}
+                sectionCounts={{ scheduling: 0, organization: 0, details: 0 }}
+            />
+        );
+
+        expect(queryByRole('button', { name: /Scheduling/i })).not.toBeInTheDocument();
+        expect(getByRole('button', { name: /Organization/i })).toBeInTheDocument();
+        expect(queryByRole('button', { name: /Details/i })).not.toBeInTheDocument();
     });
 
     it('shows a visible loading label while AI is working', () => {

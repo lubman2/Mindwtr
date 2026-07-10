@@ -42,10 +42,30 @@ vi.mock('@mindwtr/core', () => ({
   cloudDeleteFile: vi.fn(),
   cloudPutFile: vi.fn(),
   isAbortError: vi.fn().mockReturnValue(false),
+  isDropboxUnauthorizedError: vi.fn((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.toLowerCase().includes('unauthorized') || message.includes('401');
+  }),
   computeSha256Hex: vi.fn().mockResolvedValue(null),
+  markAttachmentUnrecoverable: vi.fn((attachment: Attachment) => {
+    attachment.cloudKey = undefined;
+    attachment.fileHash = undefined;
+    attachment.localStatus = 'missing';
+    attachment.deletedAt = attachment.deletedAt || new Date().toISOString();
+    attachment.updatedAt = new Date().toISOString();
+    return true;
+  }),
   globalProgressTracker: {
     updateProgress: vi.fn(),
   },
+  decodeUriSafe: vi.fn((value: string) => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }),
+  sleep: vi.fn().mockResolvedValue(undefined),
   webdavGetFile: vi.fn(),
   webdavFileExists: vi.fn(),
   webdavMakeDirectory: vi.fn(),
@@ -128,6 +148,46 @@ describe('attachment sync', () => {
     expect(result.uri).toBe('file://document/attachments/att-1.png');
     expect(result.localStatus).toBe('available');
     expect(result.size).toBe(3);
+  });
+
+  it('persists local file attachments by reading bytes when direct copy fails', async () => {
+    const sourceUri = 'file://document/mindwtr-audio-20260628-225702.m4a';
+    fileSystemMock.getInfoAsync.mockResolvedValueOnce({ exists: false });
+    fileSystemMock.copyAsync.mockRejectedValue(new Error('copy failed'));
+    fileSystemMock.readAsStringAsync.mockResolvedValue('AQID');
+
+    const { persistAttachmentLocally } = await import('./attachment-sync');
+
+    const result = await persistAttachmentLocally({
+      id: 'audio-1',
+      kind: 'file',
+      title: 'Audio Note.m4a',
+      uri: sourceUri,
+      mimeType: 'audio/mp4',
+      size: 112780,
+      createdAt: '2026-06-29T02:57:02.559Z',
+      updatedAt: '2026-06-29T02:57:02.559Z',
+      localStatus: 'available',
+    });
+
+    expect(fileSystemMock.copyAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        from: sourceUri,
+        to: expect.stringMatching(/^file:\/\/document\/attachments\/audio-1\.m4a\.tmp-/),
+      })
+    );
+    expect(fileSystemMock.readAsStringAsync).toHaveBeenCalledWith(
+      sourceUri,
+      { encoding: 'base64' }
+    );
+    expect(fileSystemMock.writeAsStringAsync).toHaveBeenCalledWith(
+      expect.stringMatching(/^file:\/\/document\/attachments\/audio-1\.m4a\.tmp-/),
+      'AQID',
+      { encoding: 'base64' }
+    );
+    expect(result.uri).toBe('file://document/attachments/audio-1.m4a');
+    expect(result.localStatus).toBe('available');
+    expect(result.size).toBe(112780);
   });
 
   it('normalizes legacy content-uri attachments when ensuring availability', async () => {
@@ -705,6 +765,7 @@ describe('attachment sync', () => {
       return { exists: false };
     });
     fileSystemMock.copyAsync.mockRejectedValueOnce(new Error('copy failed'));
+    fileSystemMock.writeAsStringAsync.mockRejectedValueOnce(new Error('write failed'));
     fileSystemMock.readAsStringAsync.mockResolvedValue('AQID');
     const core = await import('@mindwtr/core');
     const appData: AppData = {

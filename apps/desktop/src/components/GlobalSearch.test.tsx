@@ -59,10 +59,9 @@ describe('GlobalSearch', () => {
         useTaskStore.setState(initialTaskState, true);
         useUiStore.setState(initialUiState, true);
         useTaskStore.setState({
-            tasks,
             _allTasks: tasks,
-            projects: [],
-            areas,
+            _allProjects: [],
+            _allAreas: areas,
             settings: {
                 filters: {
                     areaId: 'area-work',

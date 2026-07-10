@@ -4,12 +4,12 @@ import { DarkTheme, DefaultTheme, ThemeProvider as NavigationThemeProvider } fro
 import * as Application from 'expo-application';
 import Constants from 'expo-constants';
 import * as Linking from 'expo-linking';
-import { Stack, usePathname, useRouter } from 'expo-router';
+import { Stack, useGlobalSearchParams, usePathname, useRouter } from 'expo-router';
 import 'react-native-reanimated';
 import * as SplashScreen from 'expo-splash-screen';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { BackHandler, Platform, SafeAreaView, StatusBar, Text, View } from 'react-native';
+import { AppState, BackHandler, Platform, SafeAreaView, StatusBar, Text, View } from 'react-native';
 import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 import { QuickCaptureProvider, type QuickCaptureOptions } from '../contexts/quick-capture-context';
 import { ToastProvider, useToast } from '../contexts/toast-context';
@@ -26,6 +26,7 @@ import {
   getAnnouncementDismissalStorageKey,
   isSupportedLanguage,
   recordDonationPromptShown,
+  recordDonationPromptSupportClicked,
   recordUpdateReminderChecked,
   recordUpdateReminderDismissed,
   recordUpdateReminderShown,
@@ -41,15 +42,17 @@ import {
   type AppAnnouncementAction,
 } from '@mindwtr/core';
 import { mobileStorage } from '../lib/storage-adapter';
+import { keepPersistentCaptureNotificationArmed } from '../lib/persistent-capture-notification';
 import { markStartupPhase } from '../lib/startup-profiler';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { logError, logInfo, logWarn, setupGlobalErrorLogging } from '../lib/app-log';
-import { useMobileAreaFilter } from '../hooks/use-mobile-area-filter';
 import { useThemeColors } from '../hooks/use-theme-colors';
 import { useRootLayoutContextAutomation } from '@/hooks/root-layout/use-root-layout-context-automation';
 import { useRootLayoutExternalCapture } from '@/hooks/root-layout/use-root-layout-external-capture';
+import { useRootLayoutPendingCaptures } from '@/hooks/root-layout/use-root-layout-pending-captures';
 import { useRootLayoutNotificationOpenHandler } from '@/hooks/root-layout/use-root-layout-notification-open-handler';
 import { useRootLayoutStartup } from '@/hooks/root-layout/use-root-layout-startup';
+import { resolveMobileAnalyticsVersion } from '@/lib/analytics-heartbeat';
 import { useRootLayoutSyncEffects } from '@/hooks/root-layout/use-root-layout-sync-effects';
 import { ProjectNextActionPromptProvider } from '@/components/project-next-action-prompt';
 import { ThemedAlertProvider } from '@/components/themed-alert';
@@ -73,6 +76,7 @@ import {
 } from '@/lib/mobile-onboarding-events';
 import { SYNC_BACKEND_KEY } from '@/lib/sync-constants';
 import { coerceSupportedBackend, resolveBackend } from '@/lib/sync-service-utils';
+import { persistLastRoute } from '@/lib/session-restore';
 
 let coreLoggerBridgeInstalled = false;
 
@@ -126,6 +130,7 @@ type MobileExtraConfig = {
   isFossBuild?: boolean | string;
   analyticsHeartbeatUrl?: string;
   analyticsHeartbeatChannel?: string;
+  analyticsReleaseVersion?: string;
   donationPromptEnabled?: boolean | string;
   promptTestControlsEnabled?: boolean | string;
 };
@@ -142,6 +147,7 @@ const resolveMobileDonationPromptAllowed = async (options: {
   return Platform.OS === 'android' || Platform.OS === 'ios';
 };
 
+const DONATION_PROMPT_STARTUP_DELAY_MS = 2000;
 const UPDATE_REMINDER_RELEASES_API = 'https://api.github.com/repos/dongdongbh/Mindwtr/releases/latest';
 const UPDATE_REMINDER_RELEASES_URL = 'https://github.com/dongdongbh/Mindwtr/releases/latest';
 const APP_STORE_APP_ID = '6758597144';
@@ -337,11 +343,13 @@ function RootLayoutContentInner() {
   const isFossBuild = parseBool(extraConfig?.isFossBuild);
   const analyticsHeartbeatUrl = String(extraConfig?.analyticsHeartbeatUrl || '').trim();
   const analyticsHeartbeatChannel = String(extraConfig?.analyticsHeartbeatChannel || '').trim();
+  const analyticsReleaseVersion = String(extraConfig?.analyticsReleaseVersion || '').trim();
   const donationPromptEnabled = parseBool(extraConfig?.donationPromptEnabled);
   const promptTestControlsEnabled = process.env.NODE_ENV !== 'test'
     && (__DEV__ || parseBool(extraConfig?.promptTestControlsEnabled));
   const isExpoGo = Constants.appOwnership === 'expo';
   const appVersion = Constants.expoConfig?.version ?? '0.0.0';
+  const analyticsAppVersion = resolveMobileAnalyticsVersion(appVersion, analyticsReleaseVersion);
   const settingsLanguage = useTaskStore((state) => state.settings?.language);
   const settingsDateFormat = useTaskStore((state) => state.settings?.dateFormat);
   const settingsCalendarSystem = useTaskStore((state) => state.settings?.calendarSystem);
@@ -352,7 +360,6 @@ function RootLayoutContentInner() {
     state.tasks.length + state.projects.length + state.sections.length + state.areas.length
   ));
   const firstRenderLogged = useRef(false);
-  const { selectedAreaIdForNewTasks } = useMobileAreaFilter();
   const [mobileOnboardingDismissed, setMobileOnboardingDismissed] = useState(false);
   const [mobileOnboardingDismissalLoaded, setMobileOnboardingDismissalLoaded] = useState(false);
   const [mobileOnboardingOpen, setMobileOnboardingOpen] = useState(false);
@@ -379,13 +386,26 @@ function RootLayoutContentInner() {
     translateWithFallback(t, key, fallback)
   ), [t]);
 
+  const donationPromptAnnouncement = useMemo<AppAnnouncement>(() => ({
+    ...DONATION_PROMPT_ANNOUNCEMENT,
+    title: resolveText('donationPrompt.title', DONATION_PROMPT_ANNOUNCEMENT.title),
+    body: resolveText('donationPrompt.body', DONATION_PROMPT_ANNOUNCEMENT.body),
+    dismissLabel: resolveText(
+      'donationPrompt.dismiss',
+      DONATION_PROMPT_ANNOUNCEMENT.dismissLabel ?? DONATION_PROMPT_ANNOUNCEMENT.title,
+    ),
+    action: DONATION_PROMPT_ANNOUNCEMENT.action
+      ? {
+        ...DONATION_PROMPT_ANNOUNCEMENT.action,
+        label: resolveText('donationPrompt.action', DONATION_PROMPT_ANNOUNCEMENT.action.label),
+      }
+      : undefined,
+  }), [resolveText]);
+
   const buildQuickCaptureInitialProps = useCallback((initialProps?: QuickCaptureOptions['initialProps']) => {
     const nextInitialProps = initialProps ? { ...initialProps } : {};
-    if (!nextInitialProps.projectId && !nextInitialProps.areaId && selectedAreaIdForNewTasks) {
-      nextInitialProps.areaId = selectedAreaIdForNewTasks;
-    }
     return Object.keys(nextInitialProps).length > 0 ? nextInitialProps : undefined;
-  }, [selectedAreaIdForNewTasks]);
+  }, []);
 
   const openSyncSettings = useCallback(() => {
     router.push({ pathname: '/settings', params: { settingsScreen: 'sync' } } as never);
@@ -410,7 +430,7 @@ function RootLayoutContentInner() {
   const { dataReady } = useRootLayoutStartup({
     analyticsHeartbeatUrl,
     analyticsHeartbeatChannel,
-    appVersion,
+    appVersion: analyticsAppVersion,
     isExpoGo,
     isFossBuild,
     requestSync,
@@ -424,6 +444,17 @@ function RootLayoutContentInner() {
     pathname,
     router,
   });
+  // Android drops notifications on reboot and OEMs drop them when they kill
+  // the app process; re-arm the persistent quick-capture notification (when
+  // enabled) on start and on every return to the foreground (#819).
+  useEffect(() => {
+    if (!languageReady || Platform.OS !== 'android') return;
+    return keepPersistentCaptureNotificationArmed(() => ({
+      title: resolveText('captureNotification.title', 'Quick capture'),
+      text: resolveText('captureNotification.text', 'Tap to capture to your Inbox'),
+      channelName: resolveText('captureNotification.channelName', 'Quick capture'),
+    }));
+  }, [languageReady, resolveText]);
   useRootLayoutContextAutomation({
     dataReady,
     incomingUrl,
@@ -441,6 +472,7 @@ function RootLayoutContentInner() {
     shareWebUrl: shareIntent?.webUrl,
     showToast,
   });
+  useRootLayoutPendingCaptures({ dataReady });
 
   if (!firstRenderLogged.current) {
     firstRenderLogged.current = true;
@@ -461,14 +493,35 @@ function RootLayoutContentInner() {
     addBreadcrumb(breadcrumb);
   }, [pathname]);
 
+  // Remember the screen the user is on so a reopen shortly after the OS kills
+  // the app resumes there instead of resetting to Focus (#842).
+  const globalSearchParams = useGlobalSearchParams<{ projectId?: string }>();
+  const routeProjectId = typeof globalSearchParams.projectId === 'string' ? globalSearchParams.projectId : undefined;
+  const lastRouteRef = useRef<{ pathname: string; projectId?: string }>({ pathname });
+  useEffect(() => {
+    lastRouteRef.current = { pathname, projectId: routeProjectId };
+    void persistLastRoute(pathname, routeProjectId ? { projectId: routeProjectId } : undefined);
+  }, [pathname, routeProjectId]);
+  useEffect(() => {
+    // The snapshot timestamp must reflect when the session left the app, not
+    // the last navigation — refresh it whenever the app goes to background.
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'background' && state !== 'inactive') return;
+      const { pathname: lastPathname, projectId } = lastRouteRef.current;
+      void persistLastRoute(lastPathname, projectId ? { projectId } : undefined);
+    });
+    return () => subscription.remove();
+  }, []);
+
   useEffect(() => {
     if (Platform.OS !== 'android' || isExpoGo) return;
     SplashScreen.setOptions({ duration: 0, fade: false });
   }, [isExpoGo]);
 
+  const systemBarsBg = tc.bg;
   useEffect(() => {
-    void applyAndroidSystemBars(tc, isDark);
-  }, [isDark, tc.bg]);
+    void applyAndroidSystemBars({ bg: systemBarsBg }, isDark);
+  }, [isDark, systemBarsBg]);
 
   useEffect(() => {
     if (!settingsLanguage || !isSupportedLanguage(settingsLanguage)) return;
@@ -701,8 +754,25 @@ function RootLayoutContentInner() {
       router.push({ pathname: '/settings', params: { settingsScreen: 'about' } } as never);
       return;
     }
+    updateLocalUserPromptState((state) => recordDonationPromptSupportClicked(state, Date.now()))
+      .catch((error) => {
+        void logWarn('Failed to record donation support action', {
+          scope: 'prompt-state',
+          extra: { error: error instanceof Error ? error.message : String(error) },
+        });
+      });
     openAnnouncementUrl(action.url);
   }, [dismissDonationPrompt, openAnnouncementUrl, router]);
+
+  const recordDonationPromptVisible = useCallback(() => {
+    updateLocalUserPromptState((state) => recordDonationPromptShown(state, Date.now()))
+      .catch((error) => {
+        void logWarn('Failed to record donation prompt state', {
+          scope: 'prompt-state',
+          extra: { error: error instanceof Error ? error.message : String(error) },
+        });
+      });
+  }, []);
 
   const dismissUpdateReminder = useCallback(() => {
     const latestVersion = updateReminderInfo?.latestVersion;
@@ -924,18 +994,8 @@ function RootLayoutContentInner() {
         if (cancelled) return;
         if (!shouldShowDonationPrompt({ nowMs, promptState, donationAllowed: true })) return;
         timer = setTimeout(() => {
-          updateLocalUserPromptState((state) => recordDonationPromptShown(state, nowMs))
-            .then(() => {
-              if (!cancelled) setDonationPromptOpen(true);
-            })
-            .catch((error) => {
-              if (!cancelled) setDonationDismissedInSession(true);
-              void logWarn('Failed to record donation prompt state', {
-                scope: 'prompt-state',
-                extra: { error: error instanceof Error ? error.message : String(error) },
-              });
-            });
-        }, 250);
+          if (!cancelled) setDonationPromptOpen(true);
+        }, DONATION_PROMPT_STARTUP_DELAY_MS);
       })
       .catch((error) => {
         if (!cancelled) setDonationDismissedInSession(true);
@@ -1090,6 +1150,9 @@ function RootLayoutContentInner() {
           if (initialProps) {
             params.set('initialProps', encodeURIComponent(JSON.stringify(initialProps)));
           }
+          if (options?.returnTo) {
+            params.set('returnTo', options.returnTo);
+          }
           const query = params.toString();
           router.push((query ? `/capture-modal?${query}` : '/capture-modal') as never);
         },
@@ -1129,6 +1192,14 @@ function RootLayoutContentInner() {
               }}
             />
             <Stack.Screen
+              name="mind-sweep-modal"
+              options={{
+                headerShown: false,
+                presentation: 'modal',
+                animation: 'slide_from_bottom'
+              }}
+            />
+            <Stack.Screen
               name="check-focus"
               options={{
                 headerShown: false,
@@ -1151,10 +1222,11 @@ function RootLayoutContentInner() {
             onDismiss={dismissAppAnnouncement}
           />
           <AppAnnouncementModal
-            announcement={DONATION_PROMPT_ANNOUNCEMENT}
+            announcement={donationPromptAnnouncement}
             visible={donationPromptOpen && !announcementOpen && !mobileOnboardingOpen}
             onAction={handleDonationPromptAction}
             onDismiss={dismissDonationPrompt}
+            onShown={recordDonationPromptVisible}
           />
           <AppAnnouncementModal
             announcement={updateReminderInfo ? buildUpdateReminderAnnouncement(updateReminderInfo) : null}

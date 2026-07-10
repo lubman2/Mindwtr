@@ -1,8 +1,10 @@
-import type { AppSettings, DefaultProjectFlowMode, FeatureSettings, GtdSettings, TaskEditorFieldId, TaskEditorPresentation, TaskEditorSectionId } from '@mindwtr/core';
+import type { AppSettings, Area, DefaultProjectFlowMode, FeatureSettings, GtdSettings, TaskEditorFieldId, TaskEditorPresentation, TaskEditorSectionId } from '@mindwtr/core';
 import {
     FOCUS_TASK_LIMIT_OPTIONS,
     normalizeClockTimeInput,
     normalizeFocusTaskLimit,
+    getDefaultTaskAreaMode,
+    resolveDefaultNewTaskAreaId,
     sanitizePomodoroDurations,
     translateText,
 } from '@mindwtr/core';
@@ -37,6 +39,10 @@ type Labels = {
     autoArchiveDayUnit: string;
     defaultScheduleTime: string;
     defaultScheduleTimeDesc: string;
+    defaultArea: string;
+    defaultAreaDesc: string;
+    defaultAreaNone: string;
+    defaultAreaActive: string;
     focusTaskLimit: string;
     focusTaskLimitDesc: string;
     defaultProjectFlowMode: string;
@@ -62,6 +68,10 @@ type Labels = {
     captureDefaultAudio: string;
     captureSaveAudio: string;
     captureSaveAudioDesc: string;
+    quickAddAutoClean: string;
+    quickAddAutoCleanDesc: string;
+    markdownEditorAssist: string;
+    markdownEditorAssistDesc: string;
     taskEditorLayout: string;
     taskEditorLayoutDesc: string;
     taskEditorLayoutHint: string;
@@ -118,6 +128,8 @@ type Labels = {
     hidden: string;
 };
 
+const DEFAULT_AREA_ACTIVE_SELECT_VALUE = '__active-area__';
+
 type PomodoroSettings = NonNullable<GtdSettings['pomodoro']>;
 type InboxProcessingSettings = NonNullable<GtdSettings['inboxProcessing']>;
 
@@ -128,6 +140,7 @@ type SettingsGtdPageProps = {
     updateSettings: (updates: Partial<AppSettings>) => Promise<void>;
     showSaved: () => void;
     autoArchiveDays: number;
+    areas: Area[];
 };
 
 type SettingsDisclosureCardProps = {
@@ -180,6 +193,7 @@ export function SettingsGtdPage({
     updateSettings,
     showSaved,
     autoArchiveDays,
+    areas,
 }: SettingsGtdPageProps) {
     const safeSettings = settings ?? ({} as AppSettings);
     const [featuresOpen, setFeaturesOpen] = useState(false);
@@ -220,7 +234,17 @@ export function SettingsGtdPage({
         ? 'modal'
         : 'inline';
     const defaultCaptureMethod = safeSettings.gtd?.defaultCaptureMethod ?? 'text';
+    const defaultAreaMode = getDefaultTaskAreaMode(safeSettings);
+    const sortedAreas = [...areas]
+        .filter((area) => !area.deletedAt)
+        .sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name));
+    const defaultAreaId = resolveDefaultNewTaskAreaId(safeSettings, sortedAreas) ?? '';
+    const defaultAreaSelectValue = defaultAreaMode === 'active'
+        ? DEFAULT_AREA_ACTIVE_SELECT_VALUE
+        : defaultAreaId;
     const saveAudioAttachments = safeSettings.gtd?.saveAudioAttachments !== false;
+    const quickAddAutoClean = safeSettings.quickAddAutoClean === true;
+    const markdownEditorAssist = safeSettings.markdownEditorAssist !== false;
     const speechEnabled = safeSettings.ai?.speechToText?.enabled === true;
     const inboxProcessing = safeSettings.gtd?.inboxProcessing ?? {};
     const inboxDefaultMode = inboxProcessing.defaultMode === 'quick' ? 'quick' : 'guided';
@@ -825,6 +849,33 @@ export function SettingsGtdPage({
                         </button>
                     </div>
                 </div>
+                <div className="p-4 flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.defaultArea}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.defaultAreaDesc}</div>
+                    </div>
+                    <select
+                        value={defaultAreaSelectValue}
+                        aria-label={t.defaultArea}
+                        onChange={(event) => {
+                            const value = event.target.value;
+                            if (value === DEFAULT_AREA_ACTIVE_SELECT_VALUE) {
+                                updateGtdSettings({ defaultAreaMode: 'active', defaultAreaId: null });
+                            } else if (value) {
+                                updateGtdSettings({ defaultAreaMode: 'fixed', defaultAreaId: value });
+                            } else {
+                                updateGtdSettings({ defaultAreaMode: 'none', defaultAreaId: null });
+                            }
+                        }}
+                        className="max-w-56 shrink-0 text-sm bg-muted/50 text-foreground border border-border rounded px-3 py-2 hover:bg-muted focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    >
+                        <option value="">{t.defaultAreaNone}</option>
+                        <option value={DEFAULT_AREA_ACTIVE_SELECT_VALUE}>{t.defaultAreaActive}</option>
+                        {sortedAreas.map((area) => (
+                            <option key={area.id} value={area.id}>{area.name}</option>
+                        ))}
+                    </select>
+                </div>
                 {defaultCaptureMethod === 'audio' && speechEnabled ? (
                     <div className="p-4 flex items-center justify-between gap-6">
                         <div className="min-w-0">
@@ -857,6 +908,60 @@ export function SettingsGtdPage({
                         </button>
                     </div>
                 ) : null}
+                <div className="p-4 flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.quickAddAutoClean}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.quickAddAutoCleanDesc}</div>
+                    </div>
+                    <button
+                        type="button"
+                        role="switch"
+                        aria-checked={quickAddAutoClean}
+                        onClick={() => {
+                            updateSettings({ quickAddAutoClean: !quickAddAutoClean })
+                                .then(showSaved)
+                                .catch((error) => reportError('Failed to update quick add settings', error));
+                        }}
+                        className={cn(
+                            'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                            quickAddAutoClean ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
+                        )}
+                    >
+                        <span
+                            className={cn(
+                                'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                                quickAddAutoClean ? 'translate-x-4' : 'translate-x-1'
+                            )}
+                        />
+                    </button>
+                </div>
+                <div className="p-4 flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.markdownEditorAssist}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.markdownEditorAssistDesc}</div>
+                    </div>
+                    <button
+                        type="button"
+                        role="switch"
+                        aria-checked={markdownEditorAssist}
+                        onClick={() => {
+                            updateSettings({ markdownEditorAssist: !markdownEditorAssist })
+                                .then(showSaved)
+                                .catch((error) => reportError('Failed to update editor settings', error));
+                        }}
+                        className={cn(
+                            'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                            markdownEditorAssist ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
+                        )}
+                    >
+                        <span
+                            className={cn(
+                                'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                                markdownEditorAssist ? 'translate-x-4' : 'translate-x-1'
+                            )}
+                        />
+                    </button>
+                </div>
             </SettingsDisclosureCard>
             <SettingsDisclosureCard
                 title={t.weeklyReviewConfig}

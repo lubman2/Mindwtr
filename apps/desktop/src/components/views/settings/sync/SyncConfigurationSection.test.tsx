@@ -37,6 +37,8 @@ const baseProps: Parameters<typeof SyncConfigurationSection>[0] = {
         cloudUrl: 'Cloud URL',
         cloudHint: 'Cloud hint',
         cloudToken: 'Cloud token',
+        cloudRememberToken: 'Remember token on this browser',
+        cloudRememberTokenHint: 'Remember token hint',
         cloudSave: 'Save cloud',
         cloudProvider: 'Cloud provider',
         cloudProviderSelfHosted: 'Self-hosted',
@@ -77,6 +79,7 @@ const baseProps: Parameters<typeof SyncConfigurationSection>[0] = {
     onTestWebDavConnection: vi.fn(),
     cloudUrl: '',
     cloudToken: '',
+    cloudRememberToken: false,
     cloudAllowInsecureHttp: false,
     cloudProvider: 'dropbox',
     dropboxConfigured: true,
@@ -87,6 +90,7 @@ const baseProps: Parameters<typeof SyncConfigurationSection>[0] = {
     dropboxTestState: 'idle',
     onCloudUrlChange: vi.fn(),
     onCloudTokenChange: vi.fn(),
+    onCloudRememberTokenChange: vi.fn(),
     onCloudAllowInsecureHttpChange: vi.fn(),
     onCloudProviderChange: vi.fn(),
     onSaveCloud: vi.fn(),
@@ -116,7 +120,7 @@ describe('SyncConfigurationSection', () => {
         expect(queryByText('Sync description')).not.toBeInTheDocument();
         expect(getByRole('link', { name: /Data and Sync guide/ })).toHaveAttribute(
             'href',
-            'https://github.com/dongdongbh/Mindwtr/wiki/Data-and-Sync'
+            'https://docs.mindwtr.app/data-sync/'
         );
     });
 
@@ -152,6 +156,38 @@ describe('SyncConfigurationSection', () => {
         fireEvent.click(switchControl);
 
         expect(onWebdavAllowInsecureHttpChange).toHaveBeenCalledWith(true);
+    });
+
+    it('shows the remember-token switch only for browser self-hosted sync', () => {
+        const onCloudRememberTokenChange = vi.fn();
+        const { getByRole, rerender, queryByRole } = render(
+            <SyncConfigurationSection
+                {...baseProps}
+                isTauri={false}
+                cloudProvider="selfhosted"
+                cloudRememberToken={false}
+                onCloudRememberTokenChange={onCloudRememberTokenChange}
+            />
+        );
+
+        const switchControl = getByRole('switch', { name: 'Remember token on this browser' });
+        expect(switchControl).toHaveAttribute('aria-checked', 'false');
+
+        fireEvent.click(switchControl);
+
+        expect(onCloudRememberTokenChange).toHaveBeenCalledWith(true);
+
+        rerender(
+            <SyncConfigurationSection
+                {...baseProps}
+                isTauri
+                cloudProvider="selfhosted"
+                cloudRememberToken={false}
+                onCloudRememberTokenChange={onCloudRememberTokenChange}
+            />
+        );
+
+        expect(queryByRole('switch', { name: 'Remember token on this browser' })).not.toBeInTheDocument();
     });
 
     it('keeps Dropbox selection backward-compatible with the stored cloud backend shape', () => {

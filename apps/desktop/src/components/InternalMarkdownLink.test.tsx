@@ -6,7 +6,7 @@ import { useTaskStore } from '@mindwtr/core';
 import { LanguageProvider } from '../contexts/language-context';
 import { MINDWTR_NAVIGATE_EVENT } from '../lib/navigation-events';
 import { useUiStore } from '../store/ui-store';
-import { InternalMarkdownLink } from './InternalMarkdownLink';
+import { createInternalMarkdownLinkContext, InternalMarkdownLink } from './InternalMarkdownLink';
 
 const initialTaskState = useTaskStore.getState();
 const initialUiState = useUiStore.getState();
@@ -19,10 +19,23 @@ describe('InternalMarkdownLink', () => {
         });
     });
 
+    const currentLinkContext = () => {
+        const taskState = useTaskStore.getState();
+        const uiState = useUiStore.getState();
+        return createInternalMarkdownLinkContext({
+            tasks: taskState._allTasks,
+            projects: taskState._allProjects,
+            restoreTask: taskState.restoreTask,
+            restoreProject: taskState.restoreProject,
+            setHighlightTask: taskState.setHighlightTask,
+            setProjectView: uiState.setProjectView,
+        });
+    };
+
     it('renders RFC 2392 message-id links as safe external links', () => {
         const { getByRole } = render(
             <LanguageProvider>
-                <InternalMarkdownLink href="mid:960830.1639@example.com">Email</InternalMarkdownLink>
+                <InternalMarkdownLink href="mid:960830.1639@example.com" linkContext={currentLinkContext()}>Email</InternalMarkdownLink>
             </LanguageProvider>
         );
 
@@ -71,7 +84,7 @@ describe('InternalMarkdownLink', () => {
         try {
             const { getByRole, getByText } = render(
                 <LanguageProvider>
-                    <InternalMarkdownLink href="mindwtr://task/task-1">Deleted task</InternalMarkdownLink>
+                    <InternalMarkdownLink href="mindwtr://task/task-1" linkContext={currentLinkContext()}>Deleted task</InternalMarkdownLink>
                 </LanguageProvider>
             );
 
@@ -128,7 +141,7 @@ describe('InternalMarkdownLink', () => {
         try {
             const { getByRole, getByText } = render(
                 <LanguageProvider>
-                    <InternalMarkdownLink href="mindwtr://project/project-1">Deleted project</InternalMarkdownLink>
+                    <InternalMarkdownLink href="mindwtr://project/project-1" linkContext={currentLinkContext()}>Deleted project</InternalMarkdownLink>
                 </LanguageProvider>
             );
 

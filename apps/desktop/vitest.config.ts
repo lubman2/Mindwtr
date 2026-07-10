@@ -3,6 +3,10 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
+const coverageReporters = process.env.CI
+    ? ['text', 'lcovonly', 'json-summary']
+    : ['text', 'lcov', 'html', 'json-summary'];
+
 export default defineConfig({
     plugins: [react()],
     resolve: {
@@ -25,7 +29,7 @@ export default defineConfig({
         css: true,
         coverage: {
             provider: 'v8',
-            reporter: ['text', 'lcov', 'html', 'json-summary'],
+            reporter: coverageReporters,
         },
     },
 });

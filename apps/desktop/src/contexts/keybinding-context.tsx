@@ -4,6 +4,7 @@ import { useLanguage } from './language-context';
 import { KeybindingHelpModal } from '../components/KeybindingHelpModal';
 import { isFlatpakRuntime, isTauriRuntime } from '../lib/runtime';
 import { reportError } from '../lib/report-error';
+import { undoTaskCompletion } from '../lib/undo-task-completion';
 import { logWarn } from '../lib/app-log';
 import { useUiStore } from '../store/ui-store';
 import { saveStoredFullscreen } from '../lib/window-state';
@@ -12,7 +13,7 @@ import {
     matchesGlobalQuickAddShortcut,
     normalizeGlobalQuickAddShortcut,
 } from '../lib/global-quick-add-shortcut';
-import { AREA_FILTER_ALL } from '../lib/area-filter';
+import { AREA_FILTER_ALL } from '@mindwtr/core';
 
 export type KeybindingStyle = 'vim' | 'emacs';
 
@@ -99,6 +100,12 @@ function triggerGlobalSearch() {
 
 function triggerQuickAdd() {
     window.dispatchEvent(new Event('mindwtr:quick-add'));
+}
+
+function getAppScopedShortcutKey(event: KeyboardEvent): string {
+    if (event.key.length !== 1) return event.key;
+    if (event.shiftKey && event.key.toLowerCase() === 'a') return 'A';
+    return event.key;
 }
 
 function triggerTaskEditCancel(taskId: string) {
@@ -233,21 +240,6 @@ export function KeybindingProvider({
         scopeRef.current = scope;
     }, []);
 
-    const focusFallbackFilterInput = useCallback(() => {
-        const root = document.querySelector<HTMLElement>('[data-main-content]') ?? document.body;
-        const input = Array.from(root.querySelectorAll<HTMLElement>('[data-view-filter-input]'))
-            .find((element) => {
-                const tagName = element.tagName.toLowerCase();
-                if (tagName !== 'input' && tagName !== 'textarea') return false;
-                if ('disabled' in element && Boolean((element as HTMLInputElement | HTMLTextAreaElement).disabled)) return false;
-                const rect = element.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) return false;
-                const style = window.getComputedStyle(element);
-                return style.display !== 'none' && style.visibility !== 'hidden';
-            });
-        input?.focus();
-    }, []);
-
     const getFallbackTaskElements = useCallback((): HTMLElement[] => {
         const root = document.querySelector<HTMLElement>('[data-main-content]') ?? document.body;
         const items = Array.from(root.querySelectorAll<HTMLElement>('[data-task-id]'));
@@ -375,6 +367,7 @@ export function KeybindingProvider({
         if (!task) return;
         const nextStatus = task.status === 'done' ? 'inbox' : 'done';
         const previousStatus = task.status;
+        const wasFocusedToday = task.isFocusedToday === true;
         void state.moveTask(task.id, nextStatus)
             .then((result) => {
                 if (!result.success) {
@@ -388,7 +381,8 @@ export function KeybindingProvider({
                     {
                         label: undoLabel,
                         onClick: () => {
-                            void state.moveTask(task.id, previousStatus);
+                            void undoTaskCompletion(task.id, previousStatus, wasFocusedToday)
+                                .catch((error) => reportError('Failed to undo task completion', error));
                         },
                     }
                 );
@@ -439,7 +433,6 @@ export function KeybindingProvider({
         openQuickActions: fallbackOpenQuickActionsSelected,
         toggleDoneSelected: fallbackToggleDoneSelected,
         deleteSelected: fallbackDeleteSelected,
-        focusAddInput: focusFallbackFilterInput,
     }), [
         fallbackDeleteSelected,
         fallbackEditSelected,
@@ -449,7 +442,6 @@ export function KeybindingProvider({
         fallbackSelectNext,
         fallbackSelectPrev,
         fallbackToggleDoneSelected,
-        focusFallbackFilterInput,
     ]);
 
     const getActiveScope = useCallback((): TaskListScope => {
@@ -538,7 +530,7 @@ export function KeybindingProvider({
                     } else if (vimGoMap[e.key]) {
                         onNavigate(vimGoMap[e.key]);
                     }
-                } else if (pending === 'a') {
+                } else if (pending === 'A') {
                     applyAreaFilterShortcut(e.key);
                 } else if (pending === 'd') {
                     if (e.key === 'd') {
@@ -592,10 +584,6 @@ export function KeybindingProvider({
                     e.preventDefault();
                     scope?.toggleDoneSelected();
                     break;
-                case 'o':
-                    e.preventDefault();
-                    scope?.focusAddInput?.();
-                    break;
                 case '/':
                     e.preventDefault();
                     triggerGlobalSearch();
@@ -605,7 +593,6 @@ export function KeybindingProvider({
                     setIsHelpOpen(true);
                     break;
                 case 'g':
-                case 'a':
                 case 'd':
                     e.preventDefault();
                     pendingRef.current = { key: e.key, timestamp: now };
@@ -662,10 +649,6 @@ export function KeybindingProvider({
                         e.preventDefault();
                         scope?.deleteSelected();
                         break;
-                    case 'o':
-                        e.preventDefault();
-                        scope?.focusAddInput?.();
-                        break;
                     case 's':
                         e.preventDefault();
                         triggerGlobalSearch();
@@ -712,6 +695,27 @@ export function KeybindingProvider({
                 return;
             }
             if (!e.metaKey && !e.ctrlKey && !e.altKey && !isEditableTarget(e.target)) {
+                const appShortcutKey = getAppScopedShortcutKey(e);
+                const now = Date.now();
+                if (pendingRef.current.key === 'A' && now - pendingRef.current.timestamp > 700) {
+                    pendingRef.current.key = null;
+                }
+                if (pendingRef.current.key === 'A') {
+                    e.preventDefault();
+                    applyAreaFilterShortcut(appShortcutKey);
+                    pendingRef.current.key = null;
+                    return;
+                }
+                if (!pendingRef.current.key && appShortcutKey === 'A') {
+                    e.preventDefault();
+                    pendingRef.current = { key: 'A', timestamp: now };
+                    return;
+                }
+                if (!pendingRef.current.key && appShortcutKey === 'a') {
+                    e.preventDefault();
+                    triggerQuickAdd();
+                    return;
+                }
                 if (e.key === 'ArrowDown') {
                     if (moveSidebarFocus(e.target, 'next')) {
                         e.preventDefault();

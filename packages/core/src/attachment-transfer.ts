@@ -1,0 +1,164 @@
+import { computeSha256Hex } from './attachment-hash';
+import { globalProgressTracker } from './attachment-progress';
+import type { AppData, Attachment, AttachmentSettings } from './types';
+
+type PendingRemoteAttachmentDeleteEntry = NonNullable<AttachmentSettings['pendingRemoteDeletes']>[number];
+
+export const normalizePendingRemoteDeletes = (
+    value: unknown,
+): PendingRemoteAttachmentDeleteEntry[] => {
+    if (!Array.isArray(value)) return [];
+    const deduped = new Map<string, PendingRemoteAttachmentDeleteEntry>();
+    for (const item of value) {
+        if (!item || typeof item !== 'object') continue;
+        const cloudKey = typeof item.cloudKey === 'string' ? item.cloudKey.trim() : '';
+        if (!cloudKey) continue;
+        const next: PendingRemoteAttachmentDeleteEntry = {
+            cloudKey,
+            title: typeof item.title === 'string' ? item.title : undefined,
+            attempts: typeof item.attempts === 'number' && Number.isFinite(item.attempts)
+                ? Math.max(0, Math.floor(item.attempts))
+                : 0,
+            lastErrorAt: typeof item.lastErrorAt === 'string' ? item.lastErrorAt : undefined,
+        };
+        const existing = deduped.get(cloudKey);
+        if (!existing || (next.attempts ?? 0) >= (existing.attempts ?? 0)) {
+            deduped.set(cloudKey, next);
+        }
+    }
+    return Array.from(deduped.values());
+};
+
+export const validateAttachmentHash = async (attachment: Attachment, bytes: Uint8Array): Promise<void> => {
+    const expected = attachment.fileHash;
+    if (!expected || expected.length !== 64) return;
+    const computed = await computeSha256Hex(bytes);
+    if (!computed) return;
+    if (computed.toLowerCase() !== expected.toLowerCase()) {
+        throw new Error('Integrity validation failed');
+    }
+};
+
+export const reportProgress = (
+    attachmentId: string,
+    operation: 'upload' | 'download',
+    loaded: number,
+    total: number,
+    status: 'active' | 'completed' | 'failed',
+    error?: string,
+) => {
+    const percentage = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+    globalProgressTracker.updateProgress(attachmentId, {
+        operation,
+        bytesTransferred: loaded,
+        totalBytes: total,
+        percentage,
+        status,
+        error,
+    });
+};
+
+/**
+ * Collect the live attachment objects of non-deleted tasks and projects, keyed
+ * by id. The map holds the same object references that sit inside `appData` —
+ * callers that mutate them (see {@link runAttachmentTransferLifecycle}) must
+ * build the map from a cloned AppData.
+ */
+export const collectAttachmentsById = (appData: AppData): Map<string, Attachment> => {
+    const attachmentsById = new Map<string, Attachment>();
+    for (const task of appData.tasks) {
+        if (task.deletedAt) continue;
+        for (const attachment of task.attachments || []) {
+            attachmentsById.set(attachment.id, attachment);
+        }
+    }
+    for (const project of appData.projects) {
+        if (project.deletedAt) continue;
+        for (const attachment of project.attachments || []) {
+            attachmentsById.set(attachment.id, attachment);
+        }
+    }
+    return attachmentsById;
+};
+
+export type AttachmentTransferLifecycleOptions = {
+    attachmentsById: Map<string, Attachment>;
+    localFileExists: (path: string) => Promise<boolean>;
+    onUpload: (attachment: Attachment, localPath: string) => Promise<boolean>;
+    onUploadError: (attachment: Attachment, error: unknown) => void;
+    onDownload: (attachment: Attachment) => Promise<boolean>;
+    onDownloadError: (attachment: Attachment, error: unknown) => void;
+    resolveLocalPath?: (uri: string) => string;
+    beforeEachAttachment?: () => Promise<void>;
+};
+
+const defaultResolveLocalPath = (uri: string): string => {
+    if (!/^file:\/\//i.test(uri)) return uri;
+    try {
+        const parsed = new URL(uri);
+        let path = decodeURIComponent(parsed.pathname);
+        if (/^\/[A-Za-z]:\//.test(path)) {
+            path = path.slice(1);
+        }
+        return path;
+    } catch {
+        return uri.replace(/^file:\/\//i, '');
+    }
+};
+
+/**
+ * Reconcile each file attachment's local presence with its cloud state:
+ * refresh `localStatus`, upload local-only files, download cloud-only ones.
+ *
+ * Mutates the attachment objects in place (`localStatus`, and whatever the
+ * upload/download callbacks set, e.g. `cloudKey`). Because the SQLite adapter
+ * caches serialized task rows by task object identity, callers MUST pass
+ * attachments collected from a cloned AppData (`cloneAppData`/`structuredClone`)
+ * and persist that clone — mutating tasks already held by the store would make
+ * the row cache serve stale rows and silently skip persisting these changes.
+ */
+export async function runAttachmentTransferLifecycle(
+    options: AttachmentTransferLifecycleOptions,
+): Promise<boolean> {
+    let didMutate = false;
+
+    for (const attachment of options.attachmentsById.values()) {
+        await options.beforeEachAttachment?.();
+        if (attachment.kind !== 'file') continue;
+        if (attachment.deletedAt) continue;
+
+        const rawUri = attachment.uri ? (options.resolveLocalPath ?? defaultResolveLocalPath)(attachment.uri) : '';
+        const isHttp = /^https?:\/\//i.test(rawUri);
+        const localPath = isHttp ? '' : rawUri;
+        const hasLocalPath = Boolean(localPath);
+        const existsLocally = hasLocalPath ? await options.localFileExists(localPath) : false;
+
+        const nextStatus: Attachment['localStatus'] = existsLocally ? 'available' : 'missing';
+        if (attachment.localStatus !== nextStatus) {
+            attachment.localStatus = nextStatus;
+            didMutate = true;
+        }
+
+        if (!attachment.cloudKey && existsLocally) {
+            try {
+                if (await options.onUpload(attachment, localPath)) {
+                    didMutate = true;
+                }
+            } catch (error) {
+                options.onUploadError(attachment, error);
+            }
+        }
+
+        if (attachment.cloudKey && !existsLocally) {
+            try {
+                if (await options.onDownload(attachment)) {
+                    didMutate = true;
+                }
+            } catch (error) {
+                options.onDownloadError(attachment, error);
+            }
+        }
+    }
+
+    return didMutate;
+}

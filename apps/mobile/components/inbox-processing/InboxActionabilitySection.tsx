@@ -1,8 +1,10 @@
 import React from 'react';
 import { Text, TouchableOpacity, View } from 'react-native';
+import type { QuickDatePreset } from '@mindwtr/core';
 
 import { styles } from '../inbox-processing-modal.styles';
 import { InboxDateSelectorRow } from './InboxDateSelectorRow';
+import { EmojiLabel } from '../ui/emoji-label';
 import type { ThemeColors } from '@/hooks/use-theme-colors';
 
 type ActionabilityChoice = 'actionable' | 'later' | 'trash' | 'someday' | 'reference';
@@ -17,7 +19,9 @@ type Props = {
   laterHint: string;
   dateOnlyLabel: string;
   pendingStartDate: Date | null;
+  laterNoDateSelected: boolean;
   setPendingStartDate: (v: Date | null) => void;
+  setLaterNoDateSelected: (v: boolean) => void;
   pendingStartDateOnly: boolean;
   setPendingStartDateOnly: (v: boolean) => void;
   setShowStartDatePicker: (v: boolean) => void;
@@ -34,12 +38,21 @@ export function InboxActionabilitySection({
   laterHint,
   dateOnlyLabel,
   pendingStartDate,
+  laterNoDateSelected,
   setPendingStartDate,
+  setLaterNoDateSelected,
   pendingStartDateOnly,
   setPendingStartDateOnly,
   setShowStartDatePicker,
   defaultScheduleTime,
 }: Props) {
+  const chooseActionability = (choice: ActionabilityChoice) => {
+    setActionabilityChoice(choice);
+    if (choice !== 'later') {
+      setLaterNoDateSelected(false);
+    }
+  };
+
   return (
     <>
       <View style={[styles.singleSection, { borderBottomColor: tc.border }]}>
@@ -55,42 +68,38 @@ export function InboxActionabilitySection({
               styles.bigButton,
               actionabilityChoice === 'actionable' ? styles.buttonPrimary : { backgroundColor: tc.border },
             ]}
-            onPress={() => setActionabilityChoice('actionable')}
+            onPress={() => chooseActionability('actionable')}
           >
-            <Text style={[styles.bigButtonText, actionabilityChoice !== 'actionable' && { color: tc.text }]}>
-              ✅ {t('inbox.yesActionable')}
-            </Text>
+            <EmojiLabel emoji="✅" label={t('inbox.yesActionable')} textStyle={[styles.bigButtonText, actionabilityChoice !== 'actionable' && { color: tc.text }]} />
           </TouchableOpacity>
           <TouchableOpacity
             style={[
               styles.bigButton,
               actionabilityChoice === 'later' ? styles.buttonPrimary : { backgroundColor: tc.border },
             ]}
-            onPress={() => setActionabilityChoice('later')}
+            onPress={() => chooseActionability('later')}
           >
-            <Text style={[styles.bigButtonText, actionabilityChoice !== 'later' && { color: tc.text }]}>
-              🕒 {laterLabel}
-            </Text>
+            <EmojiLabel emoji="🕒" label={laterLabel} textStyle={[styles.bigButtonText, actionabilityChoice !== 'later' && { color: tc.text }]} />
           </TouchableOpacity>
           <View style={styles.buttonRow}>
             <TouchableOpacity
               style={[styles.button, { backgroundColor: actionabilityChoice === 'trash' ? '#EF4444' : tc.border }]}
-              onPress={() => setActionabilityChoice('trash')}
+              onPress={() => chooseActionability('trash')}
             >
-              <Text style={[styles.buttonPrimaryText, actionabilityChoice !== 'trash' && { color: tc.text }]}>🗑️ {t('inbox.trash')}</Text>
+              <EmojiLabel emoji="🗑️" label={t('inbox.trash')} textStyle={[styles.buttonPrimaryText, actionabilityChoice !== 'trash' && { color: tc.text }]} />
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.button, { backgroundColor: actionabilityChoice === 'someday' ? '#8B5CF6' : tc.border }]}
-              onPress={() => setActionabilityChoice('someday')}
+              onPress={() => chooseActionability('someday')}
             >
-              <Text style={[styles.buttonPrimaryText, actionabilityChoice !== 'someday' && { color: tc.text }]}>💭 {t('inbox.someday')}</Text>
+              <EmojiLabel emoji="💭" label={t('inbox.someday')} textStyle={[styles.buttonPrimaryText, actionabilityChoice !== 'someday' && { color: tc.text }]} />
             </TouchableOpacity>
             {referenceEnabled && (
               <TouchableOpacity
                 style={[styles.button, { backgroundColor: actionabilityChoice === 'reference' ? '#3B82F6' : tc.border }]}
-                onPress={() => setActionabilityChoice('reference')}
+                onPress={() => chooseActionability('reference')}
               >
-                <Text style={[styles.buttonPrimaryText, actionabilityChoice !== 'reference' && { color: tc.text }]}>📚 {t('nav.reference')}</Text>
+                <EmojiLabel emoji="📚" label={t('nav.reference')} textStyle={[styles.buttonPrimaryText, actionabilityChoice !== 'reference' && { color: tc.text }]} />
               </TouchableOpacity>
             )}
           </View>
@@ -105,9 +114,18 @@ export function InboxActionabilitySection({
             t={t}
             label={t('taskEdit.startDateLabel')}
             value={pendingStartDate}
+            selectedPreset={laterNoDateSelected ? 'no_date' : null}
             onOpen={() => setShowStartDatePicker(true)}
-            onClear={() => { setPendingStartDate(null); setPendingStartDateOnly(false); }}
-            onQuickDateSelect={(date) => { setPendingStartDate(date); setPendingStartDateOnly(false); }}
+            onClear={() => {
+              setPendingStartDate(null);
+              setPendingStartDateOnly(false);
+              setLaterNoDateSelected(false);
+            }}
+            onQuickDateSelect={(date, preset: QuickDatePreset) => {
+              setPendingStartDate(date);
+              setPendingStartDateOnly(false);
+              setLaterNoDateSelected(preset === 'no_date' ? !laterNoDateSelected : false);
+            }}
             dateOnly={pendingStartDateOnly}
             onDateOnly={() => setPendingStartDateOnly(true)}
             onUseDefaultTime={() => setPendingStartDateOnly(false)}

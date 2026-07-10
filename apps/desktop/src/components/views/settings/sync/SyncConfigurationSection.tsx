@@ -28,6 +28,7 @@ type SyncConfigurationSectionProps = Pick<
     | 'onTestWebDavConnection'
     | 'cloudUrl'
     | 'cloudToken'
+    | 'cloudRememberToken'
     | 'cloudAllowInsecureHttp'
     | 'cloudProvider'
     | 'dropboxConfigured'
@@ -38,6 +39,7 @@ type SyncConfigurationSectionProps = Pick<
     | 'dropboxTestState'
     | 'onCloudUrlChange'
     | 'onCloudTokenChange'
+    | 'onCloudRememberTokenChange'
     | 'onCloudAllowInsecureHttpChange'
     | 'onCloudProviderChange'
     | 'onSaveCloud'
@@ -213,10 +215,13 @@ const renderDropboxPanel = ({
 
 const renderSelfHostedCloudPanel = ({
     cloudAllowInsecureHttp,
+    cloudRememberToken,
     cloudToken,
     cloudUrl,
     cloudUrlError,
+    isTauri,
     onCloudAllowInsecureHttpChange,
+    onCloudRememberTokenChange,
     onCloudTokenChange,
     onCloudUrlChange,
     onSaveCloud,
@@ -224,9 +229,12 @@ const renderSelfHostedCloudPanel = ({
 }: Pick<
     SyncConfigurationSectionProps,
     | 'cloudAllowInsecureHttp'
+    | 'cloudRememberToken'
     | 'cloudToken'
     | 'cloudUrl'
+    | 'isTauri'
     | 'onCloudAllowInsecureHttpChange'
+    | 'onCloudRememberTokenChange'
     | 'onCloudTokenChange'
     | 'onCloudUrlChange'
     | 'onSaveCloud'
@@ -267,6 +275,15 @@ const renderSelfHostedCloudPanel = ({
                 className="bg-muted p-2 rounded text-sm border border-border focus:outline-none focus:ring-2 focus:ring-primary"
             />
         </div>
+
+        {!isTauri && (
+            <SwitchRow
+                checked={cloudRememberToken}
+                label={t.cloudRememberToken}
+                hint={t.cloudRememberTokenHint}
+                onCheckedChange={onCloudRememberTokenChange}
+            />
+        )}
 
         <div className="flex justify-end">
             <button
@@ -399,6 +416,7 @@ const renderWebDavPanel = ({
 
 export function SyncConfigurationSection({
     cloudAllowInsecureHttp,
+    cloudRememberToken,
     cloudProvider,
     cloudToken,
     cloudUrl,
@@ -415,6 +433,7 @@ export function SyncConfigurationSection({
     isTestingWebDav,
     onBrowseSyncPath,
     onCloudAllowInsecureHttpChange,
+    onCloudRememberTokenChange,
     onCloudProviderChange,
     onCloudTokenChange,
     onCloudUrlChange,
@@ -525,7 +544,7 @@ export function SyncConfigurationSection({
 
             <div className="bg-card border border-border rounded-lg p-6 space-y-4">
                 <a
-                    href="https://github.com/dongdongbh/Mindwtr/wiki/Data-and-Sync"
+                    href="https://docs.mindwtr.app/data-sync/"
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
@@ -616,10 +635,13 @@ export function SyncConfigurationSection({
 
                 {isSelfHostedSelected && renderSelfHostedCloudPanel({
                     cloudAllowInsecureHttp,
+                    cloudRememberToken,
                     cloudToken,
                     cloudUrl,
                     cloudUrlError,
+                    isTauri,
                     onCloudAllowInsecureHttpChange,
+                    onCloudRememberTokenChange,
                     onCloudTokenChange,
                     onCloudUrlChange,
                     onSaveCloud,

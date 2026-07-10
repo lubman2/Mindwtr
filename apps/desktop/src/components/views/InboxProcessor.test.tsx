@@ -24,6 +24,16 @@ const inboxTask: Task = {
     updatedAt: nowIso,
 };
 
+const inboxTaskTwo: Task = {
+    id: 'task-2',
+    title: 'Follow up with Casey',
+    status: 'inbox',
+    tags: [],
+    contexts: [],
+    createdAt: nowIso,
+    updatedAt: nowIso,
+};
+
 const createdProject: Project = {
     id: 'project-1',
     title: 'Plan launch',
@@ -78,6 +88,7 @@ const homeProject: Project = {
 };
 
 type RenderResult = {
+    addTask: ReturnType<typeof vi.fn>;
     addProject: ReturnType<typeof vi.fn>;
     updateTask: ReturnType<typeof vi.fn>;
     deleteTask: ReturnType<typeof vi.fn>;
@@ -88,6 +99,8 @@ type RenderInboxProcessorOptions = {
     tasks?: Task[];
     projects?: Project[];
     areas?: Area[];
+    allContexts?: string[];
+    allTags?: string[];
 };
 
 const isRenderInboxProcessorOptions = (
@@ -99,6 +112,8 @@ const isRenderInboxProcessorOptions = (
         || 'tasks' in options
         || 'projects' in options
         || 'areas' in options
+        || 'allContexts' in options
+        || 'allTags' in options
     )
 );
 
@@ -106,6 +121,7 @@ const renderInboxProcessor = (options?: AppData['settings'] | RenderInboxProcess
     const renderOptions = isRenderInboxProcessorOptions(options)
         ? options
         : { settings: options };
+    const addTask = vi.fn(async () => undefined);
     const addProject = vi.fn(async () => createdProject);
     const updateTask = vi.fn(async () => undefined);
     const deleteTask = vi.fn(async () => undefined);
@@ -123,10 +139,12 @@ const renderInboxProcessor = (options?: AppData['settings'] | RenderInboxProcess
                 projects={projects}
                 areas={areas}
                 settings={renderOptions.settings}
+                addTask={addTask}
                 addProject={addProject}
                 updateTask={updateTask}
                 deleteTask={deleteTask}
-                allContexts={[]}
+                allContexts={renderOptions.allContexts ?? []}
+                allTags={renderOptions.allTags ?? []}
                 isProcessing={isProcessing}
                 setIsProcessing={setIsProcessing}
             />
@@ -135,6 +153,7 @@ const renderInboxProcessor = (options?: AppData['settings'] | RenderInboxProcess
 
     return {
         ...render(<TestHarness />),
+        addTask,
         addProject,
         updateTask,
         deleteTask,
@@ -169,6 +188,36 @@ describe('InboxProcessor', () => {
         });
     });
 
+    it('creates extra next actions in the new project when added at the split step (#827)', async () => {
+        const { getByRole, getByText, getAllByPlaceholderText, addTask, updateTask } = renderInboxProcessor();
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.click(getByText('process.refineNext'));
+        fireEvent.click(getByText('process.yesActionable'));
+        fireEvent.click(getByText('process.moreThanOneStepYes'));
+
+        fireEvent.click(getByText('+ process.addAnotherAction'));
+        fireEvent.click(getByText('+ process.addAnotherAction'));
+        const actionInputs = getAllByPlaceholderText('taskEdit.titleLabel');
+        expect(actionInputs).toHaveLength(3);
+        fireEvent.change(actionInputs[1], { target: { value: 'Book venue' } });
+        fireEvent.change(actionInputs[2], { target: { value: '   ' } });
+
+        fireEvent.click(getByText('process.createProject'));
+
+        await waitFor(() => {
+            expect(updateTask).toHaveBeenCalledWith('task-1', expect.objectContaining({
+                projectId: 'project-1',
+                status: 'next',
+            }));
+            expect(addTask).toHaveBeenCalledTimes(1);
+            expect(addTask).toHaveBeenCalledWith('Book venue', {
+                status: 'inbox',
+                projectId: 'project-1',
+            });
+        });
+    });
+
     it('opens in quick mode when configured as the default inbox processing mode', () => {
         const { getByRole, getByText, queryByText } = renderInboxProcessor({
             gtd: {
@@ -184,8 +233,8 @@ describe('InboxProcessor', () => {
         expect(queryByText('process.refineDesc')).toBeNull();
     });
 
-    it('starts quick processing without preselecting the task area', () => {
-        const { getByRole, getByLabelText } = renderInboxProcessor({
+    it('preselects the area already assigned to the inbox task', () => {
+        const { getByRole } = renderInboxProcessor({
             settings: {
                 gtd: {
                     inboxProcessing: {
@@ -199,11 +248,13 @@ describe('InboxProcessor', () => {
 
         fireEvent.click(getByRole('button', { name: /process\.btn/i }));
 
-        expect((getByLabelText('taskEdit.areaLabel') as HTMLSelectElement).value).toBe('');
+        // The dropdown must reflect what apply will save; resetting it to empty
+        // silently dropped an area assigned while the task sat in the inbox.
+        expect(getByRole('button', { name: 'Work' })).toBeTruthy();
     });
 
     it('filters quick processing project choices by the selected area', () => {
-        const { getByRole, getByLabelText, queryByRole } = renderInboxProcessor({
+        const { getByRole, queryByRole } = renderInboxProcessor({
             settings: {
                 gtd: {
                     inboxProcessing: {
@@ -216,9 +267,8 @@ describe('InboxProcessor', () => {
         });
 
         fireEvent.click(getByRole('button', { name: /process\.btn/i }));
-        fireEvent.change(getByLabelText('taskEdit.areaLabel'), {
-            target: { value: 'area-work' },
-        });
+        fireEvent.click(getByRole('button', { name: 'projects.noArea' }));
+        fireEvent.click(getByRole('option', { name: 'Work' }));
         fireEvent.click(getByRole('button', { name: 'process.project' }));
 
         expect(getByRole('option', { name: 'Work Project' })).toBeTruthy();
@@ -226,7 +276,7 @@ describe('InboxProcessor', () => {
     });
 
     it('shows area before project in guided project-first processing and filters projects', () => {
-        const { container, getByRole, getByLabelText, queryByRole } = renderInboxProcessor({
+        const { container, getByRole, queryByRole } = renderInboxProcessor({
             settings: {
                 gtd: {
                     inboxProcessing: {
@@ -244,9 +294,8 @@ describe('InboxProcessor', () => {
             container.innerHTML.indexOf('taskEdit.projectLabel'),
         );
 
-        fireEvent.change(getByLabelText('taskEdit.areaLabel'), {
-            target: { value: 'area-work' },
-        });
+        fireEvent.click(getByRole('button', { name: 'projects.noArea' }));
+        fireEvent.click(getByRole('option', { name: 'Work' }));
         fireEvent.click(getByRole('button', { name: 'process.project' }));
 
         expect(getByRole('option', { name: 'Work Project' })).toBeTruthy();
@@ -373,6 +422,60 @@ describe('InboxProcessor', () => {
         expect(getByText('process.reference')).toBeTruthy();
     });
 
+    it('shows context and tag fields for quick Reference processing', async () => {
+        const { getByRole, getByText, getByLabelText, updateTask } = renderInboxProcessor();
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.click(getByRole('button', { name: 'process.modeQuick' }));
+        fireEvent.click(getByText('process.reference'));
+        fireEvent.change(getByLabelText('taskEdit.contextsLabel'), {
+            target: { value: '@docs, @desk' },
+        });
+        fireEvent.change(getByLabelText('taskEdit.tagsLabel'), {
+            target: { value: '#reference, #launch' },
+        });
+
+        fireEvent.click(getByRole('button', { name: 'process.next' }));
+
+        await waitFor(() => {
+            expect(updateTask).toHaveBeenCalledWith(
+                'task-1',
+                expect.objectContaining({
+                    status: 'reference',
+                    contexts: ['@docs', '@desk'],
+                    tags: ['#reference', '#launch'],
+                }),
+            );
+        });
+    });
+
+    it('shows context and tag fields before confirming guided Reference processing', async () => {
+        const user = userEvent.setup();
+        const { getAllByRole, getByPlaceholderText, getByRole, getByText, updateTask } = renderInboxProcessor();
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.click(getByText('process.refineNext'));
+        fireEvent.click(getByText('process.reference'));
+
+        await user.type(getByPlaceholderText('@home'), '@docs, @desk');
+        fireEvent.click(getAllByRole('button', { name: '+' })[0]);
+        await user.type(getByPlaceholderText('#deep-work'), '#reference, #launch');
+        fireEvent.click(getAllByRole('button', { name: '+' })[1]);
+
+        fireEvent.click(getByRole('button', { name: /process\.next/ }));
+
+        await waitFor(() => {
+            expect(updateTask).toHaveBeenCalledWith(
+                'task-1',
+                expect.objectContaining({
+                    status: 'reference',
+                    contexts: ['@docs', '@desk'],
+                    tags: ['#reference', '#launch'],
+                }),
+            );
+        });
+    });
+
     it('shows scheduling options when enabled in settings and visible in the task editor layout', () => {
         const { getByRole, getByText } = renderInboxProcessor({
             gtd: {
@@ -417,6 +520,33 @@ describe('InboxProcessor', () => {
                     startTime: '2026-03-23',
                 }),
             );
+        });
+    });
+
+    it('scrolls the processing panel back into view when advancing to the next task (#841)', async () => {
+        const scrollIntoView = vi.fn();
+        Element.prototype.scrollIntoView = scrollIntoView;
+        const inboxTaskTwo: Task = { ...inboxTask, id: 'task-2', title: 'Second capture' };
+        const { getByRole, updateTask } = renderInboxProcessor({
+            settings: {
+                gtd: {
+                    inboxProcessing: {
+                        defaultMode: 'quick',
+                    },
+                },
+            },
+            tasks: [inboxTask, inboxTaskTwo],
+        });
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        scrollIntoView.mockClear();
+        fireEvent.click(getByRole('button', { name: 'process.next' }));
+
+        await waitFor(() => {
+            expect(updateTask).toHaveBeenCalled();
+        });
+        await waitFor(() => {
+            expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
         });
     });
 
@@ -540,6 +670,106 @@ describe('InboxProcessor', () => {
         });
     });
 
+    it('commits quick processing with Enter from title input and advances to the next item', async () => {
+        const { getByRole, getByLabelText, getByDisplayValue, updateTask } = renderInboxProcessor({
+            settings: {
+                gtd: {
+                    inboxProcessing: {
+                        defaultMode: 'quick',
+                    },
+                },
+            },
+            tasks: [inboxTask, inboxTaskTwo],
+        });
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.change(getByLabelText('taskEdit.titleLabel'), {
+            target: { value: 'Clarified launch' },
+        });
+        fireEvent.keyDown(getByLabelText('taskEdit.titleLabel'), { key: 'Enter' });
+
+        await waitFor(() => {
+            expect(updateTask).toHaveBeenCalledWith(
+                'task-1',
+                expect.objectContaining({
+                    title: 'Clarified launch',
+                    status: 'next',
+                }),
+            );
+        });
+        expect(getByDisplayValue('Follow up with Casey')).toBeTruthy();
+    });
+
+    it('commits quick processing with Ctrl+Enter without requiring input focus', async () => {
+        const { getByRole, getByDisplayValue, updateTask } = renderInboxProcessor({
+            settings: {
+                gtd: {
+                    inboxProcessing: {
+                        defaultMode: 'quick',
+                    },
+                },
+            },
+            tasks: [inboxTask, inboxTaskTwo],
+        });
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.keyDown(document, { key: 'Enter', ctrlKey: true });
+
+        await waitFor(() => {
+            expect(updateTask).toHaveBeenCalledWith(
+                'task-1',
+                expect.objectContaining({
+                    title: 'Plan launch',
+                    status: 'next',
+                }),
+            );
+        });
+        expect(getByDisplayValue('Follow up with Casey')).toBeTruthy();
+    });
+
+    it('commits quick processing with Cmd+Enter from the description textarea', async () => {
+        const { getByRole, getByLabelText, updateTask } = renderInboxProcessor({
+            settings: {
+                gtd: {
+                    inboxProcessing: {
+                        defaultMode: 'quick',
+                    },
+                },
+            },
+        });
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.change(getByLabelText('taskEdit.descriptionLabel'), {
+            target: { value: 'Captured context' },
+        });
+        fireEvent.keyDown(getByLabelText('taskEdit.descriptionLabel'), { key: 'Enter', metaKey: true });
+
+        await waitFor(() => {
+            expect(updateTask).toHaveBeenCalledWith(
+                'task-1',
+                expect.objectContaining({
+                    description: 'Captured context',
+                    status: 'next',
+                }),
+            );
+        });
+    });
+
+    it('does not commit quick processing when Enter is used in the description textarea', () => {
+        const { getByRole, getByLabelText, updateTask } = renderInboxProcessor({
+            gtd: {
+                inboxProcessing: {
+                    defaultMode: 'quick',
+                },
+            },
+        });
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.keyDown(getByLabelText('taskEdit.descriptionLabel'), { key: 'Enter' });
+
+        expect(updateTask).not.toHaveBeenCalled();
+    });
+
     it('keeps quick context and tag inputs editable while typing multiple tokens', async () => {
         const user = userEvent.setup();
         const { getByRole, getByLabelText, updateTask } = renderInboxProcessor({
@@ -570,6 +800,53 @@ describe('InboxProcessor', () => {
                     status: 'next',
                     contexts: ['@home', '@desk'],
                     tags: ['#deep', '#writing'],
+                }),
+            );
+        });
+    });
+
+    it('autocompletes quick processing context and tag inputs with ranked local labels', async () => {
+        const user = userEvent.setup();
+        const { getByRole, getByLabelText, updateTask } = renderInboxProcessor({
+            settings: {
+                gtd: {
+                    taskEditor: {
+                        hidden: [],
+                    },
+                },
+            },
+            allContexts: ['@school', '@office', '@chores'],
+            allTags: ['#deep-work', '#writing'],
+        });
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.click(getByRole('button', { name: 'process.modeQuick' }));
+
+        const contextsInput = getByLabelText('taskEdit.contextsLabel') as HTMLInputElement;
+        const tagsInput = getByLabelText('taskEdit.tagsLabel') as HTMLInputElement;
+        await user.type(contextsInput, 'of');
+        fireEvent.keyDown(contextsInput, { key: 'ArrowDown' });
+        fireEvent.keyDown(contextsInput, { key: 'Tab' });
+        await waitFor(() => {
+            expect(contextsInput.value).toBe('@office, ');
+        });
+
+        await user.type(tagsInput, 'wr');
+        fireEvent.keyDown(tagsInput, { key: 'ArrowDown' });
+        fireEvent.keyDown(tagsInput, { key: 'Tab' });
+        await waitFor(() => {
+            expect(tagsInput.value).toBe('#writing, ');
+        });
+
+        fireEvent.click(getByRole('button', { name: 'process.next' }));
+
+        await waitFor(() => {
+            expect(updateTask).toHaveBeenCalledWith(
+                'task-1',
+                expect.objectContaining({
+                    status: 'next',
+                    contexts: ['@office'],
+                    tags: ['#writing'],
                 }),
             );
         });
@@ -652,7 +929,9 @@ describe('InboxProcessor', () => {
     });
 
     it('parses quick-add date commands from the guided refine title before saving', async () => {
-        const { getByRole, getByText, getByDisplayValue, updateTask } = renderInboxProcessor();
+        const { getByRole, getByText, getByDisplayValue, updateTask } = renderInboxProcessor({
+            quickAddAutoClean: true,
+        });
 
         fireEvent.click(getByRole('button', { name: /process\.btn/i }));
         fireEvent.change(getByDisplayValue('Plan launch'), {

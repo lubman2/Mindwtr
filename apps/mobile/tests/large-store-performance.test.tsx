@@ -231,6 +231,11 @@ vi.mock('@/contexts/toast-context', () => ({
   }),
 }));
 
+vi.mock('@/lib/sync-service', () => ({
+  getMobileSyncConfigurationStatus: vi.fn().mockResolvedValue({ backend: 'off', configured: false }),
+  performMobileSync: vi.fn().mockResolvedValue({ success: true }),
+}));
+
 vi.mock('@/hooks/use-theme-colors', () => ({
   useThemeColors: () => ({
     bg: '#0f172a',
@@ -304,11 +309,6 @@ vi.mock('expo-haptics', () => ({
 
 vi.mock('@/hooks/use-mobile-area-filter', () => ({
   useMobileAreaFilter: () => ({ areaById: new Map(), resolvedAreaFilter: '__all__' }),
-}));
-
-vi.mock('@/lib/area-filter', () => ({
-  projectMatchesAreaFilter: () => true,
-  taskMatchesAreaFilter: () => true,
 }));
 
 vi.mock('@/lib/task-meta-navigation', () => ({

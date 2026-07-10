@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     addCalendarMinutes,
     buildCalendarEventTaskDraft,
+    buildCalendarPushEventFields,
     buildCalendarQuickAddTaskDraft,
     createCustomTimeEstimate,
     findFreeSlotForDay,
@@ -395,5 +396,58 @@ describe('calendar scheduling helpers', () => {
                 }),
             ],
         })).toBe(true);
+    });
+});
+
+describe('buildCalendarPushEventFields (#743)', () => {
+    const linkAttachment = (uri: string) => ({
+        id: 'att-1',
+        kind: 'link' as const,
+        title: 'Link',
+        uri,
+        createdAt: '2026-04-26T00:00:00.000Z',
+        updatedAt: '2026-04-26T00:00:00.000Z',
+    });
+
+    it('includes project, section, status, and effort in the notes', () => {
+        const result = buildCalendarPushEventFields(
+            task({ status: 'next', timeEstimate: '30min', description: 'Draft the deck' }),
+            { projectName: 'Launch', sectionName: 'Prep' },
+        );
+        expect(result.notes).toContain('Project: Launch › Prep');
+        expect(result.notes).toContain('Status: Next');
+        expect(result.notes).toContain('Effort: 30 min');
+        expect(result.notes).toContain('Draft the deck');
+        expect(result.url).toBeNull();
+    });
+
+    it('omits the effort line when the task has no estimate', () => {
+        const result = buildCalendarPushEventFields(task({ timeEstimate: undefined }));
+        expect(result.notes).not.toContain('Effort:');
+    });
+
+    it('maps an external link to the url field and the notes', () => {
+        const result = buildCalendarPushEventFields(
+            task({ attachments: [linkAttachment('https://example.com/doc')] }),
+        );
+        expect(result.url).toBe('https://example.com/doc');
+        expect(result.notes).toContain('Link: https://example.com/doc');
+    });
+
+    it('drops internal mindwtr:// links that do not resolve in external calendars', () => {
+        const result = buildCalendarPushEventFields(
+            task({ attachments: [linkAttachment('mindwtr://task/abc')] }),
+        );
+        expect(result.url).toBeNull();
+        expect(result.notes).not.toContain('mindwtr://');
+    });
+
+    it('prepends a leading note ahead of metadata and description', () => {
+        const result = buildCalendarPushEventFields(
+            task({ status: 'inbox', description: 'Body', timeEstimate: undefined }),
+            { leadingNote: 'Projected occurrence.' },
+        );
+        expect(result.notes.startsWith('Projected occurrence.')).toBe(true);
+        expect(result.notes).toContain('Body');
     });
 });

@@ -18,7 +18,7 @@ export interface ValidationResult {
     details?: string;
 }
 
-const DEFAULT_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const DEFAULT_BLOCKED_MIME_TYPES = [
     'application/x-executable',
     'application/x-msdos-program',
@@ -26,6 +26,32 @@ const DEFAULT_BLOCKED_MIME_TYPES = [
 ];
 
 const normalizeMimeType = (value?: string): string => (value || '').trim().toLowerCase();
+
+export const markAttachmentUnrecoverable = (attachment: Attachment): boolean => {
+    const now = new Date().toISOString();
+    let mutated = false;
+    if (attachment.cloudKey !== undefined) {
+        attachment.cloudKey = undefined;
+        mutated = true;
+    }
+    if (attachment.fileHash !== undefined) {
+        attachment.fileHash = undefined;
+        mutated = true;
+    }
+    if (attachment.localStatus !== 'missing') {
+        attachment.localStatus = 'missing';
+        mutated = true;
+    }
+    if (!attachment.deletedAt) {
+        attachment.deletedAt = now;
+        mutated = true;
+    }
+    if (attachment.updatedAt !== now) {
+        attachment.updatedAt = now;
+        mutated = true;
+    }
+    return mutated;
+};
 
 export async function validateAttachmentForUpload(
     attachment: Attachment,

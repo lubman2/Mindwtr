@@ -34,7 +34,6 @@ export function ListQuickAdd({
     dense = false,
 }: ListQuickAddProps) {
     const iconButtonClass = "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
-
     return (
         <form onSubmit={onSubmit} className="relative">
             <TaskInput

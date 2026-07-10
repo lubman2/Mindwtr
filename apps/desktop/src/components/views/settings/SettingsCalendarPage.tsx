@@ -8,7 +8,7 @@ import { ExternalLink } from 'lucide-react';
 
 import { cn } from '../../../lib/utils';
 
-const CALENDAR_INTEGRATION_GUIDE_URL = 'https://github.com/dongdongbh/Mindwtr/wiki/Calendar-Integration';
+const CALENDAR_INTEGRATION_GUIDE_URL = 'https://docs.mindwtr.app/use/calendar-integration';
 
 type Labels = {
     calendar: string;

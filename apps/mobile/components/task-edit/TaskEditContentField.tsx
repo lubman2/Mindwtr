@@ -5,14 +5,16 @@ import {
     TouchableOpacity,
     View,
     Platform,
-    type NativeSyntheticEvent,
-    type TextInputKeyPressEventData,
+    findNodeHandle,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import {
     generateUUID,
     getAttachmentDisplayTitle,
+    isMarkdownEditorAssistEnabled,
+    parsePastedChecklistItems,
     resolveAutoTextDirection,
+    useTaskStore,
     type MarkdownSelection,
     type Task,
 } from '@mindwtr/core';
@@ -22,8 +24,7 @@ import { MarkdownText } from '../markdown-text';
 import { getControlledTextInputSelection } from '../text-input-selection';
 import {
     applyMarkdownPairInsertionWithSelectionFallback,
-    applyMarkdownPairKeyPressWithSelectionFallback,
-    createIgnoredNativePairChange,
+    createIgnoredNativePairChangeFromTextChange,
     shouldIgnoreNativePairChange,
     type IgnoredNativePairChange,
     isRangeSelection,
@@ -119,6 +120,7 @@ export function TaskEditContentField({
     const ignoredNativePairChangeRefs = React.useRef<Record<string, IgnoredNativePairChange>>({});
     const pendingChecklistSelectionRefs = React.useRef<Record<string, MarkdownSelection | null>>({});
     const [checklistSelectionRestorePending, setChecklistSelectionRestorePending] = React.useState<Record<string, boolean>>({});
+    const descriptionFocusAnchorRef = React.useRef<View | null>(null);
     const checklistLength = editedTask.checklist?.length ?? 0;
     React.useEffect(() => {
         if (fieldId !== 'checklist' || checklistLength < 2) {
@@ -215,6 +217,13 @@ export function TaskEditContentField({
         }
     }, []);
 
+    const getDescriptionFocusScrollTarget = React.useCallback((nativeTarget?: number) => {
+        if (Platform.OS === 'android') {
+            return findNodeHandle(descriptionFocusAnchorRef.current) ?? undefined;
+        }
+        return nativeTarget || undefined;
+    }, []);
+
     const handleDescriptionSelectionChange = React.useCallback((selection: MarkdownSelection) => {
         setDescriptionSelection(selection);
 
@@ -230,24 +239,63 @@ export function TaskEditContentField({
     ]);
 
     const handleChecklistTitleChange = React.useCallback((index: number, key: string, text: string) => {
+        if (/[\r\n]/.test(text)) {
+            // Multi-line paste: split into one checklist item per line. The
+            // first line replaces this item's title; the rest insert after it.
+            const [first, ...rest] = parsePastedChecklistItems(text);
+            const list = editedTask.checklist || [];
+            const current = list[index];
+            if (!current) return;
+            const updatedCurrent = {
+                ...current,
+                title: first?.title ?? '',
+                isCompleted: current.isCompleted || (first?.isCompleted ?? false),
+            };
+            const inserted = rest.map((item) => ({
+                id: generateUUID(),
+                title: item.title,
+                isCompleted: item.isCompleted,
+            }));
+            checklistTitleRefs.current[key] = updatedCurrent.title;
+            checklistSelectionRefs.current[key] = {
+                start: updatedCurrent.title.length,
+                end: updatedCurrent.title.length,
+            };
+            lastChecklistRangeRefs.current[key] = null;
+            applyChecklistUpdate([...list.slice(0, index), updatedCurrent, ...inserted, ...list.slice(index + 1)]);
+            return;
+        }
         const previousValue = checklistTitleRefs.current[key] ?? '';
         const ignoredNativeChange = ignoredNativePairChangeRefs.current[key];
         if (ignoredNativeChange) {
-            delete ignoredNativePairChangeRefs.current[key];
             if (shouldIgnoreNativePairChange(text, previousValue, ignoredNativeChange)) {
                 restoreChecklistSelection(key, ignoredNativeChange.selection);
                 return;
             }
+            delete ignoredNativePairChangeRefs.current[key];
         }
 
         const currentSelection = getChecklistSelection(key, previousValue);
+        const assistEnabled = isMarkdownEditorAssistEnabled(useTaskStore.getState().settings);
         const pairedInsertion = applyMarkdownPairInsertionWithSelectionFallback(
             previousValue,
             text,
             currentSelection,
             lastChecklistRangeRefs.current[key],
+            { assist: assistEnabled },
         );
         if (pairedInsertion) {
+            const ignoredTextChange = createIgnoredNativePairChangeFromTextChange(
+                previousValue,
+                text,
+                pairedInsertion.baseSelection,
+                pairedInsertion.result,
+            );
+            if (ignoredTextChange) {
+                ignoredNativePairChangeRefs.current[key] = ignoredTextChange;
+            } else {
+                delete ignoredNativePairChangeRefs.current[key];
+            }
             lastChecklistRangeRefs.current[key] = isRangeSelection(pairedInsertion.result.selection)
                 ? pairedInsertion.result.selection
                 : null;
@@ -258,36 +306,12 @@ export function TaskEditContentField({
 
         lastChecklistRangeRefs.current[key] = null;
         updateChecklistTitle(index, key, text);
-    }, [getChecklistSelection, restoreChecklistSelection, updateChecklistTitle]);
+    }, [applyChecklistUpdate, editedTask.checklist, getChecklistSelection, restoreChecklistSelection, updateChecklistTitle]);
 
-    const handleChecklistKeyPress = React.useCallback((
-        index: number,
-        key: string,
-        event: NativeSyntheticEvent<TextInputKeyPressEventData>,
-    ) => {
-        const previousValue = checklistTitleRefs.current[key] ?? '';
-        const pairedInsertion = applyMarkdownPairKeyPressWithSelectionFallback(
-            previousValue,
-            event.nativeEvent.key,
-            getChecklistSelection(key, previousValue),
-            lastChecklistRangeRefs.current[key],
-        );
-        if (!pairedInsertion) return;
-
-        event.preventDefault?.();
-        ignoredNativePairChangeRefs.current[key] = createIgnoredNativePairChange(
-            previousValue,
-            event.nativeEvent.key,
-            pairedInsertion.baseSelection,
-            pairedInsertion.result,
-        );
-        lastChecklistRangeRefs.current[key] = isRangeSelection(pairedInsertion.result.selection)
-            ? pairedInsertion.result.selection
-            : null;
-        updateChecklistTitle(index, key, pairedInsertion.result.value);
-        restoreChecklistSelection(key, pairedInsertion.result.selection);
-    }, [getChecklistSelection, restoreChecklistSelection, updateChecklistTitle]);
-
+    // Checklist auto-pairing intentionally lives only in handleChecklistTitleChange. On
+    // Android the keyPress event is synthesized from the same native edit as the text
+    // change (and preventDefault cannot cancel it), so a keyPress pairing path processes
+    // one keystroke twice — IME-specific echo orders then double the pair (#565).
     const handleChecklistMove = React.useCallback((from: number, to: number) => {
         if (from === to || to < 0) return;
 
@@ -298,7 +322,11 @@ export function TaskEditContentField({
         case 'description':
             return (
                 <View style={styles.formGroup}>
-                    <View style={styles.inlineHeader}>
+                    <View
+                        ref={descriptionFocusAnchorRef}
+                        collapsable={false}
+                        style={styles.inlineHeader}
+                    >
                         <Text style={[styles.label, { color: tc.secondaryText }]}>{t('taskEdit.descriptionLabel')}</Text>
                         <View style={styles.inlineActions}>
                             <TouchableOpacity onPress={() => setShowDescriptionPreview((value) => !value)}>
@@ -336,9 +364,10 @@ export function TaskEditContentField({
                                 ref={descriptionInputRef}
                                 style={[styles.input, styles.textArea, inputStyle, textDirectionStyle]}
                                 value={descriptionDraft}
-                                onFocus={() => {
+                                onFocus={(event) => {
                                     setIsDescriptionInputFocused(true);
-                                    handleInputFocus(undefined);
+                                    const target = event.nativeEvent.target;
+                                    handleInputFocus(getDescriptionFocusScrollTarget(target));
                                 }}
                                 onBlur={() => {
                                     const preserveFocus = descriptionToolbarInteractionUntilRef.current > Date.now();
@@ -608,7 +637,6 @@ export function TaskEditContentField({
                                                     }
                                                 }}
                                                 onChangeText={(text) => handleChecklistTitleChange(index, checklistItemKey, text)}
-                                                onKeyPress={(event) => handleChecklistKeyPress(index, checklistItemKey, event)}
                                                 onSelectionChange={(event) => handleChecklistSelectionChange(
                                                     checklistItemKey,
                                                     event.nativeEvent.selection,

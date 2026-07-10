@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { ComponentProps } from 'react';
+import { useState, type ComponentProps } from 'react';
 import type { Task } from '@mindwtr/core';
 
 import { TaskQuickActionMenu } from './TaskQuickActionMenu';
@@ -28,6 +28,7 @@ const t = (key: string) => ({
     'projects.duplicate': 'Duplicate',
     'review.markReviewed': 'Mark reviewed',
     'task.convertToReference': 'Convert to Reference',
+    'task.createProjectFromTask': 'Create project from task',
     'task.aria.dueTime': 'Due time',
     'task.aria.reviewTime': 'Review time',
     'task.aria.startTime': 'Start time',
@@ -40,26 +41,46 @@ const t = (key: string) => ({
     'taskEdit.startDateLabel': 'Start Date',
 }[key] ?? key);
 
+const createMenuProps = (overrides: Partial<ComponentProps<typeof TaskQuickActionMenu>> = {}): ComponentProps<typeof TaskQuickActionMenu> => ({
+    task,
+    x: 16,
+    y: 16,
+    t,
+    dateFormatSetting: 'system',
+    nativeDateInputLocale: 'en-US',
+    contextOptions: [],
+    areas: [],
+    readOnly: false,
+    onClose: vi.fn(),
+    onDuplicate: vi.fn(),
+    onDelete: vi.fn(),
+    onStatusChange: vi.fn(),
+    onCreateArea: vi.fn(async () => null),
+    onUpdateTask: vi.fn(async () => ({ success: true })),
+    ...overrides,
+});
+
 const renderMenu = (overrides: Partial<ComponentProps<typeof TaskQuickActionMenu>> = {}) => {
-    const props: ComponentProps<typeof TaskQuickActionMenu> = {
-        task,
-        x: 16,
-        y: 16,
-        t,
-        dateFormatSetting: 'system',
-        nativeDateInputLocale: 'en-US',
-        contextOptions: [],
-        areas: [],
-        readOnly: false,
-        onClose: vi.fn(),
-        onDuplicate: vi.fn(),
-        onDelete: vi.fn(),
-        onStatusChange: vi.fn(),
-        onCreateArea: vi.fn(async () => null),
-        onUpdateTask: vi.fn(async () => ({ success: true })),
-        ...overrides,
-    };
+    const props = createMenuProps(overrides);
     render(<TaskQuickActionMenu {...props} />);
+    return props;
+};
+
+const renderClosableMenu = (overrides: Partial<ComponentProps<typeof TaskQuickActionMenu>> = {}) => {
+    const props = createMenuProps(overrides);
+    function Harness() {
+        const [open, setOpen] = useState(true);
+        return open ? (
+            <TaskQuickActionMenu
+                {...props}
+                onClose={() => {
+                    props.onClose();
+                    setOpen(false);
+                }}
+            />
+        ) : null;
+    }
+    render(<Harness />);
     return props;
 };
 
@@ -119,12 +140,30 @@ describe('TaskQuickActionMenu', () => {
         expect(props.onClose).toHaveBeenCalledTimes(1);
     });
 
+    it('ignores the initial layout scroll after opening but closes on later scrolls', () => {
+        vi.useFakeTimers();
+        try {
+            const props = renderMenu();
+
+            fireEvent.scroll(window);
+            expect(props.onClose).not.toHaveBeenCalled();
+
+            vi.advanceTimersByTime(160);
+            fireEvent.scroll(window);
+
+            expect(props.onClose).toHaveBeenCalledTimes(1);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('closes the due date mini calendar when clicking elsewhere in the quick panel', () => {
         const props = renderMenu({ task: { ...task, dueDate: '2026-04-12' } });
         fireEvent.click(screen.getByRole('menuitem', { name: 'Due Date…' }));
 
         const panel = screen.getByRole('dialog', { name: 'Due Date' });
         fireEvent.focus(within(panel).getByLabelText('Due Date'));
+        fireEvent.click(within(panel).getByRole('button', { name: 'Due Date calendar' }));
         expect(screen.getByRole('dialog', { name: 'Due Date calendar' })).toBeInTheDocument();
 
         fireEvent.pointerDown(within(panel).getByRole('button', { name: 'Cancel' }));
@@ -164,6 +203,7 @@ describe('TaskQuickActionMenu', () => {
         fireEvent.click(screen.getByRole('menuitem', { name: 'Due Date…' }));
         const panel = screen.getByRole('dialog', { name: 'Due Date' });
         fireEvent.focus(within(panel).getByLabelText('Due Date'));
+        fireEvent.click(within(panel).getByRole('button', { name: 'Due Date calendar' }));
 
         fireEvent.pointerDown(screen.getByRole('button', { name: /April 19, 2026/i }));
 
@@ -211,13 +251,65 @@ describe('TaskQuickActionMenu', () => {
         expect(props.onClose).toHaveBeenCalledTimes(1);
     });
 
+    it('advances a review-due task one week from the quick action menu', async () => {
+        const onUpdateTask = vi.fn(async () => ({ success: true as const }));
+        const props = renderMenu({
+            task: { ...task, reviewAt: '2000-01-01' },
+            onUpdateTask,
+        });
+
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Review in 1 week' }));
+
+        const expected = new Date();
+        expected.setDate(expected.getDate() + 7);
+        const expectedDate = `${expected.getFullYear()}-${String(expected.getMonth() + 1).padStart(2, '0')}-${String(expected.getDate()).padStart(2, '0')}`;
+        await waitFor(() => {
+            expect(onUpdateTask).toHaveBeenCalledWith({ reviewAt: expectedDate });
+        });
+        expect(props.onClose).toHaveBeenCalledTimes(1);
+    });
+
     it('does not show mark reviewed for future review dates', () => {
         renderMenu({
             task: { ...task, reviewAt: '2999-01-01T00:00:00.000Z' },
         });
 
         expect(screen.queryByRole('menuitem', { name: 'Mark reviewed' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('menuitem', { name: 'Review in 1 week' })).not.toBeInTheDocument();
         expect(screen.getByRole('menuitem', { name: /review date/i })).toBeInTheDocument();
+    });
+
+    it('keeps the menu open while selecting an area from the selector dropdown', async () => {
+        const onUpdateTask = vi.fn(async () => ({ success: true as const }));
+        const props = renderClosableMenu({
+            areas: [{
+                id: 'area-work',
+                name: 'Work',
+                color: '#2563eb',
+                order: 0,
+                createdAt: now,
+                updatedAt: now,
+            }],
+            onUpdateTask,
+        });
+
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Area…' }));
+        fireEvent.click(screen.getByRole('button', { name: 'No Area' }));
+
+        const option = screen.getByRole('option', { name: 'Work' });
+        fireEvent.mouseDown(option);
+        expect(props.onClose).not.toHaveBeenCalled();
+
+        fireEvent.click(option);
+        const panel = screen.getByRole('dialog', { name: 'Area' });
+        expect(within(panel).getByRole('button', { name: 'Work' })).toBeInTheDocument();
+
+        fireEvent.click(within(panel).getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => {
+            expect(onUpdateTask).toHaveBeenCalledWith({ areaId: 'area-work' });
+        });
+        expect(props.onClose).toHaveBeenCalledTimes(1);
     });
 
     it('keeps secondary task row actions in the quick menu', () => {
@@ -226,6 +318,16 @@ describe('TaskQuickActionMenu', () => {
 
         fireEvent.click(screen.getByRole('menuitem', { name: 'Convert to Reference' }));
         expect(onStatusChange).toHaveBeenCalledWith('reference');
+        expect(props.onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('runs the promote-to-project action from the quick menu', () => {
+        const onPromoteToProject = vi.fn();
+        const props = renderMenu({ onPromoteToProject });
+
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Create project from task' }));
+
+        expect(onPromoteToProject).toHaveBeenCalledTimes(1);
         expect(props.onClose).toHaveBeenCalledTimes(1);
     });
 

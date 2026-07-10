@@ -78,9 +78,15 @@
     "desktop:web:build": "bun run --filter mindwtr build:vite",
     "test": "bun run --filter @mindwtr/core test && bun run --filter mindwtr test && bun run --filter mobile test && bun run --filter mindwtr-cloud test",
     "test:perf": "bun run --filter @mindwtr/core test:perf && bun --cwd apps/mobile test tests/large-store-performance.test.tsx",
-    "typecheck": "bun run typecheck:desktop && bun run typecheck:mobile",
+    "lint:core": "bun run --filter @mindwtr/core lint",
+    "lint:cloud": "bun run --filter mindwtr-cloud lint",
+    "lint:node": "bun run lint:core && bun run lint:cloud",
+    "typecheck": "bun run typecheck:core && bun run typecheck:cloud && bun run typecheck:desktop && bun run typecheck:mobile",
+    "typecheck:core": "bun run --filter @mindwtr/core build",
+    "typecheck:cloud": "bun run --filter mindwtr-cloud typecheck",
     "typecheck:desktop": "bunx tsc --noEmit -p apps/desktop/tsconfig.json",
     "typecheck:mobile": "bunx tsc --noEmit -p apps/mobile/tsconfig.json",
+    "schema:check": "bun run scripts/check-synced-field-parity.ts",
     "native:test": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "mobile:start": "bun run --filter mobile start",
     "mobile:android": "bun run --filter mobile android",
@@ -88,9 +94,10 @@
     "mobile:startup:bench": "bash apps/mobile/scripts/android_startup_benchmark.sh",
     "test:e2e": "playwright test",
     "i18n:check": "bun run scripts/i18n-locale-parity.ts --check",
+    "docs:check-readme": "bun run scripts/check-readme-heading-parity.ts",
     "mindwtr:cli": "bun run scripts/mindwtr-cli.ts --",
     "mindwtr:api": "bun run scripts/mindwtr-api.ts --",
-    "mindwtr:mcp": "bun run --filter mindwtr-mcp-server dev --",
+    "mindwtr:mcp": "bun run --filter mindwtr-mcp dev --",
     "set-version": "bun run scripts/set-version.ts"
   },
   "devDependencies": {
@@ -162,5 +169,5 @@
     "webidl-conversions": "^8.0.0",
     "whatwg-url-without-unicode": "^8.0.0-3"
   },
-  "version": "0.9.9"
+  "version": "1.1.0"
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Calendar, Check, CheckSquare, ChevronLeft, Star, X, type LucideIcon } from 'lucide-react';
+import { ArrowRight, Calendar, Check, CheckSquare, ChevronLeft, X, type LucideIcon } from 'lucide-react';
 import {
     getUsedTaskTokens,
     formatFocusTaskLimitText,
@@ -9,6 +9,7 @@ import {
     safeParseDate,
     safeParseDueDate,
     sortTasksBy,
+    tFallback,
     type ExternalCalendarEvent,
     type Task,
     type TaskSortBy,
@@ -18,6 +19,7 @@ import {
 } from '@mindwtr/core';
 import { cn } from '../../../lib/utils';
 import { useLanguage } from '../../../contexts/language-context';
+import { FocusStarIcon } from '../../FocusStarIcon';
 import { InboxProcessor } from '../InboxProcessor';
 import { ModalPortal } from '../../ModalPortal';
 import { TaskItem } from '../../TaskItem';
@@ -51,12 +53,13 @@ interface DailyReviewGuideModalProps {
 
 export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
     const [currentStep, setCurrentStep] = useState<DailyReviewStep>(() => loadStoredDailyReviewStep());
-    const { tasks, projects, areas, settings, addProject, updateTask, deleteTask } = useTaskStore(
+    const { tasks, projects, areas, settings, addTask, addProject, updateTask, deleteTask } = useTaskStore(
         (state) => ({
             tasks: state.tasks,
             projects: state.projects,
             areas: state.areas,
             settings: state.settings,
+            addTask: state.addTask,
             addProject: state.addProject,
             updateTask: state.updateTask,
             deleteTask: state.deleteTask,
@@ -71,8 +74,11 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
 
     const [today] = useState(() => new Date());
     const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const followUpTodayReviewAt = startOfToday.toISOString();
     const sortBy = (settings?.taskSortBy ?? 'default') as TaskSortBy;
     const focusTaskLimit = normalizeFocusTaskLimit(settings?.gtd?.focusTaskLimit);
+    const followUpTodayLabel = tFallback(t, 'dailyReview.followUpToday', 'Follow up today');
+    const reviewDueLabel = tFallback(t, 'agenda.reviewDue', 'Review Due');
 
     const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
 
@@ -101,6 +107,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
     });
 
     const allContexts = getUsedTaskTokens(activeTasks, (task) => task.contexts, { prefix: '@' });
+    const allTags = getUsedTaskTokens(activeTasks, (task) => task.tags, { prefix: '#' });
 
     const sequentialProjectIds = useMemo(
         () => new Set(projects.filter((project) => project.isSequential && !project.deletedAt).map((project) => project.id)),
@@ -258,11 +265,13 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
             { id: 'today', title: t('dailyReview.todayStep'), description: t('dailyReview.todayDesc'), icon: Calendar, hasWork: todayHasWork },
         ];
         visibleSteps.push({ id: 'inbox', title: t('dailyReview.inboxStep'), description: t('dailyReview.inboxDesc'), icon: CheckSquare, hasWork: inboxTasks.length > 0 });
+        // Waiting For comes before focus selection: items unblocked today can be
+        // switched to Next here and then picked up in the focus step.
+        visibleSteps.push({ id: 'waiting', title: t('dailyReview.waitingStep'), description: t('dailyReview.waitingDesc'), icon: ArrowRight, hasWork: waitingTasks.length > 0 });
         if (includeFocusStep) {
             visibleSteps.push({ id: 'focus', title: t('dailyReview.focusStep'), description: t('dailyReview.focusDesc'), icon: CheckSquare, hasWork: focusCandidates.length > 0 });
         }
         visibleSteps.push(
-            { id: 'waiting', title: t('dailyReview.waitingStep'), description: t('dailyReview.waitingDesc'), icon: ArrowRight, hasWork: waitingTasks.length > 0 },
             { id: 'completed', title: t('dailyReview.completeTitle'), description: t('dailyReview.completeDesc'), icon: Check, hasWork: true },
         );
         return visibleSteps;
@@ -354,7 +363,11 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
         </div>
     );
 
-    const renderTaskList = (list: Task[], emptyText: string) => {
+    const handleFollowUpToday = (task: Task) => {
+        void updateTask(task.id, { reviewAt: followUpTodayReviewAt });
+    };
+
+    const renderTaskList = (list: Task[], emptyText: string, options?: { showFollowUpToday?: boolean }) => {
         if (list.length === 0) {
             return (
                 <div className="text-center py-12 text-muted-foreground">
@@ -365,7 +378,23 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
         return (
             <div className="divide-y divide-border/30">
                 {list.slice(0, 10).map((task) => (
-                    <TaskItem key={task.id} task={task} showProjectBadgeInActions={false} />
+                    <div key={task.id} className={cn(options?.showFollowUpToday && "py-2")}>
+                        <TaskItem task={task} showProjectBadgeInActions={false} />
+                        {options?.showFollowUpToday && (
+                            <div className="mt-2 flex justify-end">
+                                <button
+                                    type="button"
+                                    onClick={() => handleFollowUpToday(task)}
+                                    disabled={isDueForReview(task.reviewAt, today)}
+                                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                                    aria-label={`${followUpTodayLabel}: ${task.title}`}
+                                >
+                                    <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
+                                    {isDueForReview(task.reviewAt, today) ? reviewDueLabel : followUpTodayLabel}
+                                </button>
+                            </div>
+                        )}
+                    </div>
                 ))}
             </div>
         );
@@ -395,7 +424,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                         >
                             <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2">
-                                    {task.isFocusedToday && <Star className="w-4 h-4 text-yellow-500 fill-yellow-500" />}
+                                    {task.isFocusedToday && <FocusStarIcon className="w-4 h-4 text-yellow-500" filled />}
                                     <span className={cn("font-medium truncate", task.status === 'done' && "line-through text-muted-foreground")}>
                                         {task.title}
                                     </span>
@@ -421,11 +450,10 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                             <button
                                 type="button"
                                 onClick={() => {
-                                    if (task.isFocusedToday) {
-                                        updateTask(task.id, { isFocusedToday: false });
-                                    } else if (focusedCount < focusTaskLimit) {
-                                        updateTask(task.id, { isFocusedToday: true });
-                                    }
+                                    // Core focus-star module: eligibility + cap + patch.
+                                    const action = useTaskStore.getState().getFocusStarAction(task);
+                                    if (!action.canToggle) return;
+                                    updateTask(task.id, action.patch);
                                 }}
                                 disabled={!canFocus}
                                 className={cn(
@@ -443,7 +471,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                                         ? formatFocusTaskLimitText(t('agenda.maxFocusItems'), focusTaskLimit)
                                         : t('agenda.addToFocus')}
                             >
-                                <Star className={cn("w-4 h-4", task.isFocusedToday && "fill-current")} />
+                                <FocusStarIcon className="w-4 h-4" filled={task.isFocusedToday} />
                             </button>
                         </div>
                     );
@@ -544,10 +572,12 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                             projects={projects}
                             areas={areas}
                             settings={settings}
+                            addTask={addTask}
                             addProject={addProject}
                             updateTask={updateTask}
                             deleteTask={deleteTask}
                             allContexts={allContexts}
+                            allTags={allTags}
                             isProcessing={isProcessing}
                             setIsProcessing={setIsProcessing}
                         />
@@ -565,7 +595,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                                 <span className="font-bold text-foreground">{waitingTasks.length}</span> {t('common.tasks')}
                             </p>
                         </div>
-                        {renderTaskList(waitingTasks, t('review.waitingEmpty'))}
+                        {renderTaskList(waitingTasks, t('review.waitingEmpty'), { showFollowUpToday: true })}
                     </div>
                 );
 

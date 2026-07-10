@@ -61,7 +61,7 @@ export function ListBulkActions({
                 <button
                     onClick={onBulkOrganize}
                     className="inline-flex items-center gap-1.5 rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-                    aria-label={tFallback(t, 'bulk.organizeInbox', 'Bulk organize Inbox')}
+                    aria-label={tFallback(t, 'bulk.organize', 'Bulk organize')}
                 >
                     <ClipboardCheck className="h-3.5 w-3.5" aria-hidden="true" />
                     {tFallback(t, 'bulk.organize', 'Bulk organize')}

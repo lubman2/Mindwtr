@@ -56,17 +56,19 @@ export function groupFocusTasksByContext(tasks: Task[], noContextLabel: string):
     const noContextTasks: Task[] = [];
 
     tasks.forEach((task) => {
-        const primaryContext = (task.contexts ?? [])
+        const contexts = (task.contexts ?? [])
             .map((value) => value.trim())
-            .find((value) => value.length > 0);
-        if (!primaryContext) {
+            .filter((value) => value.length > 0);
+        if (contexts.length === 0) {
             noContextTasks.push(task);
             return;
         }
 
-        const contextTasks = grouped.get(primaryContext) ?? [];
-        contextTasks.push(task);
-        grouped.set(primaryContext, contextTasks);
+        Array.from(new Set(contexts)).forEach((context) => {
+            const contextTasks = grouped.get(context) ?? [];
+            contextTasks.push(task);
+            grouped.set(context, contextTasks);
+        });
     });
 
     const groups: FocusContextTaskGroup[] = [];
@@ -86,6 +88,49 @@ export function groupFocusTasksByContext(tasks: Task[], noContextLabel: string):
                 id: `context:${context}`,
                 title: context,
                 tasks: grouped.get(context) ?? [],
+            });
+        });
+
+    return groups;
+}
+
+export function groupFocusTasksByTag(tasks: Task[], noTagLabel: string): FocusContextTaskGroup[] {
+    const grouped = new Map<string, Task[]>();
+    const noTagTasks: Task[] = [];
+
+    tasks.forEach((task) => {
+        const tags = (task.tags ?? [])
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0);
+        if (tags.length === 0) {
+            noTagTasks.push(task);
+            return;
+        }
+
+        Array.from(new Set(tags)).forEach((tag) => {
+            const tagTasks = grouped.get(tag) ?? [];
+            tagTasks.push(task);
+            grouped.set(tag, tagTasks);
+        });
+    });
+
+    const groups: FocusContextTaskGroup[] = [];
+    if (noTagTasks.length > 0) {
+        groups.push({
+            id: 'tag:none',
+            title: noTagLabel,
+            tasks: noTagTasks,
+            muted: true,
+        });
+    }
+
+    [...grouped.keys()]
+        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+        .forEach((tag) => {
+            groups.push({
+                id: `tag:${tag}`,
+                title: tag,
+                tasks: grouped.get(tag) ?? [],
             });
         });
 

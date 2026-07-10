@@ -1,7 +1,7 @@
 {
   "name": "@mindwtr/core",
   "license": "AGPL-3.0-only",
-  "version": "0.9.9",
+  "version": "1.1.0",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "exports": {
@@ -13,6 +13,7 @@
     "./sync-helpers": "./src/sync-helpers.ts",
     "./sync-service-utils": "./src/sync-service-utils.ts",
     "./task-utils": "./src/task-utils.ts",
+    "./task-draft": "./src/task-draft.ts",
     "./contexts": "./src/contexts.ts",
     "./i18n": "./src/i18n.ts",
     "./i18n-storage": "./src/i18n-storage.ts",
@@ -25,6 +26,7 @@
     "./uuid": "./src/uuid.ts",
     "./date": "./src/date.ts",
     "./quick-add": "./src/quick-add.ts",
+    "./capture": "./src/capture.ts",
     "./area-filter": "./src/area-filter.ts",
     "./calendar-scheduling": "./src/calendar-scheduling.ts",
     "./schedule-utils": "./src/schedule-utils.ts",
@@ -40,12 +42,14 @@
     "./attachment-hash": "./src/attachment-hash.ts",
     "./attachment-validation": "./src/attachment-validation.ts",
     "./attachment-progress": "./src/attachment-progress.ts",
+    "./attachment-transfer": "./src/attachment-transfer.ts",
     "./attachment-cleanup": "./src/attachment-cleanup.ts",
     "./backup-transfer": "./src/backup-transfer.ts",
     "./ics": "./src/ics.ts",
     "./task-status": "./src/task-status.ts",
     "./text-direction": "./src/text-direction.ts",
     "./todoist-import": "./src/todoist-import.ts",
+    "./ticktick-import": "./src/ticktick-import.ts",
     "./dgt-import": "./src/dgt-import.ts",
     "./omnifocus-import": "./src/omnifocus-import.ts",
     "./ai/ai-service": "./src/ai/ai-service.ts",
@@ -54,7 +58,8 @@
     "./ai-config": "./src/ai-config.ts",
     "./sqlite-schema": "./src/sqlite-schema.ts",
     "./sqlite-adapter": "./src/sqlite-adapter.ts",
-    "./logger": "./src/logger.ts"
+    "./logger": "./src/logger.ts",
+    "./performance-log": "./src/performance-log.ts"
   },
   "sideEffects": false,
   "type": "module",
@@ -69,6 +74,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "lint": "eslint -c ../../eslint.node.config.mjs \"src/**/*.ts\" --ignore-pattern \"src/**/*.test.ts\"",
     "bench": "vitest bench",
     "test": "vitest run",
     "test:perf": "MINDWTR_PERF_TEST=1 vitest run src/performance-large-store.test.ts"

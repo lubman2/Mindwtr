@@ -66,6 +66,34 @@ describe('ProjectRow', () => {
     vi.clearAllMocks();
   });
 
+  it('requires a deliberate horizontal drag before opening project swipe actions', () => {
+    let tree!: renderer.ReactTestRenderer;
+    renderer.act(() => {
+      tree = renderer.create(
+        <ProjectRow
+          project={project}
+          tc={tc}
+          focusedCount={0}
+          statusPalette={statusPalette as any}
+          t={(key) => key}
+          onDeleteProject={vi.fn()}
+          onDuplicateProject={vi.fn()}
+          onOpenProject={vi.fn()}
+          onToggleProjectFocus={vi.fn()}
+        />,
+      );
+    });
+
+    const swipeable = tree.root.find((node) => (node.type as unknown) === 'Swipeable');
+    expect(swipeable.props.friction).toBe(1.25);
+    expect(swipeable.props.leftThreshold).toBe(72);
+    expect(swipeable.props.rightThreshold).toBe(72);
+    expect(swipeable.props.dragOffsetFromLeftEdge).toBe(28);
+    expect(swipeable.props.dragOffsetFromRightEdge).toBe(28);
+    expect(swipeable.props.overshootLeft).toBe(false);
+    expect(swipeable.props.overshootRight).toBe(false);
+  });
+
   it('uses a 12px hitSlop and triggers selection haptics when focusing a project', () => {
     const onToggleProjectFocus = vi.fn();
 

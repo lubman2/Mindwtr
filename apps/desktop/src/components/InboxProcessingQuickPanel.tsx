@@ -1,3 +1,4 @@
+import { useEffect, useRef, type KeyboardEvent } from 'react';
 import { ArrowRight, BookOpen, CheckCircle, ClipboardList, Clock, Trash2, User, X } from 'lucide-react';
 import { DEFAULT_PROJECT_COLOR, filterProjectsBySelectedArea, safeFormatDate, safeParseDate, tFallback, type Area, type Project, type Task, type TaskPriority, type TimeEstimate } from '@mindwtr/core';
 
@@ -7,6 +8,8 @@ import {
     type InboxProcessingScheduleFieldKey,
     type InboxProcessingScheduleFieldsControls,
 } from './InboxProcessingScheduleFields';
+import { TokenAutocompleteInput } from './Task/TokenAutocompleteInput';
+import { AreaSelector } from './ui/AreaSelector';
 import { ProjectSelector } from './ui/ProjectSelector';
 import { QuickDateChips } from './QuickDateChips';
 
@@ -66,6 +69,8 @@ export type InboxProcessingQuickPanelProps = {
     toggleTag: (tag: string) => void;
     suggestedContexts: string[];
     suggestedTags: string[];
+    allContexts: string[];
+    allTags: string[];
     projects: Project[];
     areas: Area[];
     selectedProjectId: string | null;
@@ -103,6 +108,27 @@ const formatTimeEstimateLabel = (value: TimeEstimate): string => {
     if (value === '4hr') return '4h';
     return '4h+';
 };
+
+const shouldCommitQuickProcessingFromEnter = (target: EventTarget | null): boolean => {
+    if (!(target instanceof HTMLElement)) return false;
+    if (target.isContentEditable) return false;
+    if (target.closest('button, [role="button"], [role="option"], [role="listbox"]')) return false;
+
+    const tagName = target.tagName.toLowerCase();
+    if (tagName === 'textarea' || tagName === 'select') return false;
+    return tagName === 'input';
+};
+
+const shouldCommitQuickProcessingFromShortcut = (target: EventTarget | null): boolean => {
+    if (!(target instanceof HTMLElement)) return true;
+    if (target.isContentEditable) return false;
+    if (target.closest('[role="option"], [role="listbox"]')) return false;
+    return target.tagName.toLowerCase() !== 'select';
+};
+
+const isQuickProcessingSubmitShortcut = (event: Pick<KeyboardEvent | globalThis.KeyboardEvent, 'altKey' | 'ctrlKey' | 'key' | 'metaKey' | 'shiftKey'>): boolean => (
+    event.key === 'Enter' && !event.shiftKey && !event.altKey && (event.ctrlKey || event.metaKey)
+);
 
 export function InboxProcessingQuickPanel({
     t,
@@ -156,6 +182,8 @@ export function InboxProcessingQuickPanel({
     toggleTag,
     suggestedContexts,
     suggestedTags,
+    allContexts,
+    allTags,
     projects,
     areas,
     selectedProjectId,
@@ -178,6 +206,7 @@ export function InboxProcessingQuickPanel({
     const showDecisionFields = showActionFields && twoMinuteChoice === 'no';
     const showDelegationFields = showDecisionFields && executionChoice === 'delegate';
     const showNextActionFields = showDecisionFields && executionChoice === 'defer';
+    const showReferenceOrganizationFields = actionabilityChoice === 'reference';
     const laterLabel = tFallback(t, 'process.later', 'Later');
     const laterHint = tFallback(t, 'process.laterHint', 'Set a start date and move this to Next.');
     const compareLabels = (left: string, right: string) =>
@@ -185,9 +214,120 @@ export function InboxProcessingQuickPanel({
     const sortedProjects = [...projects].sort((a, b) => compareLabels(a.title, b.title));
     const projectFilterAreaId = selectedAreaId || undefined;
     const filteredProjects = filterProjectsBySelectedArea(sortedProjects, projectFilterAreaId);
+    const organizationTokenFields = showContextsField || showTagsField ? (
+        <div className="grid gap-3 md:grid-cols-2">
+            {showContextsField ? (
+                <div className="space-y-2">
+                    <label htmlFor="quick-processing-contexts" className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.contextsLabel')}</label>
+                    <TokenAutocompleteInput
+                        id="quick-processing-contexts"
+                        aria-label={t('taskEdit.contextsLabel')}
+                        value={contextsDraft}
+                        onChange={onContextsInputChange}
+                        suggestions={[...suggestedContexts, ...allContexts]}
+                        prefix="@"
+                        placeholder={t('taskEdit.contextsPlaceholder')}
+                        className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                    />
+                    {suggestedContexts.length > 0 ? (
+                        <div className="flex flex-wrap gap-2">
+                            {suggestedContexts.map((ctx) => (
+                                <button
+                                    key={ctx}
+                                    type="button"
+                                    onClick={() => toggleContext(ctx)}
+                                    className={cn(
+                                        'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                                        selectedContexts.includes(ctx)
+                                            ? 'bg-primary text-primary-foreground border-primary'
+                                            : 'bg-muted/40 border-border hover:bg-muted/70'
+                                    )}
+                                >
+                                    {ctx}
+                                </button>
+                            ))}
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
+            {showTagsField ? (
+                <div className="space-y-2">
+                    <label htmlFor="quick-processing-tags" className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.tagsLabel')}</label>
+                    <TokenAutocompleteInput
+                        id="quick-processing-tags"
+                        aria-label={t('taskEdit.tagsLabel')}
+                        value={tagsDraft}
+                        onChange={onTagsInputChange}
+                        suggestions={[...suggestedTags, ...allTags]}
+                        prefix="#"
+                        placeholder={t('taskEdit.tagsPlaceholder')}
+                        className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                    />
+                    {suggestedTags.length > 0 ? (
+                        <div className="flex flex-wrap gap-2">
+                            {suggestedTags.map((tag) => (
+                                <button
+                                    key={tag}
+                                    type="button"
+                                    onClick={() => toggleTag(tag)}
+                                    className={cn(
+                                        'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                                        selectedTags.includes(tag)
+                                            ? 'bg-emerald-500 text-white border-emerald-600'
+                                            : 'bg-muted/40 border-border hover:bg-muted/70'
+                                    )}
+                                >
+                                    {tag}
+                                </button>
+                            ))}
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
+        </div>
+    ) : null;
+
+    useEffect(() => {
+        const handleDocumentKeyDown = (event: globalThis.KeyboardEvent) => {
+            if (event.defaultPrevented) return;
+            if (event.key === 'Process' || event.isComposing) return;
+            if (!isQuickProcessingSubmitShortcut(event)) return;
+            if (!shouldCommitQuickProcessingFromShortcut(event.target)) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            void onSubmit();
+        };
+
+        document.addEventListener('keydown', handleDocumentKeyDown);
+        return () => document.removeEventListener('keydown', handleDocumentKeyDown);
+    }, [onSubmit]);
+
+    // After a long form is submitted the view is left scrolled to the bottom;
+    // bring the panel top (title of the next task) back into view on advance.
+    const panelRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        panelRef.current?.scrollIntoView?.({ block: 'start' });
+    }, [processingTask.id]);
+
+    const handlePanelKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+        if (event.defaultPrevented) return;
+        if (event.key === 'Process' || event.nativeEvent.isComposing) return;
+        if (isQuickProcessingSubmitShortcut(event)) return;
+        if (event.key !== 'Enter' || event.shiftKey || event.altKey) return;
+        if (!shouldCommitQuickProcessingFromEnter(event.target)) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        void onSubmit();
+    };
 
     return (
-        <div className="bg-card border border-border rounded-xl animate-in fade-in overflow-visible">
+        <div
+            ref={panelRef}
+            className="bg-card border border-border rounded-xl animate-in fade-in overflow-visible"
+            onKeyDown={handlePanelKeyDown}
+        >
             <div className="flex items-center justify-between gap-3 px-5 py-3.5">
                 <div className="flex items-center gap-2.5 min-w-0">
                     <h3 className="font-semibold text-[15px] truncate inline-flex items-center gap-2">
@@ -365,6 +505,12 @@ export function InboxProcessingQuickPanel({
                     </div>
                 ) : null}
 
+                {showReferenceOrganizationFields && organizationTokenFields ? (
+                    <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
+                        {organizationTokenFields}
+                    </div>
+                ) : null}
+
                 {showActionFields ? (
                     <div className="space-y-3">
                         <div>
@@ -512,19 +658,17 @@ export function InboxProcessingQuickPanel({
                                 {showAreaField ? (
                                     <div className="space-y-1">
                                         <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.areaLabel')}</label>
-                                        <select
-                                            aria-label={t('taskEdit.areaLabel')}
+                                        <AreaSelector
+                                            areas={areas}
                                             value={selectedAreaId ?? ''}
-                                            onChange={(event) => setSelectedAreaId(event.target.value || null)}
-                                            className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
-                                        >
-                                            <option value="">{t('projects.noArea')}</option>
-                                            {areas.map((area) => (
-                                                <option key={area.id} value={area.id}>
-                                                    {area.name}
-                                                </option>
-                                            ))}
-                                        </select>
+                                            onChange={(value) => setSelectedAreaId(value || null)}
+                                            placeholder={t('projects.noArea')}
+                                            noAreaLabel={t('projects.noArea')}
+                                            searchPlaceholder={t('areas.search')}
+                                            noMatchesLabel={t('common.noMatches')}
+                                            controlClassName="rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                                            menuClassName="text-sm"
+                                        />
                                     </div>
                                 ) : null}
                                 <div className="space-y-1">
@@ -552,19 +696,17 @@ export function InboxProcessingQuickPanel({
                                 {!selectedProjectId && showAreaField ? (
                                     <div className="space-y-1">
                                         <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.areaLabel')}</label>
-                                        <select
-                                            aria-label={t('taskEdit.areaLabel')}
+                                        <AreaSelector
+                                            areas={areas}
                                             value={selectedAreaId ?? ''}
-                                            onChange={(event) => setSelectedAreaId(event.target.value || null)}
-                                            className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
-                                        >
-                                            <option value="">{t('projects.noArea')}</option>
-                                            {areas.map((area) => (
-                                                <option key={area.id} value={area.id}>
-                                                    {area.name}
-                                                </option>
-                                            ))}
-                                        </select>
+                                            onChange={(value) => setSelectedAreaId(value || null)}
+                                            placeholder={t('projects.noArea')}
+                                            noAreaLabel={t('projects.noArea')}
+                                            searchPlaceholder={t('areas.search')}
+                                            noMatchesLabel={t('common.noMatches')}
+                                            controlClassName="rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                                            menuClassName="text-sm"
+                                        />
                                     </div>
                                 ) : null}
                                 {showProjectField ? (
@@ -603,72 +745,7 @@ export function InboxProcessingQuickPanel({
                             </div>
                         )}
 
-                        {showContextsField || showTagsField ? (
-                            <div className="grid gap-3 md:grid-cols-2">
-                                {showContextsField ? (
-                                    <div className="space-y-2">
-                                        <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.contextsLabel')}</label>
-                                        <input
-                                            aria-label={t('taskEdit.contextsLabel')}
-                                            value={contextsDraft}
-                                            onChange={(event) => onContextsInputChange(event.target.value)}
-                                            placeholder={t('taskEdit.contextsPlaceholder')}
-                                            className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
-                                        />
-                                        {suggestedContexts.length > 0 ? (
-                                            <div className="flex flex-wrap gap-2">
-                                                {suggestedContexts.map((ctx) => (
-                                                    <button
-                                                        key={ctx}
-                                                        type="button"
-                                                        onClick={() => toggleContext(ctx)}
-                                                        className={cn(
-                                                            'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
-                                                            selectedContexts.includes(ctx)
-                                                                ? 'bg-primary text-primary-foreground border-primary'
-                                                                : 'bg-muted/40 border-border hover:bg-muted/70'
-                                                        )}
-                                                    >
-                                                        {ctx}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        ) : null}
-                                    </div>
-                                ) : null}
-                                {showTagsField ? (
-                                    <div className="space-y-2">
-                                        <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.tagsLabel')}</label>
-                                        <input
-                                            aria-label={t('taskEdit.tagsLabel')}
-                                            value={tagsDraft}
-                                            onChange={(event) => onTagsInputChange(event.target.value)}
-                                            placeholder={t('taskEdit.tagsPlaceholder')}
-                                            className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
-                                        />
-                                        {suggestedTags.length > 0 ? (
-                                            <div className="flex flex-wrap gap-2">
-                                                {suggestedTags.map((tag) => (
-                                                    <button
-                                                        key={tag}
-                                                        type="button"
-                                                        onClick={() => toggleTag(tag)}
-                                                        className={cn(
-                                                            'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
-                                                            selectedTags.includes(tag)
-                                                                ? 'bg-emerald-500 text-white border-emerald-600'
-                                                                : 'bg-muted/40 border-border hover:bg-muted/70'
-                                                        )}
-                                                    >
-                                                        {tag}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        ) : null}
-                                    </div>
-                                ) : null}
-                            </div>
-                        ) : null}
+                        {organizationTokenFields}
 
                         {showPriorityField ? (
                             <div className="space-y-2">

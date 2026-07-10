@@ -1,11 +1,13 @@
 import { createWithEqualityFn } from 'zustand/traditional';
-import type { TaskPriority, TimeEstimate } from '@mindwtr/core';
+import type { FilterCriteria } from '@mindwtr/core';
 
 const toastTimeouts = new Map<string, number>();
-type ListNextGroupBy = 'none' | 'context' | 'area' | 'project' | 'energy' | 'priority';
+type ListNextGroupBy = 'none' | 'context' | 'area' | 'project' | 'energy' | 'priority' | 'person' | 'tag';
+type ListReferenceGroupBy = 'none' | 'context' | 'area' | 'project' | 'tag';
 type ListOptions = {
     showDetails: boolean;
     nextGroupBy: ListNextGroupBy;
+    referenceGroupBy: ListReferenceGroupBy;
     focusTop3Only: boolean;
 };
 
@@ -14,6 +16,7 @@ export const LIST_OPTIONS_STORAGE_KEY = 'mindwtr:list-options:v1';
 const DEFAULT_LIST_OPTIONS: ListOptions = {
     showDetails: false,
     nextGroupBy: 'none',
+    referenceGroupBy: 'area',
     focusTop3Only: false,
 };
 
@@ -23,7 +26,17 @@ function isListNextGroupBy(value: unknown): value is ListNextGroupBy {
         || value === 'area'
         || value === 'project'
         || value === 'energy'
-        || value === 'priority';
+        || value === 'priority'
+        || value === 'person'
+        || value === 'tag';
+}
+
+function isListReferenceGroupBy(value: unknown): value is ListReferenceGroupBy {
+    return value === 'none'
+        || value === 'context'
+        || value === 'area'
+        || value === 'project'
+        || value === 'tag';
 }
 
 function getListOptionsStorage(): Storage | null {
@@ -45,6 +58,7 @@ function readStoredListOptions(): ListOptions {
         return {
             showDetails: typeof parsed?.showDetails === 'boolean' ? parsed.showDetails : DEFAULT_LIST_OPTIONS.showDetails,
             nextGroupBy: isListNextGroupBy(parsed?.nextGroupBy) ? parsed.nextGroupBy : DEFAULT_LIST_OPTIONS.nextGroupBy,
+            referenceGroupBy: isListReferenceGroupBy(parsed?.referenceGroupBy) ? parsed.referenceGroupBy : DEFAULT_LIST_OPTIONS.referenceGroupBy,
             focusTop3Only: typeof parsed?.focusTop3Only === 'boolean' ? parsed.focusTop3Only : DEFAULT_LIST_OPTIONS.focusTop3Only,
         };
     } catch {
@@ -80,9 +94,7 @@ interface UiState {
     ) => void;
     dismissToast: (id: string) => void;
     listFilters: {
-        tokens: string[];
-        priorities: TaskPriority[];
-        estimates: TimeEstimate[];
+        criteria: FilterCriteria;
         open: boolean;
     };
     setListFilters: (partial: Partial<UiState['listFilters']>) => void;
@@ -96,7 +108,7 @@ interface UiState {
     setTaskExpanded: (taskId: string, expanded: boolean) => void;
     toggleTaskExpanded: (taskId: string) => void;
     boardFilters: {
-        selectedProjectIds: string[];
+        criteria: FilterCriteria;
     };
     setBoardFilters: (partial: Partial<UiState['boardFilters']>) => void;
     projectView: {
@@ -128,9 +140,7 @@ export const useUiStore = createWithEqualityFn<UiState>()((set) => ({
         set((state) => ({ toasts: state.toasts.filter((toast) => toast.id !== id) }));
     },
     listFilters: {
-        tokens: [],
-        priorities: [],
-        estimates: [],
+        criteria: {},
         open: false,
     },
     setListFilters: (partial) =>
@@ -139,9 +149,7 @@ export const useUiStore = createWithEqualityFn<UiState>()((set) => ({
         set((state) => ({
             listFilters: {
                 ...state.listFilters,
-                tokens: [],
-                priorities: [],
-                estimates: [],
+                criteria: {},
             },
         })),
     listOptions: readStoredListOptions(),
@@ -188,7 +196,7 @@ export const useUiStore = createWithEqualityFn<UiState>()((set) => ({
             };
         }),
     boardFilters: {
-        selectedProjectIds: [],
+        criteria: {},
     },
     setBoardFilters: (partial) =>
         set((state) => ({ boardFilters: { ...state.boardFilters, ...partial } })),

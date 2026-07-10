@@ -26,7 +26,6 @@ export const useProjectsViewStore = () =>
             addSection: state.addSection,
             updateSection: state.updateSection,
             deleteSection: state.deleteSection,
-            addTask: state.addTask,
             toggleProjectFocus: state.toggleProjectFocus,
             allTasks: state._allTasks,
             highlightTaskId: state.highlightTaskId,

@@ -3,7 +3,8 @@ import type { Task, TaskStatus } from './types';
 export type BulkOrganizeStatus = Exclude<TaskStatus, 'inbox' | 'archived'>;
 
 export type BulkOrganizeTaskUpdateInput = {
-    status: BulkOrganizeStatus;
+    /** Omit to keep each task's current status. */
+    status?: BulkOrganizeStatus;
     projectId?: string | null;
     areaId?: string | null;
     contexts?: string[];
@@ -49,9 +50,10 @@ export function buildBulkOrganizeTaskUpdate(
     task: Pick<Task, 'contexts' | 'tags'>,
     input: BulkOrganizeTaskUpdateInput,
 ): Partial<Task> {
-    const updates: Partial<Task> = {
-        status: input.status,
-    };
+    const updates: Partial<Task> = {};
+    if (input.status) {
+        updates.status = input.status;
+    }
 
     const hasProjectChoice = hasOwn(input, 'projectId');
     const hasAreaChoice = hasOwn(input, 'areaId');
@@ -94,6 +96,10 @@ export function buildBulkOrganizeTaskUpdates(
     return taskIds.flatMap((id) => {
         const task = isTaskMap(tasksById) ? tasksById.get(id) : tasksById[id];
         if (!task) return [];
-        return [{ id, updates: buildBulkOrganizeTaskUpdate(task, input) }];
+        const updates = buildBulkOrganizeTaskUpdate(task, input);
+        // An all-"keep" apply has nothing to say; skip the write so tasks do
+        // not get a pointless rev/updatedAt bump.
+        if (Object.keys(updates).length === 0) return [];
+        return [{ id, updates }];
     });
 }

@@ -61,9 +61,39 @@ const storeState = {
     addTask: vi.fn(),
 };
 
+vi.mock('react-native', async () => {
+    const actual = await vi.importActual<any>('react-native');
+    return {
+        ...actual,
+        FlatList: ({ data = [], renderItem, keyExtractor, ...props }: any) =>
+            React.createElement(
+                'FlatList',
+                props,
+                data.map((item: any, index: number) =>
+                    React.createElement(
+                        React.Fragment,
+                        { key: keyExtractor?.(item, index) ?? item.id ?? index },
+                        renderItem?.({ item, index }),
+                    ),
+                ),
+            ),
+    };
+});
+
 vi.mock('@mindwtr/core', () => ({
     useTaskStore: () => storeState,
+    shallow: vi.fn((a, b) => a === b),
+    getMindSweepGroups: vi.fn(() => [
+        {
+            id: 'test-group',
+            scope: 'personal',
+            titleKey: 'mindSweep.group.test.title',
+            promptKeys: ['mindSweep.group.test.p1'],
+        },
+    ]),
     createAIProvider: vi.fn(),
+    formatI18nTemplate: vi.fn((template: string, values: Record<string, string | number>) =>
+        template.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (match, key) => String(values[key] ?? match))),
     getStaleItems: vi.fn(() => []),
     isDueForReview: vi.fn(() => false),
     isTaskInActiveProject: vi.fn(() => true),
@@ -85,6 +115,10 @@ vi.mock('../contexts/language-context', () => ({
 
 vi.mock('../contexts/quick-capture-context', () => ({
     useQuickCapture: () => ({ openQuickCapture: vi.fn() }),
+}));
+
+vi.mock('@/hooks/use-theme-tokens', () => ({
+    useThemeTokens: () => ({ isMaterial: false, roles: null, shape: { large: 16 } }),
 }));
 
 vi.mock('@/hooks/use-theme-colors', () => ({
@@ -144,7 +178,9 @@ vi.mock('lucide-react-native', () => {
         return Icon;
     };
     return {
+        Brain: icon('Brain'),
         X: icon('X'),
+        History: icon('History'),
         Inbox: icon('Inbox'),
         Sparkles: icon('Sparkles'),
         Calendar: icon('Calendar'),
@@ -152,6 +188,7 @@ vi.mock('lucide-react-native', () => {
         Tag: icon('Tag'),
         FolderOpen: icon('FolderOpen'),
         Lightbulb: icon('Lightbulb'),
+        Play: icon('Play'),
         CheckCircle2: icon('CheckCircle2'),
         PartyPopper: icon('PartyPopper'),
     };
@@ -163,6 +200,14 @@ vi.mock('./swipeable-task-item', () => ({
 
 vi.mock('./task-edit-modal', () => ({
     TaskEditModal: (props: any) => React.createElement('TaskEditModal', props),
+}));
+
+vi.mock('./inbox-processing-modal', () => ({
+    InboxProcessingModal: (props: any) => React.createElement('InboxProcessingModal', props),
+}));
+
+vi.mock('./ErrorBoundary', () => ({
+    ErrorBoundary: (props: any) => React.createElement(React.Fragment, null, props.children),
 }));
 
 vi.mock('react-native-safe-area-context', () => ({
@@ -198,6 +243,9 @@ describe('ReviewModal', () => {
             tree.root.findAll((node) => flattenText(node.props?.children).includes(text)).length > 0;
 
         expect(hasText('Inbox')).toBe(true);
+        expect(
+            tree.root.findAll((node) => node.props?.accessibilityLabel === 'inbox.processButton').length,
+        ).toBeGreaterThan(0);
 
         const nextLabel = tree.root.find((node) => flattenText(node.props?.children) === 'Next →');
         const nextButton = nextLabel.parent;
@@ -222,6 +270,39 @@ describe('ReviewModal', () => {
         });
 
         expect(hasText('Inbox')).toBe(true);
+    });
+
+    it('does not let task chips navigate away mid-review', async () => {
+        let tree!: ReturnType<typeof create>;
+
+        await act(async () => {
+            tree = create(<ReviewModal visible onClose={vi.fn()} />);
+        });
+
+        const rows = tree.root.findAll((node) => String(node.type) === 'SwipeableTaskItem');
+        expect(rows.length).toBeGreaterThan(0);
+        for (const row of rows) {
+            expect(typeof row.props.onPress).toBe('function');
+            expect(row.props.onContextPress).toBeUndefined();
+            expect(row.props.onTagPress).toBeUndefined();
+            expect(row.props.onProjectPress).toBeUndefined();
+        }
+    });
+
+    it('opens mind sweep from the weekly review nudge', async () => {
+        let tree!: ReturnType<typeof create>;
+
+        await act(async () => {
+            tree = create(<ReviewModal visible onClose={vi.fn()} />);
+        });
+
+        const nudge = tree.root.findByProps({ testID: 'review-mind-sweep-button' });
+
+        await act(async () => {
+            nudge.props.onPress();
+        });
+
+        expect(tree.root.findByProps({ testID: 'mind-sweep-start' })).toBeDefined();
     });
 
     it('starts on all clear when every weekly review stage is empty', async () => {

@@ -7,11 +7,14 @@
  * table through Tauri commands.
  */
 import {
+    buildCalendarPushEventFields,
     expandCalendarRecurringTasks,
     getProjectedRecurringTaskId,
+    getTaskCalendarOccurrenceDate,
     hasTimeComponent,
     isProjectedRecurringTask,
     isProjectedRecurringTaskId,
+    safeFormatDate,
     safeParseDate,
     timeEstimateToMinutes,
     useTaskStore,
@@ -40,6 +43,7 @@ const PLATFORM = 'macos';
 const SYNC_DEBOUNCE_MS = 2500;
 const CALENDAR_SYNC_CONCURRENCY = 4;
 const ACCOUNT_TARGET_TITLE_PREFIX = 'Mindwtr: ';
+const PROJECTED_RECURRENCE_EVENT_DATE_FORMAT = 'PP';
 
 type CalendarPushTarget = {
     id: string;
@@ -228,13 +232,25 @@ function buildAllDayBoundary(date: Date, dayOffset = 0): Date {
     return boundary;
 }
 
-function formatCalendarEventTitle(title: string, shouldPrefixTitle: boolean): string {
+function formatProjectedRecurrenceEventDate(task: Task): string {
+    return safeFormatDate(getTaskCalendarOccurrenceDate(task), PROJECTED_RECURRENCE_EVENT_DATE_FORMAT);
+}
+
+function formatCalendarEventTitle(title: string, shouldPrefixTitle: boolean, occurrenceDateLabel = ''): string {
     const trimmed = title.trim() || 'Task';
-    if (!shouldPrefixTitle) return trimmed;
+    const datedTitle = occurrenceDateLabel ? `${trimmed} (${occurrenceDateLabel})` : trimmed;
+    if (!shouldPrefixTitle) return datedTitle;
     if (trimmed.toLowerCase().startsWith(ACCOUNT_TARGET_TITLE_PREFIX.toLowerCase())) {
-        return trimmed;
+        return datedTitle;
     }
-    return `${ACCOUNT_TARGET_TITLE_PREFIX}${trimmed}`;
+    return `${ACCOUNT_TARGET_TITLE_PREFIX}${datedTitle}`;
+}
+
+function formatProjectedRecurrenceNote(task: Task): string {
+    const occurrenceDateLabel = formatProjectedRecurrenceEventDate(task);
+    return occurrenceDateLabel
+        ? `Projected recurring occurrence for ${occurrenceDateLabel}. Complete the current Mindwtr task to create the real next task.`
+        : 'Projected recurring occurrence. Complete the current Mindwtr task to create the real next task.';
 }
 
 function buildEventDetails(task: Task, target: CalendarPushTarget): SystemCalendarEventDetails {
@@ -242,13 +258,21 @@ function buildEventDetails(task: Task, target: CalendarPushTarget): SystemCalend
     const parsed = safeParseDate(dateValue);
     const startDate = parsed ?? new Date();
     const location = typeof task.location === 'string' ? task.location.trim() : '';
-    const notes = [
-        isProjectedRecurringTask(task)
-            ? 'Projected recurring occurrence. Complete the current Mindwtr task to create the real next task.'
-            : '',
-        task.description ?? '',
-    ].filter(Boolean).join('\n\n');
-    const title = formatCalendarEventTitle(task.title, target.shouldPrefixTitles);
+    const projectedOccurrenceDateLabel = isProjectedRecurringTask(task)
+        ? formatProjectedRecurrenceEventDate(task)
+        : '';
+    const { projects, sections } = dependencies.getStoreState();
+    const projectName = task.projectId
+        ? projects.find((project) => project.id === task.projectId)?.title
+        : undefined;
+    const sectionName = task.sectionId
+        ? sections.find((section) => section.id === task.sectionId)?.title
+        : undefined;
+    const leadingNote = isProjectedRecurringTask(task) ? formatProjectedRecurrenceNote(task) : undefined;
+    // SystemCalendarEventDetails has no native URL field, so the primary link
+    // rides in the notes (buildCalendarPushEventFields already adds Link: lines).
+    const { notes } = buildCalendarPushEventFields(task, { projectName, sectionName, leadingNote });
+    const title = formatCalendarEventTitle(task.title, target.shouldPrefixTitles, projectedOccurrenceDateLabel);
 
     if (hasTimeComponent(dateValue)) {
         const endDate = new Date(startDate.getTime() + timeEstimateToMinutes(task.timeEstimate) * 60 * 1000);
@@ -387,7 +411,20 @@ async function runLimitedSettled<T>(
     return results;
 }
 
-export const runFullDesktopCalendarPushSync = async (): Promise<void> => {
+// Serialize all calendar writes so a full sync (fired on mount) and the
+// debounced partial sync (or two rapid manual refreshes) cannot race on the
+// check-then-create path and create duplicate events (#743).
+let calendarSyncQueue: Promise<void> = Promise.resolve();
+function enqueueCalendarSync(run: () => Promise<void>): Promise<void> {
+    const next = calendarSyncQueue.catch(() => undefined).then(run);
+    calendarSyncQueue = next.catch(() => undefined);
+    return next;
+}
+
+export const runFullDesktopCalendarPushSync = (): Promise<void> =>
+    enqueueCalendarSync(runFullDesktopCalendarPushSyncUnsafe);
+
+const runFullDesktopCalendarPushSyncUnsafe = async (): Promise<void> => {
     if (!isTauriRuntime()) return;
     const enabled = await dependencies.getPushEnabled();
     if (!enabled) return;
@@ -433,7 +470,10 @@ export const scheduleDesktopCalendarPushSyncDebounced = (taskIds: string[]): voi
     }, SYNC_DEBOUNCE_MS);
 };
 
-const runPartialDesktopCalendarPushSync = async (taskIds: string[]): Promise<void> => {
+const runPartialDesktopCalendarPushSync = (taskIds: string[]): Promise<void> =>
+    enqueueCalendarSync(() => runPartialDesktopCalendarPushSyncUnsafe(taskIds));
+
+const runPartialDesktopCalendarPushSyncUnsafe = async (taskIds: string[]): Promise<void> => {
     if (!isTauriRuntime()) return;
     const enabled = await dependencies.getPushEnabled();
     if (!enabled) return;
@@ -543,6 +583,7 @@ export const stopDesktopCalendarPushSync = (): void => {
 export const __desktopCalendarPushSyncTestUtils = {
     resetForTests() {
         stopDesktopCalendarPushSync();
+        calendarSyncQueue = Promise.resolve();
         dependencies = { ...defaultDependencies };
     },
     setDependenciesForTests(overrides: Partial<DesktopCalendarPushDependencies>) {

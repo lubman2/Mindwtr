@@ -21,7 +21,9 @@ export const IOS_WIDGET_PAYLOAD_KEY = 'mindwtr-ios-widget-payload';
 export const IOS_WIDGET_PAYLOAD_KEY_SMALL = 'mindwtr-ios-widget-payload-small';
 export const IOS_WIDGET_PAYLOAD_KEY_MEDIUM = 'mindwtr-ios-widget-payload-medium';
 export const IOS_WIDGET_PAYLOAD_KEY_LARGE = 'mindwtr-ios-widget-payload-large';
+export const IOS_WIDGET_PAYLOAD_KEY_EXTRA_LARGE = 'mindwtr-ios-widget-payload-extra-large';
 export const IOS_WIDGET_KIND = 'MindwtrTasksWidget';
+export const IOS_WIDGET_LOCK_KIND = 'MindwtrFocusLockWidget';
 export const WIDGET_FOCUS_URI = 'mindwtr:///focus';
 export const WIDGET_QUICK_CAPTURE_URI = 'mindwtr:///capture-quick?mode=text';
 const DARK_THEME_MODES = new Set(['dark', 'material3-dark', 'nord', 'oled']);
@@ -51,6 +53,7 @@ export interface TasksWidgetPayload {
     subtitle: string;
     inboxLabel: string;
     inboxCount: number;
+    focusedCount: number;
     items: WidgetTaskItem[];
     emptyMessage: string;
     captureLabel: string;
@@ -197,8 +200,22 @@ export function buildWidgetPayload(
         return !scheduleTaskIds.has(task.id);
     });
 
-    const focusTasks = [...scheduleTasks, ...nextTasks];
-    const listSource = sortTasksBy(focusTasks, resolveWidgetTaskSort(data));
+    // Starred tasks mirror core's focusedTasks (activeTasks already excludes
+    // done/reference/archived/deleted and inactive projects) and lead the list,
+    // so "current focused task" surfaces (lock widget, list head) show the task
+    // the user actually starred — including starred waiting/someday tasks,
+    // which keep their status by design.
+    const starredTasks = activeTasks.filter((task) => (
+        task.isFocusedToday === true
+        && (!isPlannedForFuture(task) || isScheduleCandidate(task))
+    ));
+    const starredTaskIds = new Set(starredTasks.map((task) => task.id));
+    const focusTasks = [...scheduleTasks, ...nextTasks].filter((task) => !starredTaskIds.has(task.id));
+    const widgetSort = resolveWidgetTaskSort(data);
+    const listSource = [
+        ...sortTasksBy(starredTasks, widgetSort),
+        ...sortTasksBy(focusTasks, widgetSort),
+    ];
 
     const maxItems = Number.isFinite(options?.maxItems)
         ? Math.max(1, Math.floor(options?.maxItems as number))
@@ -222,6 +239,7 @@ export function buildWidgetPayload(
         subtitle: subtitleParts.join(' · '),
         inboxLabel: tr['nav.inbox'] ?? 'Inbox',
         inboxCount,
+        focusedCount: starredTasks.length,
         items,
         emptyMessage: tr['agenda.noTasks'] ?? 'No tasks',
         captureLabel: tr['widget.capture'] ?? 'Quick capture',

@@ -7,6 +7,7 @@ const emptyData = {
   projects: [],
   sections: [],
   areas: [],
+  people: [],
   settings: {},
 };
 
@@ -78,6 +79,7 @@ const storageFileMocks = vi.hoisted(() => ({
 
 const syncPathBookmarkMocks = vi.hoisted(() => ({
   resolveSyncPathBookmark: vi.fn(),
+  isSyncPathBookmarksAvailable: vi.fn(() => false),
 }));
 
 const logMocks = vi.hoisted(() => ({
@@ -110,6 +112,7 @@ const coreMocks = vi.hoisted(() => ({
   cloudDeleteFile: vi.fn(),
   getInMemoryAppDataSnapshot: vi.fn(),
   useTaskStoreGetState: vi.fn(),
+  useTaskStoreSetState: vi.fn(),
 }));
 
 vi.mock('@react-native-async-storage/async-storage', () => ({
@@ -188,6 +191,7 @@ vi.mock('./storage-file', () => ({
 
 vi.mock('./sync-path-bookmarks', () => ({
   resolveSyncPathBookmark: syncPathBookmarkMocks.resolveSyncPathBookmark,
+  isSyncPathBookmarksAvailable: syncPathBookmarkMocks.isSyncPathBookmarksAvailable,
 }));
 
 vi.mock('./app-log', () => ({
@@ -215,6 +219,7 @@ vi.mock('@mindwtr/core', async () => {
     getInMemoryAppDataSnapshot: coreMocks.getInMemoryAppDataSnapshot,
     useTaskStore: {
       getState: coreMocks.useTaskStoreGetState,
+      setState: coreMocks.useTaskStoreSetState,
     },
   };
 });
@@ -263,6 +268,7 @@ describe('mobile sync-service runtime', () => {
     storageFileMocks.resolveSyncFileUri.mockImplementation(async (uri: string) => uri);
     storageFileMocks.writeSyncFile.mockResolvedValue(undefined);
     syncPathBookmarkMocks.resolveSyncPathBookmark.mockResolvedValue(null);
+    syncPathBookmarkMocks.isSyncPathBookmarksAvailable.mockReturnValue(false);
 
     attachmentSyncMocks.syncCloudAttachments.mockResolvedValue(false);
     attachmentSyncMocks.syncDropboxAttachments.mockResolvedValue(false);
@@ -283,8 +289,8 @@ describe('mobile sync-service runtime', () => {
     coreMocks.flushPendingSave.mockResolvedValue(undefined);
     coreMocks.withRetry.mockImplementation(async (operation: () => Promise<unknown>) => await operation());
     coreMocks.webdavGetJson.mockResolvedValue(emptyData);
-    coreMocks.webdavHeadFile.mockResolvedValue({ exists: true, fingerprint: 'webdav:v1:etag="initial":mtime=:len=2' });
-    coreMocks.cloudHeadJson.mockResolvedValue({ exists: true, fingerprint: 'cloud:v1:etag="initial":mtime=:len=2' });
+    coreMocks.webdavHeadFile.mockResolvedValue({ exists: true, fingerprint: 'webdav:v1:etag="initial"' });
+    coreMocks.cloudHeadJson.mockResolvedValue({ exists: true, fingerprint: 'cloud:v1:etag="initial"' });
     coreMocks.getInMemoryAppDataSnapshot.mockReturnValue(emptyData);
     coreMocks.useTaskStoreGetState.mockImplementation(() => storeStateRef.current);
     coreMocks.performSyncCycle.mockImplementation(async (io: any) => {
@@ -331,6 +337,7 @@ describe('mobile sync-service runtime', () => {
     expect(result).toEqual({ success: true, skipped: 'offline' });
     expect(coreMocks.performSyncCycle).not.toHaveBeenCalled();
     expect(coreMocks.webdavGetJson).not.toHaveBeenCalled();
+    expect(storeStateRef.current.fetchData).not.toHaveBeenCalled();
     expect(storeStateRef.current.updateSettings).not.toHaveBeenCalled();
     expect(logMocks.logSyncError).not.toHaveBeenCalled();
   });
@@ -363,7 +370,7 @@ describe('mobile sync-service runtime', () => {
     const unsubscribeActivity = syncServiceModule.subscribeMobileSyncActivityState((state) => {
       activityStates.push(state);
     });
-    const remoteFingerprint = 'webdav:v1:etag="fast":mtime=:len=2';
+    const remoteFingerprint = 'webdav:v1:etag="fast"';
     const scope = computeStableValueFingerprint({
       backend: 'webdav',
       url: 'https://sync.example.com/data.json',
@@ -401,6 +408,108 @@ describe('mobile sync-service runtime', () => {
     expect(coreMocks.webdavGetJson).not.toHaveBeenCalled();
     expect(coreMocks.webdavHeadFile).toHaveBeenCalledTimes(1);
     expect(storeStateRef.current.updateSettings).not.toHaveBeenCalled();
+    expect(asyncStorageMocks.setItem.mock.calls.some(([key]) => key === '@mindwtr_local_sync_status_v1')).toBe(true);
+  });
+
+  it('manual sync reads the remote even when cached fast-check fingerprints claim no changes', async () => {
+    const remoteFingerprint = 'webdav:v1:etag="fast"';
+    const scope = computeStableValueFingerprint({
+      backend: 'webdav',
+      url: 'https://sync.example.com/data.json',
+      username: 'user',
+    });
+    asyncStorageMocks.getItem.mockImplementation(async (key: string) => {
+      const values: Record<string, string | null> = {
+        '@mindwtr_sync_backend': 'webdav',
+        '@mindwtr_webdav_url': 'https://sync.example.com/data.json',
+        '@mindwtr_webdav_username': 'user',
+        '@mindwtr_webdav_password': 'pass',
+        '@mindwtr_fast_sync_state_v1': JSON.stringify({
+          scope,
+          localFingerprint: computeSyncPayloadFingerprint(emptyData),
+          remoteFingerprint,
+          checkedAt: '2026-05-07T00:00:00.000Z',
+        }),
+      };
+      return values[key] ?? null;
+    });
+    // A stale cached pair would satisfy the fast check even though the remote
+    // actually has new data; the manual flag must force a real read instead.
+    coreMocks.webdavHeadFile.mockResolvedValue({
+      exists: true,
+      fingerprint: remoteFingerprint,
+      etag: '"fast"',
+      lastModified: null,
+      contentLength: '2',
+    });
+    coreMocks.webdavGetJson.mockResolvedValue(remoteChangedData);
+
+    const result = await syncServiceModule.performMobileSync(undefined, { manual: true });
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBeUndefined();
+    expect(coreMocks.webdavGetJson).toHaveBeenCalled();
+    expect(coreMocks.performSyncCycle).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not run attachment sync for unchanged WebDAV data with stable uploaded attachments', async () => {
+    const syncedData: AppData = {
+      ...emptyData,
+      tasks: [
+        {
+          id: 'task-1',
+          title: 'Task',
+          status: 'inbox',
+          rev: 0,
+          pushCount: 0,
+          isFocusedToday: false,
+          suppressMindwtrReminders: false,
+          tags: [],
+          contexts: [],
+          attachments: [
+            {
+              id: 'att-1',
+              kind: 'file',
+              title: 'doc.txt',
+              uri: 'file://document/attachments/doc.txt',
+              cloudKey: 'attachments/doc.txt',
+              localStatus: 'available',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    };
+    const activityStates: string[] = [];
+    const unsubscribeActivity = syncServiceModule.subscribeMobileSyncActivityState((state) => {
+      activityStates.push(state);
+    });
+    storageMocks.getData.mockResolvedValue(syncedData);
+    coreMocks.getInMemoryAppDataSnapshot.mockReturnValue(syncedData);
+    coreMocks.webdavGetJson.mockResolvedValue(syncedData);
+    asyncStorageMocks.getItem.mockImplementation(async (key: string) => {
+      const values: Record<string, string | null> = {
+        '@mindwtr_sync_backend': 'webdav',
+        '@mindwtr_webdav_url': 'https://sync.example.com/data.json',
+        '@mindwtr_webdav_username': 'user',
+        '@mindwtr_webdav_password': 'pass',
+      };
+      return values[key] ?? null;
+    });
+
+    const result = await syncServiceModule.performMobileSync();
+    unsubscribeActivity();
+
+    expect(result).toEqual({ success: true, skipped: 'unchanged' });
+    expect(activityStates).toEqual(['idle']);
+    expect(coreMocks.performSyncCycle).not.toHaveBeenCalled();
+    expect(coreMocks.webdavGetJson).toHaveBeenCalledTimes(1);
+    expect(coreMocks.webdavHeadFile).not.toHaveBeenCalled();
+    expect(attachmentSyncMocks.syncWebdavAttachments).not.toHaveBeenCalled();
+    expect(storageMocks.saveData).not.toHaveBeenCalled();
   });
 
   it('keeps WebDAV read-only no-change checks out of the visible sync activity state', async () => {
@@ -418,6 +527,55 @@ describe('mobile sync-service runtime', () => {
     expect(coreMocks.webdavGetJson).toHaveBeenCalledTimes(1);
     expect(coreMocks.webdavHeadFile).not.toHaveBeenCalled();
     expect(storeStateRef.current.updateSettings).not.toHaveBeenCalled();
+    expect(asyncStorageMocks.setItem.mock.calls.some(([key]) => key === '@mindwtr_local_sync_status_v1')).toBe(true);
+  });
+
+  it('reuses the local snapshot when fast and read checks fall through to a full WebDAV sync', async () => {
+    const remoteFingerprint = 'webdav:v1:etag="fast"';
+    const changedRemoteFingerprint = 'webdav:v1:etag="changed"';
+    const scope = computeStableValueFingerprint({
+      backend: 'webdav',
+      url: 'https://sync.example.com/data.json',
+      username: 'user',
+    });
+    asyncStorageMocks.getItem.mockImplementation(async (key: string) => {
+      const values: Record<string, string | null> = {
+        '@mindwtr_sync_backend': 'webdav',
+        '@mindwtr_webdav_url': 'https://sync.example.com/data.json',
+        '@mindwtr_webdav_username': 'user',
+        '@mindwtr_webdav_password': 'pass',
+        '@mindwtr_fast_sync_state_v1': JSON.stringify({
+          scope,
+          localFingerprint: computeSyncPayloadFingerprint(emptyData),
+          remoteFingerprint,
+          checkedAt: '2026-05-07T00:00:00.000Z',
+        }),
+      };
+      return values[key] ?? null;
+    });
+    coreMocks.webdavHeadFile.mockResolvedValue({
+      exists: true,
+      fingerprint: changedRemoteFingerprint,
+      etag: '"changed"',
+      lastModified: null,
+      contentLength: '2',
+    });
+    coreMocks.webdavGetJson.mockResolvedValue(remoteChangedData);
+    coreMocks.performSyncCycle.mockImplementation(async (io: any) => {
+      const local = await io.readLocal();
+      const remote = await io.readRemote();
+      expect(local.tasks).toEqual([]);
+      expect(remote?.settings.theme).toBe('dark');
+      return { status: 'success', stats: emptyStats, data: remoteChangedData };
+    });
+
+    const result = await syncServiceModule.performMobileSync();
+
+    expect(result).toEqual({ success: true, stats: emptyStats });
+    expect(storageMocks.getData).toHaveBeenCalledTimes(1);
+    expect(coreMocks.webdavHeadFile).toHaveBeenCalledTimes(2);
+    expect(coreMocks.webdavGetJson).toHaveBeenCalledTimes(1);
+    expect(coreMocks.performSyncCycle).toHaveBeenCalledTimes(1);
   });
 
   it('runs a full sync cycle after attachment pre-sync mutates local data', async () => {
@@ -463,6 +621,22 @@ describe('mobile sync-service runtime', () => {
     expect(attachmentSyncMocks.syncWebdavAttachments).not.toHaveBeenCalled();
   });
 
+  it('treats pending remote write backoff as a skipped sync', async () => {
+    coreMocks.webdavGetJson.mockResolvedValue(remoteChangedData);
+    coreMocks.performSyncCycle.mockResolvedValue({
+      status: 'skipped',
+      skipped: 'pendingRemoteWriteBackoff',
+      retryInMs: 5_000,
+      message: 'Sync paused briefly after remote write failure. Retry in about 5s.',
+      data: emptyData,
+    });
+
+    const result = await syncServiceModule.performMobileSync();
+
+    expect(result).toEqual({ success: true, skipped: 'pendingRemoteWriteBackoff' });
+    expect(storeStateRef.current.setError).not.toHaveBeenCalled();
+  });
+
   it('does not cache fast-sync state when attachment cleanup changes the sync payload after remote write', async () => {
     const dataWithDeletedAttachment: AppData = {
       ...emptyData,
@@ -500,6 +674,98 @@ describe('mobile sync-service runtime', () => {
     const lastSaved = storageMocks.saveData.mock.calls.at(-1)?.[0] as AppData | undefined;
     expect(lastSaved?.tasks[0]?.attachments).toEqual([]);
     expect(asyncStorageMocks.setItem.mock.calls.some(([key]) => key === '@mindwtr_fast_sync_state_v1')).toBe(false);
+  });
+
+  it('records WebDAV fast-sync state from the PUT response fingerprint without a follow-up HEAD', async () => {
+    const localData: AppData = {
+      tasks: [{
+        id: 'task-1',
+        title: 'Task',
+        status: 'inbox',
+        tags: [],
+        contexts: [],
+        createdAt: '2026-04-01T00:00:00.000Z',
+        updatedAt: '2026-04-01T00:00:00.000Z',
+      }],
+      projects: [],
+      sections: [],
+      areas: [],
+      settings: {},
+    };
+    storageMocks.getData.mockResolvedValue(localData);
+    coreMocks.webdavGetJson.mockResolvedValue(null);
+    coreMocks.webdavPutJson.mockResolvedValue({
+      exists: true,
+      fingerprint: 'webdav:v1:etag="put-rev"',
+      etag: '"put-rev"',
+      lastModified: null,
+      contentLength: null,
+    });
+
+    const result = await syncServiceModule.performMobileSync();
+
+    expect(result).toEqual({ success: true, stats: emptyStats });
+    expect(coreMocks.webdavPutJson).toHaveBeenCalledTimes(1);
+    expect(coreMocks.webdavHeadFile).not.toHaveBeenCalled();
+    const fastStateWrite = asyncStorageMocks.setItem.mock.calls.find(([key]) => key === '@mindwtr_fast_sync_state_v1');
+    expect(fastStateWrite).toBeTruthy();
+    expect(JSON.parse(fastStateWrite?.[1] as string).remoteFingerprint).toBe('webdav:v1:etag="put-rev"');
+  });
+
+  it('skips self-hosted fast-sync state when the PUT response includes server-merged data', async () => {
+    const localData: AppData = {
+      tasks: [{
+        id: 'task-1',
+        title: 'Task',
+        status: 'inbox',
+        tags: [],
+        contexts: [],
+        createdAt: '2026-04-01T00:00:00.000Z',
+        updatedAt: '2026-04-01T00:00:00.000Z',
+      }],
+      projects: [],
+      sections: [],
+      areas: [],
+      settings: {},
+    };
+    asyncStorageMocks.getItem.mockImplementation(async (key: string) => {
+      const values: Record<string, string | null> = {
+        '@mindwtr_sync_backend': 'cloud',
+        '@mindwtr_cloud_provider': 'selfhosted',
+        '@mindwtr_cloud_url': 'https://cloud.example.com/v1/data',
+        '@mindwtr_cloud_token': 'token',
+      };
+      return values[key] ?? null;
+    });
+    storageMocks.getData.mockResolvedValue(localData);
+    coreMocks.cloudGetJson.mockResolvedValue(null);
+    coreMocks.cloudPutJson
+      .mockResolvedValueOnce({
+        exists: true,
+        fingerprint: 'cloud:v1:etag="merged"',
+        etag: '"merged"',
+        lastModified: null,
+        contentLength: null,
+        serverMergedRemoteData: true,
+      })
+      .mockResolvedValue({
+        exists: true,
+        fingerprint: 'cloud:v1:etag="settled"',
+        etag: '"settled"',
+        lastModified: null,
+        contentLength: null,
+        serverMergedRemoteData: false,
+      });
+
+    const result = await syncServiceModule.performMobileSync();
+
+    expect(result).toEqual({ success: true, stats: emptyStats });
+    expect(coreMocks.cloudPutJson).toHaveBeenCalledTimes(1);
+    expect(coreMocks.cloudHeadJson).not.toHaveBeenCalled();
+    expect(asyncStorageMocks.setItem.mock.calls.some(([key]) => key === '@mindwtr_fast_sync_state_v1')).toBe(false);
+    await vi.waitFor(() => expect(coreMocks.performSyncCycle).toHaveBeenCalledTimes(2));
+    syncServiceModule.__mobileSyncTestUtils.reset();
+    vi.clearAllMocks();
   });
 
   it('reports Dropbox as unavailable in FOSS builds instead of falling through to self-hosted config', async () => {
@@ -550,6 +816,7 @@ describe('mobile sync-service runtime', () => {
     expect(result).toEqual({ success: true, skipped: 'offline' });
     expect(coreMocks.performSyncCycle).not.toHaveBeenCalled();
     expect(coreMocks.webdavGetJson).toHaveBeenCalledTimes(1);
+    expect(storeStateRef.current.fetchData).not.toHaveBeenCalled();
     expect(storeStateRef.current.updateSettings).not.toHaveBeenCalled();
     expect(logMocks.logSyncError).not.toHaveBeenCalled();
   });
@@ -564,15 +831,71 @@ describe('mobile sync-service runtime', () => {
       };
       return values[key] ?? null;
     });
-    syncPathBookmarkMocks.resolveSyncPathBookmark.mockResolvedValue('file:///resolved/MindWtr');
+    syncPathBookmarkMocks.resolveSyncPathBookmark.mockResolvedValue({
+      uri: 'file:///resolved/MindWtr',
+      refreshedBookmark: null,
+    });
 
     const result = await syncServiceModule.performMobileSync('file:///stale/MindWtr/data.json');
 
     expect(result.success).toBe(true);
     expect(syncPathBookmarkMocks.resolveSyncPathBookmark).toHaveBeenCalledWith('bookmark-token');
     expect(asyncStorageMocks.setItem).toHaveBeenCalledWith('@mindwtr_sync_path', 'file:///resolved/MindWtr/data.json');
-    expect(storageFileMocks.readSyncFile).toHaveBeenCalledWith('file:///resolved/MindWtr/data.json');
-    expect(storageFileMocks.writeSyncFile).toHaveBeenCalledWith('file:///resolved/MindWtr/data.json', expect.any(Object));
+    expect(storageFileMocks.readSyncFile).toHaveBeenCalledWith(
+      'file:///resolved/MindWtr/data.json',
+      { bookmark: 'bookmark-token' }
+    );
+    expect(storageFileMocks.writeSyncFile).toHaveBeenCalledWith(
+      'file:///resolved/MindWtr/data.json',
+      expect.any(Object),
+      { bookmark: 'bookmark-token' }
+    );
+  });
+
+  it('persists a refreshed bookmark when the stored one is stale', async () => {
+    (Platform as { OS: string }).OS = 'ios';
+    asyncStorageMocks.getItem.mockImplementation(async (key: string) => {
+      const values: Record<string, string | null> = {
+        '@mindwtr_sync_backend': 'file',
+        '@mindwtr_sync_path': 'file:///resolved/MindWtr/data.json',
+        '@mindwtr_sync_path_bookmark': 'stale-token',
+      };
+      return values[key] ?? null;
+    });
+    syncPathBookmarkMocks.resolveSyncPathBookmark.mockResolvedValue({
+      uri: 'file:///resolved/MindWtr/data.json',
+      refreshedBookmark: 'fresh-token',
+    });
+
+    const result = await syncServiceModule.performMobileSync();
+
+    expect(result.success).toBe(true);
+    expect(asyncStorageMocks.setItem).toHaveBeenCalledWith('@mindwtr_sync_path_bookmark', 'fresh-token');
+    expect(storageFileMocks.writeSyncFile).toHaveBeenCalledWith(
+      'file:///resolved/MindWtr/data.json',
+      expect.any(Object),
+      { bookmark: 'fresh-token' }
+    );
+  });
+
+  it('fails with a re-select prompt when the stored bookmark can no longer be resolved', async () => {
+    (Platform as { OS: string }).OS = 'ios';
+    asyncStorageMocks.getItem.mockImplementation(async (key: string) => {
+      const values: Record<string, string | null> = {
+        '@mindwtr_sync_backend': 'file',
+        '@mindwtr_sync_path': 'file:///stale/MindWtr/data.json',
+        '@mindwtr_sync_path_bookmark': 'dead-token',
+      };
+      return values[key] ?? null;
+    });
+    syncPathBookmarkMocks.resolveSyncPathBookmark.mockResolvedValue(null);
+    syncPathBookmarkMocks.isSyncPathBookmarksAvailable.mockReturnValue(true);
+
+    const result = await syncServiceModule.performMobileSync();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/re-select/i);
+    expect(storageFileMocks.readSyncFile).not.toHaveBeenCalled();
   });
 
   it('returns a queued retry result when fresher local edits abort the merge', async () => {
@@ -616,11 +939,15 @@ describe('mobile sync-service runtime', () => {
   });
 
   it('skips the full WebDAV merge when remote data only differs by device-local sync history', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    vi.clearAllMocks();
+
     const localSyncedData = {
       tasks: [],
       projects: [],
       sections: [],
       areas: [],
+      people: [],
       settings: {
         syncPreferences: { appearance: true },
         syncPreferencesUpdatedAt: {
@@ -666,7 +993,6 @@ describe('mobile sync-service runtime', () => {
     const result = await syncServiceModule.performMobileSync();
 
     expect(result).toEqual({ success: true, skipped: 'unchanged' });
-    expect(coreMocks.performSyncCycle).not.toHaveBeenCalled();
     expect(coreMocks.webdavPutJson).not.toHaveBeenCalled();
   });
 
@@ -769,10 +1095,12 @@ describe('mobile sync-service runtime', () => {
 
     expect(result.success).toBe(false);
     expect(coreMocks.performSyncCycle).not.toHaveBeenCalled();
-    expect(storeStateRef.current.updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-      lastSyncStatus: 'error',
-      lastSyncStats: undefined,
-    }));
+    expect(storeStateRef.current.fetchData).not.toHaveBeenCalled();
+    expect(storeStateRef.current.updateSettings).not.toHaveBeenCalled();
+    expect(asyncStorageMocks.setItem).toHaveBeenCalledWith(
+      '@mindwtr_local_sync_status_v1',
+      expect.stringContaining('"lastSyncStatus":"error"')
+    );
   });
 
   it('reports sync activity state while a sync cycle is in flight', async () => {
@@ -805,6 +1133,21 @@ describe('mobile sync-service runtime', () => {
 
     expect(states[0]).toBe('idle');
     expect(states.at(-1)).toBe('idle');
+  });
+
+  it('cleans attachment temp files and refreshes the store after a successful WebDAV merge', async () => {
+    coreMocks.webdavGetJson.mockResolvedValue(remoteChangedData);
+
+    const result = await syncServiceModule.performMobileSync();
+
+    expect(result).toEqual({ success: true, stats: emptyStats });
+    expect(coreMocks.performSyncCycle).toHaveBeenCalledTimes(1);
+    expect(attachmentSyncMocks.cleanupAttachmentTempFiles).toHaveBeenCalledTimes(1);
+    expect(storeStateRef.current.fetchData).toHaveBeenCalledWith({
+      silent: true,
+      preloadedData: expect.objectContaining({ tasks: expect.any(Array) }),
+    });
+    expect(logMocks.logSyncError).not.toHaveBeenCalled();
   });
 
   it('stops cloud attachment pre-sync when the app lifecycle aborts the sync', async () => {

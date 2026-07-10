@@ -13,21 +13,29 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { AppAnnouncement, AppAnnouncementAction } from '@mindwtr/core';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
 
 type AppAnnouncementModalProps = {
   announcement: AppAnnouncement | null;
   visible: boolean;
   onAction: (action: AppAnnouncementAction) => void;
   onDismiss: () => void;
+  onShown?: () => void;
 };
 
 export function AppAnnouncementModal({
   announcement,
   onAction,
   onDismiss,
+  onShown,
   visible,
 }: AppAnnouncementModalProps) {
   const tc = useThemeColors();
+  const filledButton = useFilledButtonColors();
+
+  React.useEffect(() => {
+    if (visible && announcement) onShown?.();
+  }, [announcement, onShown, visible]);
 
   if (!announcement) return null;
 
@@ -96,10 +104,10 @@ export function AppAnnouncementModal({
                   accessibilityRole="button"
                   activeOpacity={0.86}
                   onPress={() => onAction(action)}
-                  style={[styles.primaryButton, { backgroundColor: tc.tint }]}
+                  style={[styles.primaryButton, { backgroundColor: filledButton.backgroundColor }]}
                 >
                   {actionIcon}
-                  <Text numberOfLines={1} style={[styles.primaryButtonText, { color: tc.onTint }]}>
+                  <Text numberOfLines={1} style={[styles.primaryButtonText, { color: filledButton.textColor ?? tc.onTint }]}>
                     {action.label}
                   </Text>
                 </TouchableOpacity>

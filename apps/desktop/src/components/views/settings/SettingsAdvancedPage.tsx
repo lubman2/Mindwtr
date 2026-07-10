@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { SettingsLabels } from './labels';
 import type { LocalApiServerStatus } from '../../../lib/local-api-server';
+import type { DesktopRenderingConfig } from '../../../lib/desktop-rendering';
 
 type SettingsAdvancedPageProps = {
     t: SettingsLabels;
@@ -11,11 +12,14 @@ type SettingsAdvancedPageProps = {
     localApiBusy: boolean;
     localApiPortError: string;
     networkProxyUrl: string;
+    desktopRenderingConfig: DesktopRenderingConfig;
+    desktopRenderingBusy: boolean;
     onLocalApiToggle: (enabled: boolean) => void;
     onLocalApiPortInputChange: (value: string) => void;
     onLocalApiPortCommit: () => void;
     onNetworkProxyUrlChange: (value: string) => void;
     onSaveNetworkProxy: () => Promise<void> | void;
+    onDesktopRenderingToggle: (disableHardwareAcceleration: boolean) => void;
 };
 
 const inputCls =
@@ -96,11 +100,14 @@ export function SettingsAdvancedPage({
     localApiBusy,
     localApiPortError,
     networkProxyUrl,
+    desktopRenderingConfig,
+    desktopRenderingBusy,
     onLocalApiToggle,
     onLocalApiPortInputChange,
     onLocalApiPortCommit,
     onNetworkProxyUrlChange,
     onSaveNetworkProxy,
+    onDesktopRenderingToggle,
 }: SettingsAdvancedPageProps) {
     const [networkProxyOpen, setNetworkProxyOpen] = useState(false);
     const statusText = !isTauri
@@ -156,6 +163,17 @@ export function SettingsAdvancedPage({
             </SettingsCard>
             {isTauri && (
                 <>
+                    <SectionHeader>{t.rendering}</SectionHeader>
+                    <SettingsCard>
+                        <SettingsRow title={t.softwareRendering} description={t.softwareRenderingDesc}>
+                            <Toggle
+                                disabled={desktopRenderingBusy}
+                                enabled={desktopRenderingConfig.disableHardwareAcceleration}
+                                label={t.softwareRendering}
+                                onChange={() => onDesktopRenderingToggle(!desktopRenderingConfig.disableHardwareAcceleration)}
+                            />
+                        </SettingsRow>
+                    </SettingsCard>
                     <SectionHeader>{t.network}</SectionHeader>
                     <SettingsCard>
                         <div>

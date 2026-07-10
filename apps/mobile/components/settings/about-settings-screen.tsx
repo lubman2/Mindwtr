@@ -7,7 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { submitFeedbackSubmission } from '@mindwtr/core';
 import { useToast } from '@/contexts/toast-context';
-import { getDeviceLocale } from '@/lib/analytics-heartbeat';
+import { getDeviceLocale, resolveMobileAnalyticsVersion } from '@/lib/analytics-heartbeat';
 import { readRecentLogText } from '@/lib/app-log';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { getPlayStoreUpdateInfoAsync } from '@/lib/play-store-updates';
@@ -43,6 +43,7 @@ export function AboutSettingsScreen({
     const isFossBuild = parseExtraBool(extraConfig?.isFossBuild);
     const isExpoGo = Constants.appOwnership === 'expo';
     const currentVersion = Constants.expoConfig?.version || '0.0.0';
+    const displayVersion = resolveMobileAnalyticsVersion(currentVersion, extraConfig?.analyticsReleaseVersion);
     const feedbackEndpointUrl = String(extraConfig?.feedbackEndpointUrl ?? '').trim();
     const appName = Constants.expoConfig?.name || Application.applicationName || 'Mindwtr';
     const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
@@ -79,6 +80,7 @@ export function AboutSettingsScreen({
     }, [isFossBuild]);
 
     const openLink = (url: string) => Linking.openURL(url);
+    const GITHUB_ISSUES_URL = 'https://github.com/dongdongbh/Mindwtr/issues/new/choose';
     const GITHUB_RELEASES_API = 'https://api.github.com/repos/dongdongbh/Mindwtr/releases/latest';
     const GITHUB_RELEASES_URL = 'https://github.com/dongdongbh/Mindwtr/releases/latest';
     const ANDROID_PACKAGE_NAME = Constants.expoConfig?.android?.package || Application.applicationId || 'tech.dongdongbh.mindwtr';
@@ -248,7 +250,7 @@ export function AboutSettingsScreen({
                 if (hasUpdate) {
                     const updateMessage = result.source === 'play-store'
                         ? tr('settings.aboutMobile.updateIsAvailableOnGooglePlayOpenAppListingNow')
-                        : tr('settings.aboutMobile.googlePlayUpdateAvailableWithVersions', { currentVersion, latestVersion: result.version });
+                        : tr('settings.aboutMobile.googlePlayUpdateAvailableWithVersions', { currentVersion: displayVersion, latestVersion: result.version });
                     Alert.alert(tr('settings.updateAvailable'), updateMessage, [
                         { text: tr('settings.later'), style: 'cancel' },
                         { text: tr('attachments.open'), onPress: () => Linking.openURL(targetUrl) },
@@ -279,7 +281,7 @@ export function AboutSettingsScreen({
                 if (hasUpdate) {
                     Alert.alert(
                         tr('settings.updateAvailable'),
-                        tr('settings.aboutMobile.appStoreUpdateAvailableWithVersions', { currentVersion, latestVersion }),
+                        tr('settings.aboutMobile.appStoreUpdateAvailableWithVersions', { currentVersion: displayVersion, latestVersion }),
                         [
                             { text: tr('settings.later'), style: 'cancel' },
                             ...(targetUrl ? [{ text: tr('attachments.open'), onPress: () => Linking.openURL(targetUrl) }] : []),
@@ -306,7 +308,7 @@ export function AboutSettingsScreen({
                 const changelog = release.body || tr('settings.noChangelog');
                 Alert.alert(
                     tr('settings.updateAvailable'),
-                    `v${currentVersion} → v${latestVersion}\n\n${tr('settings.changelog')}:\n${changelog.substring(0, 500)}${changelog.length > 500 ? '...' : ''}`,
+                    `v${displayVersion} → v${latestVersion}\n\n${tr('settings.changelog')}:\n${changelog.substring(0, 500)}${changelog.length > 500 ? '...' : ''}`,
                     [
                         { text: tr('settings.later'), style: 'cancel' },
                         { text: tr('attachments.download'), onPress: () => Linking.openURL(downloadUrl) },
@@ -381,7 +383,7 @@ export function AboutSettingsScreen({
             email: input.email,
             message: input.message,
             metadata: {
-                appVersion: currentVersion,
+                appVersion: displayVersion,
                 build: Application.nativeBuildVersion ?? undefined,
                 installChannel: getInstallChannel(),
                 locale: getDeviceLocale(),
@@ -403,7 +405,7 @@ export function AboutSettingsScreen({
                             {appName}
                         </Text>
                         <Text style={[styles.aboutAppVersion, { color: tc.secondaryText }]} numberOfLines={2}>
-                            v{currentVersion}
+                            v{displayVersion}
                         </Text>
                     </View>
                     {!isFossBuild && (
@@ -438,10 +440,10 @@ export function AboutSettingsScreen({
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
-                        onPress={() => openLink('https://github.com/dongdongbh/Mindwtr/wiki')}
+                        onPress={() => openLink('https://docs.mindwtr.app')}
                     >
                         <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.documentation')}</Text>
-                        <Text style={styles.linkText}>GitHub Wiki</Text>
+                        <Text style={styles.linkText}>{tr('settings.documentationLinkValue')}</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
@@ -452,10 +454,10 @@ export function AboutSettingsScreen({
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
-                        onPress={() => openLink('https://ko-fi.com/dongdongbh')}
+                        onPress={() => openLink('https://mindwtr.app/donate?src=app_about')}
                     >
                         <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.sponsorProject')}</Text>
-                        <Text style={styles.linkText}>Ko-fi</Text>
+                        <Text style={styles.linkText}>{tr('settings.donateLinkValue')}</Text>
                     </TouchableOpacity>
                     <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
                         <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.license')}</Text>
@@ -468,6 +470,7 @@ export function AboutSettingsScreen({
                 isConfigured={Boolean(feedbackEndpointUrl)}
                 tr={tr}
                 onClose={() => setFeedbackOpen(false)}
+                onOpenIssue={() => openLink(GITHUB_ISSUES_URL)}
                 onSubmit={handleSubmitFeedback}
             />
         </SafeAreaView>

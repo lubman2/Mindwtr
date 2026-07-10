@@ -1,15 +1,44 @@
 import type { ReactNode } from 'react';
-import { useDroppable } from '@dnd-kit/core';
+import { closestCenter, pointerWithin, useDroppable, type CollisionDetection } from '@dnd-kit/core';
 import { cn } from '../../../lib/utils';
+import type { ProjectAreaSection } from './project-area-collapse';
 
 const PROJECT_AREA_CONTAINER_PREFIX = 'project-area:';
 
-export const getProjectAreaContainerId = (areaId: string) => `${PROJECT_AREA_CONTAINER_PREFIX}${areaId}`;
+// Area zone ids are namespaced by sidebar section because all sections now share
+// one DndContext and the same area can render a zone in each of them.
+export const getProjectAreaContainerId = (section: ProjectAreaSection, areaId: string) =>
+    `${PROJECT_AREA_CONTAINER_PREFIX}${section}:${areaId}`;
+
+export const getProjectAreaContainerInfo = (
+    containerId: string,
+): { section: ProjectAreaSection; areaId: string } | null => {
+    if (!containerId.startsWith(PROJECT_AREA_CONTAINER_PREFIX)) return null;
+    const rest = containerId.slice(PROJECT_AREA_CONTAINER_PREFIX.length);
+    const separator = rest.indexOf(':');
+    if (separator === -1) return null;
+    const section = rest.slice(0, separator) as ProjectAreaSection;
+    const areaId = rest.slice(separator + 1);
+    if (!areaId || (section !== 'active' && section !== 'deferred' && section !== 'archived')) return null;
+    return { section, areaId };
+};
 
 export const getProjectAreaIdFromContainer = (containerId: string) =>
-    containerId.startsWith(PROJECT_AREA_CONTAINER_PREFIX)
-        ? containerId.slice(PROJECT_AREA_CONTAINER_PREFIX.length)
-        : null;
+    getProjectAreaContainerInfo(containerId)?.areaId ?? null;
+
+// Area groups are droppable as whole blocks (header included, so collapsed and
+// empty areas accept drops). Prefer project-row hits under the pointer so
+// within-list reordering is not hijacked by the surrounding group container.
+export const projectAreaCollisionDetection: CollisionDetection = (args) => {
+    const pointerCollisions = pointerWithin(args);
+    if (pointerCollisions.length > 0) {
+        const rowCollisions = pointerCollisions.filter(
+            (collision) => getProjectAreaIdFromContainer(String(collision.id)) === null
+        );
+        return rowCollisions.length > 0 ? rowCollisions : pointerCollisions;
+    }
+    return closestCenter(args);
+};
 
 type ComputeProjectAreaDragResultArgs = {
     activeId: string;
@@ -86,13 +115,17 @@ export function computeProjectAreaDragResult({
 }
 
 type ProjectAreaDropZoneProps = {
-    id: string;
+    section: ProjectAreaSection;
+    areaId: string;
     className?: string;
     children: ReactNode;
 };
 
-export function ProjectAreaDropZone({ id, className, children }: ProjectAreaDropZoneProps) {
-    const { setNodeRef, isOver } = useDroppable({ id });
+export function ProjectAreaDropZone({ section, areaId, className, children }: ProjectAreaDropZoneProps) {
+    const { setNodeRef, isOver } = useDroppable({
+        id: getProjectAreaContainerId(section, areaId),
+        data: { zone: 'projectArea', section, areaId },
+    });
     return (
         <div ref={setNodeRef} className={cn(className, isOver && 'ring-2 ring-primary/40 rounded-lg')}>
             {children}

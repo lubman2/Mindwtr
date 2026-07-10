@@ -8,6 +8,7 @@ import {
     continueMarkdownOnEnter,
     continueMarkdownOnTextChange,
     getInlineMarkdownPreview,
+    isMarkdownEditorAssistEnabled,
     parseInlineMarkdown,
 } from './markdown';
 
@@ -201,6 +202,14 @@ describe('applyMarkdownPairInsertion', () => {
         expect(
             applyMarkdownPairInsertion('dont', "don't", { start: 3, end: 3 }),
         ).toBeNull();
+    });
+
+    it('does not auto-close quotes, angle brackets, or braces at the cursor', () => {
+        // Only Markdown-relevant pairs auto-close; these fight prose and pasted URLs (discussion #742).
+        expect(applyMarkdownPairInsertion('say ', 'say "', { start: 4, end: 4 })).toBeNull();
+        expect(applyMarkdownPairInsertion('say ', "say '", { start: 4, end: 4 })).toBeNull();
+        expect(applyMarkdownPairInsertion('say ', 'say <', { start: 4, end: 4 })).toBeNull();
+        expect(applyMarkdownPairInsertion('say ', 'say {', { start: 4, end: 4 })).toBeNull();
     });
 
     it('supports repeated backtick wrapping for fenced code', () => {
@@ -502,6 +511,58 @@ describe('continueMarkdownOnTextChange', () => {
     it('ignores unrelated text changes', () => {
         expect(
             continueMarkdownOnTextChange('- item', '- items', { start: 6, end: 6 }),
+        ).toBeNull();
+    });
+});
+
+describe('isMarkdownEditorAssistEnabled', () => {
+    it('defaults to enabled when the setting is unset', () => {
+        expect(isMarkdownEditorAssistEnabled(undefined)).toBe(true);
+        expect(isMarkdownEditorAssistEnabled(null)).toBe(true);
+        expect(isMarkdownEditorAssistEnabled({})).toBe(true);
+        expect(isMarkdownEditorAssistEnabled({ markdownEditorAssist: true })).toBe(true);
+    });
+
+    it('is disabled only when explicitly set to false', () => {
+        expect(isMarkdownEditorAssistEnabled({ markdownEditorAssist: false })).toBe(false);
+    });
+});
+
+describe('markdown editor assist gate', () => {
+    it('skips auto-pairing when assist is disabled', () => {
+        expect(
+            applyMarkdownPairInsertion('read docs', 'read [docs', { start: 5, end: 5 }, { assist: false }),
+        ).toBeNull();
+    });
+
+    it('still auto-pairs when assist is enabled or unspecified', () => {
+        const expected = { value: 'read []docs', selection: { start: 6, end: 6 } };
+        expect(
+            applyMarkdownPairInsertion('read docs', 'read [docs', { start: 5, end: 5 }, { assist: true }),
+        ).toEqual(expected);
+        expect(
+            applyMarkdownPairInsertion('read docs', 'read [docs', { start: 5, end: 5 }),
+        ).toEqual(expected);
+    });
+
+    it('skips selection wrapping when assist is disabled', () => {
+        expect(
+            applyMarkdownPairInsertion('read docs', 'read [', { start: 5, end: 9 }, { assist: false }),
+        ).toBeNull();
+    });
+
+    it('skips url-to-link paste when assist is disabled', () => {
+        expect(
+            applyMarkdownUrlPaste('read docs today', 'read https://example.com today', { start: 5, end: 9 }, { assist: false }),
+        ).toBeNull();
+    });
+
+    it('skips list continuation when assist is disabled', () => {
+        expect(
+            continueMarkdownOnEnter('- item', { start: 6, end: 6 }, { assist: false }),
+        ).toBeNull();
+        expect(
+            continueMarkdownOnTextChange('- item', '- item\n', { start: 6, end: 6 }, { assist: false }),
         ).toBeNull();
     });
 });

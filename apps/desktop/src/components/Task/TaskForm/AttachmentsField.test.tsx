@@ -23,6 +23,8 @@ describe('AttachmentsField', () => {
                 visibleEditAttachments={[attachment]}
                 addFileAttachment={vi.fn()}
                 addLinkAttachment={vi.fn()}
+                addObsidianNoteAttachment={vi.fn()}
+                showObsidianNoteAttachment={false}
                 editLinkAttachment={vi.fn()}
                 openAttachment={openAttachment}
                 removeAttachment={vi.fn()}
@@ -54,6 +56,8 @@ describe('AttachmentsField', () => {
                 visibleEditAttachments={[attachment]}
                 addFileAttachment={vi.fn()}
                 addLinkAttachment={vi.fn()}
+                addObsidianNoteAttachment={vi.fn()}
+                showObsidianNoteAttachment={false}
                 editLinkAttachment={editLinkAttachment}
                 openAttachment={vi.fn()}
                 removeAttachment={vi.fn()}
@@ -64,4 +68,47 @@ describe('AttachmentsField', () => {
 
         expect(editLinkAttachment).toHaveBeenCalledWith(attachment);
     });
+
+    it('surfaces an Obsidian note attachment action', () => {
+        const addObsidianNoteAttachment = vi.fn();
+
+        const { getByRole } = render(
+            <AttachmentsField
+                t={(key) => key}
+                attachmentError={null}
+                visibleEditAttachments={[]}
+                addFileAttachment={vi.fn()}
+                addLinkAttachment={vi.fn()}
+                addObsidianNoteAttachment={addObsidianNoteAttachment}
+                showObsidianNoteAttachment
+                editLinkAttachment={vi.fn()}
+                openAttachment={vi.fn()}
+                removeAttachment={vi.fn()}
+            />
+        );
+
+        fireEvent.click(getByRole('button', { name: 'attachments.attachObsidianNote' }));
+
+        expect(addObsidianNoteAttachment).toHaveBeenCalledTimes(1);
+    });
+
+    it('hides the Obsidian note attachment action when the integration is disabled', () => {
+        const { queryByRole } = render(
+            <AttachmentsField
+                t={(key) => key}
+                attachmentError={null}
+                visibleEditAttachments={[]}
+                addFileAttachment={vi.fn()}
+                addLinkAttachment={vi.fn()}
+                addObsidianNoteAttachment={vi.fn()}
+                showObsidianNoteAttachment={false}
+                editLinkAttachment={vi.fn()}
+                openAttachment={vi.fn()}
+                removeAttachment={vi.fn()}
+            />
+        );
+
+        expect(queryByRole('button', { name: 'attachments.attachObsidianNote' })).not.toBeInTheDocument();
+    });
+
 });

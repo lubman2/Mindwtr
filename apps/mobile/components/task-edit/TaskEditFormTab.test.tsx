@@ -138,6 +138,32 @@ describe('TaskEditFormTab keyboard handling', () => {
     mockMeasureInWindow.mockReset();
   });
 
+  it('does not render collapsible sections that have no fields', () => {
+    const renderField = vi.fn((fieldId: string) => React.createElement('Field', { fieldId }));
+
+    let tree!: ReturnType<typeof create>;
+    act(() => {
+      tree = create(
+        <TaskEditFormTab
+          {...baseProps}
+          renderField={renderField}
+          schedulingFields={[]}
+          organizationFields={['project' as any]}
+          detailsFields={[]}
+        />
+      );
+    });
+
+    const sectionHeaders = (label: string) => tree.root.findAll(
+      (node) => node.props.accessibilityRole === 'button' && node.props.accessibilityLabel === label
+    );
+
+    expect(sectionHeaders('taskEdit.scheduling')).toHaveLength(0);
+    expect(sectionHeaders('taskEdit.organization').length).toBeGreaterThan(0);
+    expect(sectionHeaders('taskEdit.details')).toHaveLength(0);
+    expect(renderField).toHaveBeenCalledWith('project');
+  });
+
   it('adds an iOS keyboard bottom inset so focused lower inputs can scroll above the keyboard', () => {
     setPlatform('ios');
     vi.spyOn(Dimensions, 'get').mockReturnValue({
@@ -244,6 +270,26 @@ describe('TaskEditFormTab keyboard handling', () => {
     });
 
     expect(onTitleInputFocusChange).toHaveBeenCalledWith(false);
+  });
+
+  it('wraps the title across lines and strips newlines from pasted titles', () => {
+    const onTitleDraftChange = vi.fn();
+    let tree!: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(
+        <TaskEditFormTab {...baseProps} onTitleDraftChange={onTitleDraftChange} />
+      );
+    });
+
+    const titleInput = tree.root.findAllByType(TextInput)[0];
+    expect(titleInput.props.multiline).toBe(true);
+
+    act(() => {
+      titleInput.props.onChangeText('line one\nline two');
+    });
+
+    expect(onTitleDraftChange).toHaveBeenCalledWith('line one line two');
   });
 
   it('does not schedule measured scrolling when the title input reports a native handle', () => {

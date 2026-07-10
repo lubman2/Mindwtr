@@ -1,37 +1,41 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ErrorBoundary } from '../ErrorBoundary';
-import { shallow, useTaskStore, TaskPriority, TimeEstimate, applyFilter, buildAdvancedFilterCriteriaChips, removeAdvancedFilterCriteriaChip, formatFocusTaskLimitText, formatTimeEstimateLabel, generateUUID, getUsedTaskTokens, getFocusSequentialFirstTaskIds, getProjectDeadlineBoosts, hasActiveFilterCriteria, markSavedFilterDeleted, normalizeFocusTaskLimit, safeParseDate, safeParseDueDate, isDueForReview, isTaskInActiveProject, SAVED_FILTER_NO_PROJECT_ID, shouldShowTaskForStart, sortFocusNextActions, sortTasksBySavedPreference, translateWithFallback } from '@mindwtr/core';
-import type { FilterCriteria, FocusGroupBy, ProjectDeadlineBoost, SavedFilter, SortField, Task, TaskEnergyLevel } from '@mindwtr/core';
+import { shallow, useTaskStore, TaskPriority, TimeEstimate, applyFilter, buildAdvancedFilterCriteriaChips, removeAdvancedFilterCriteriaChip, formatFocusTaskLimitText,
+    getFocusStarBlockedText, formatTimeEstimateLabel, generateUUID, getUsedTaskTokens, getFocusSequentialFirstTaskIds, getProjectDeadlineBoosts, getTaskMetadataFilterVisibility, hasActiveFilterCriteria, markSavedFilterDeleted, normalizeFocusTaskLimit, safeParseDate, safeParseDueDate, isDueForReview, isTaskInActiveProject, SAVED_FILTER_NO_PROJECT_ID, shouldShowTaskForStart, sortFocusNextActions, sortTasksBySavedPreference, translateWithFallback } from '@mindwtr/core';
+import type { FilterCriteria, FocusGroupBy, MultiValueFilterMatchMode, ProjectDeadlineBoost, SavedFilter, SortField, Task, TaskEnergyLevel } from '@mindwtr/core';
 import { useLanguage } from '../../contexts/language-context';
 import { cn } from '../../lib/utils';
 import { useUiStore } from '../../store/ui-store';
-import { AlertCircle, Clock, Star, ArrowRight, Folder, CheckCircle2, X } from 'lucide-react';
+import { AlertCircle, Clock, ArrowRight, Folder, CheckCircle2, X, ChevronDown, ChevronRight } from 'lucide-react';
 import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
-import { projectMatchesAreaFilter, resolveAreaFilter, taskMatchesAreaFilter } from '../../lib/area-filter';
+import { projectMatchesAreaFilter, resolveAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
 import { usePersistedViewState } from '../../hooks/usePersistedViewState';
 import { PomodoroPanel } from './PomodoroPanel';
 import { AgendaFiltersPanel, type AgendaActiveFilterChip, type AgendaProjectFilterOption } from './agenda/AgendaFiltersPanel';
 import { AgendaHeader } from './agenda/AgendaHeader';
 import { AgendaCollapsibleSection, AgendaProjectSection } from './agenda/AgendaSections';
 import { StoreTaskItem } from './list/StoreTaskItem';
-import { groupTasksByArea, groupTasksByContext, groupTasksByEnergy, groupTasksByPriority, groupTasksByProject, type NextGroupBy, type TaskGroup } from './list/next-grouping';
+import { groupTasks, type NextGroupBy } from './list/next-grouping';
 import { PromptModal } from '../PromptModal';
 import { ConfirmModal } from '../ConfirmModal';
 import { dispatchNavigateEvent } from '../../lib/navigation-events';
+import { FocusStarIcon } from '../FocusStarIcon';
 
 const AGENDA_VIRTUALIZATION_THRESHOLD = 25;
 const NO_PROJECT_FILTER_ID = SAVED_FILTER_NO_PROJECT_ID;
 const AGENDA_ACTIVE_STATUSES: Task['status'][] = ['inbox', 'next', 'waiting', 'someday'];
 const DEFAULT_FOCUS_SORT_BY: SortField = 'default';
-const FOCUS_GROUP_BY_VALUES = new Set<FocusGroupBy>(['none', 'context', 'project', 'area', 'energy', 'priority']);
+const FOCUS_GROUP_BY_VALUES = new Set<FocusGroupBy>(['none', 'context', 'project', 'area', 'energy', 'priority', 'person', 'tag']);
 const FOCUS_VIEW_STATE_STORAGE_KEY = 'mindwtr:view:focus:v1';
 
 type FocusSectionKey = 'schedule' | 'nextActions' | 'reviewDue';
+type FocusGroupCollapseKey = Exclude<NextGroupBy, 'none'>;
 
 type FocusPersistedViewState = {
     expandedSections: Record<FocusSectionKey, boolean>;
+    collapsedGroups: Partial<Record<FocusGroupCollapseKey, string[]>>;
 };
 
 const DEFAULT_FOCUS_VIEW_STATE: FocusPersistedViewState = {
@@ -39,6 +43,15 @@ const DEFAULT_FOCUS_VIEW_STATE: FocusPersistedViewState = {
         schedule: true,
         nextActions: true,
         reviewDue: true,
+    },
+    collapsedGroups: {
+        context: [],
+        area: [],
+        project: [],
+        energy: [],
+        priority: [],
+        person: [],
+        tag: [],
     },
 };
 
@@ -49,17 +62,42 @@ function sanitizeFocusViewState(value: unknown, fallback: FocusPersistedViewStat
     const expandedSections = parsed.expandedSections && typeof parsed.expandedSections === 'object' && !Array.isArray(parsed.expandedSections)
         ? parsed.expandedSections as Partial<Record<FocusSectionKey, boolean>>
         : {};
+    const collapsedGroups = parsed.collapsedGroups && typeof parsed.collapsedGroups === 'object' && !Array.isArray(parsed.collapsedGroups)
+        ? parsed.collapsedGroups as Partial<Record<FocusGroupCollapseKey, unknown>>
+        : {};
+    const sanitizeGroupIds = (ids: unknown, fallbackIds: string[] | undefined = []) => (
+        Array.isArray(ids)
+            ? Array.from(new Set(ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)))
+            : fallbackIds ?? []
+    );
     return {
         expandedSections: {
             schedule: typeof expandedSections.schedule === 'boolean' ? expandedSections.schedule : fallback.expandedSections.schedule,
             nextActions: typeof expandedSections.nextActions === 'boolean' ? expandedSections.nextActions : fallback.expandedSections.nextActions,
             reviewDue: typeof expandedSections.reviewDue === 'boolean' ? expandedSections.reviewDue : fallback.expandedSections.reviewDue,
         },
+        collapsedGroups: {
+            context: sanitizeGroupIds(collapsedGroups.context, fallback.collapsedGroups.context),
+            area: sanitizeGroupIds(collapsedGroups.area, fallback.collapsedGroups.area),
+            project: sanitizeGroupIds(collapsedGroups.project, fallback.collapsedGroups.project),
+            energy: sanitizeGroupIds(collapsedGroups.energy, fallback.collapsedGroups.energy),
+            priority: sanitizeGroupIds(collapsedGroups.priority, fallback.collapsedGroups.priority),
+            person: sanitizeGroupIds(collapsedGroups.person, fallback.collapsedGroups.person),
+            tag: sanitizeGroupIds(collapsedGroups.tag, fallback.collapsedGroups.tag),
+        },
     };
 }
 
 function normalizeAgendaGroupBy(value: unknown): NextGroupBy {
     return FOCUS_GROUP_BY_VALUES.has(value as FocusGroupBy) ? value as NextGroupBy : 'none';
+}
+
+function getFocusGroupCollapseKey(value: NextGroupBy): FocusGroupCollapseKey | null {
+    return value === 'none' ? null : value;
+}
+
+function getDomIdSegment(value: string): string {
+    return value.trim().replace(/[^a-zA-Z0-9_-]+/g, '-') || 'group';
 }
 
 function getAgendaScrollElement(containerElement: HTMLDivElement | null): HTMLElement | null {
@@ -92,9 +130,11 @@ function buildFocusFilterCriteria({
     priorities,
     energyLevels,
     projects,
+    contextMatchMode,
     timeEstimates,
     tokens,
 }: {
+    contextMatchMode: MultiValueFilterMatchMode;
     energyLevels: TaskEnergyLevel[];
     locations: string[];
     priorities: TaskPriority[];
@@ -106,6 +146,7 @@ function buildFocusFilterCriteria({
     const tags = tokens.filter((token) => token.trim().startsWith('#'));
     return {
         ...(contexts.length > 0 ? { contexts } : {}),
+        ...(contexts.length > 1 ? { contextMatchMode } : {}),
         ...(tags.length > 0 ? { tags } : {}),
         ...(projects.length > 0 ? { projects } : {}),
         ...(locations.length > 0 ? { locations } : {}),
@@ -255,19 +296,21 @@ export function AgendaView() {
     const getDerivedState = useTaskStore((state) => state.getDerivedState);
     const { activeTasksByStatus, projectMap, sequentialProjectIds, sequentialWithinSectionProjectIds, tasksById } = getDerivedState();
     const { t } = useLanguage();
-    const { showListDetails, nextGroupBy, top3Only, setListOptions, collapseAllTaskDetails, setProjectView } = useUiStore((state) => ({
+    const { showListDetails, nextGroupBy, top3Only, setListOptions, collapseAllTaskDetails, setProjectView, showToast } = useUiStore((state) => ({
         showListDetails: state.listOptions.showDetails,
         nextGroupBy: state.listOptions.nextGroupBy,
         top3Only: state.listOptions.focusTop3Only,
         setListOptions: state.setListOptions,
         collapseAllTaskDetails: state.collapseAllTaskDetails,
         setProjectView: state.setProjectView,
+        showToast: state.showToast,
     }));
     const [selectedTokens, setSelectedTokens] = useState<string[]>([]);
     const [selectedPriorities, setSelectedPriorities] = useState<TaskPriority[]>([]);
     const [selectedEnergyLevels, setSelectedEnergyLevels] = useState<TaskEnergyLevel[]>([]);
     const [selectedTimeEstimates, setSelectedTimeEstimates] = useState<TimeEstimate[]>([]);
     const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+    const [contextMatchMode, setContextMatchMode] = useState<MultiValueFilterMatchMode>('all');
     const [locationFilter, setLocationFilter] = useState('');
     const [searchQuery, setSearchQuery] = useState('');
     const [filtersOpen, setFiltersOpen] = useState(false);
@@ -287,8 +330,6 @@ export function AgendaView() {
     const timeEstimatesEnabled = settings?.features?.timeEstimates !== false;
     const pomodoroEnabled = settings?.features?.pomodoro === true;
     const focusTaskLimit = normalizeFocusTaskLimit(settings?.gtd?.focusTaskLimit);
-    const activePriorities = prioritiesEnabled ? selectedPriorities : [];
-    const activeTimeEstimates = timeEstimatesEnabled ? selectedTimeEstimates : [];
     const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
     const resolvedAreaFilter = resolveAreaFilter(settings?.filters?.areaId, areas);
 
@@ -324,6 +365,16 @@ export function AgendaView() {
     const priorityOptions: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
     const energyLevelOptions: TaskEnergyLevel[] = ['low', 'medium', 'high'];
     const timeEstimateOptions: TimeEstimate[] = ['5min', '10min', '15min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
+    const metadataFilterVisibility = useMemo(() => getTaskMetadataFilterVisibility(activeTasks, {
+        prioritiesEnabled,
+        timeEstimatesEnabled,
+    }), [activeTasks, prioritiesEnabled, timeEstimatesEnabled]);
+    const showPriorityFilters = metadataFilterVisibility.priority;
+    const showEnergyLevelFilters = metadataFilterVisibility.energyLevel;
+    const showTimeEstimateFilters = metadataFilterVisibility.timeEstimate;
+    const showLocationFilter = metadataFilterVisibility.location;
+    const activePriorities = showPriorityFilters ? selectedPriorities : [];
+    const activeTimeEstimates = showTimeEstimateFilters ? selectedTimeEstimates : [];
     const projectOptions = useMemo<AgendaProjectFilterOption[]>(() => {
         const activeProjectIds = new Set(
             activeTasks
@@ -352,17 +403,21 @@ export function AgendaView() {
     const effectiveNextGroupBy = normalizeAgendaGroupBy(activeSavedFilter?.groupBy ?? nextGroupBy);
     const currentFilterCriteria = buildFocusFilterCriteria({
         tokens: selectedTokens,
+        contextMatchMode,
         projects: selectedProjects,
-        locations: locationFilter.trim() ? [locationFilter.trim()] : [],
+        locations: showLocationFilter && locationFilter.trim() ? [locationFilter.trim()] : [],
         priorities: activePriorities,
-        energyLevels: selectedEnergyLevels,
+        energyLevels: showEnergyLevelFilters ? selectedEnergyLevels : [],
         timeEstimates: activeTimeEstimates,
     });
     const rawEffectiveFilterCriteria = activeSavedFilter?.criteria ?? currentFilterCriteria;
+    const effectiveContextMatchMode = rawEffectiveFilterCriteria.contextMatchMode ?? 'all';
     const effectiveFilterCriteria: FilterCriteria = {
         ...rawEffectiveFilterCriteria,
-        ...(prioritiesEnabled ? {} : { priority: undefined }),
-        ...(timeEstimatesEnabled ? {} : { timeEstimates: undefined, timeEstimateRange: undefined }),
+        ...(showPriorityFilters ? {} : { priority: undefined }),
+        ...(showEnergyLevelFilters ? {} : { energy: undefined }),
+        ...(showLocationFilter ? {} : { locations: undefined }),
+        ...(showTimeEstimateFilters ? {} : { timeEstimates: undefined, timeEstimateRange: undefined }),
     };
     const hasCurrentFilterCriteria = hasActiveFilterCriteria(currentFilterCriteria);
     const hasFilters = hasActiveFilterCriteria(effectiveFilterCriteria);
@@ -435,26 +490,26 @@ export function AgendaView() {
                 dotColor: (project.areaId ? areaById.get(project.areaId)?.color : undefined) || project.color || undefined,
             });
         });
-        activePriorities.forEach((priority) => {
+        (showPriorityFilters ? activePriorities : []).forEach((priority) => {
             chips.push({
                 id: `priority:${priority}`,
                 label: t(`priority.${priority}`),
             });
         });
-        selectedEnergyLevels.forEach((energyLevel) => {
+        (showEnergyLevelFilters ? selectedEnergyLevels : []).forEach((energyLevel) => {
             chips.push({
                 id: `energy:${energyLevel}`,
                 label: t(`energyLevel.${energyLevel}`),
             });
         });
-        activeTimeEstimates.forEach((estimate) => {
+        (showTimeEstimateFilters ? activeTimeEstimates : []).forEach((estimate) => {
             chips.push({
                 id: `time:${estimate}`,
                 label: formatEstimate(estimate),
             });
         });
         const normalizedLocationFilter = locationFilter.trim();
-        if (normalizedLocationFilter && !activeSavedFilter) {
+        if (showLocationFilter && normalizedLocationFilter && !activeSavedFilter) {
             chips.push({
                 id: `location:${normalizedLocationFilter}`,
                 label: `${resolveText('taskEdit.locationLabel', 'Location')}: ${normalizedLocationFilter}`,
@@ -577,6 +632,10 @@ export function AgendaView() {
             prev.includes(estimate) ? prev.filter((item) => item !== estimate) : [...prev, estimate]
         );
     };
+    const updateContextMatchMode = useCallback((mode: MultiValueFilterMatchMode) => {
+        setActiveSavedFilterId(null);
+        setContextMatchMode(mode);
+    }, []);
     const updateLocationFilter = (value: string) => {
         setActiveSavedFilterId(null);
         setLocationFilter(value);
@@ -598,6 +657,7 @@ export function AgendaView() {
         setSelectedPriorities([]);
         setSelectedEnergyLevels([]);
         setSelectedTimeEstimates([]);
+        setContextMatchMode('all');
     };
     const clearAllFilters = () => {
         clearFilters();
@@ -616,6 +676,7 @@ export function AgendaView() {
         )));
         setSelectedEnergyLevels((criteria.energy ?? []).filter((energy): energy is TaskEnergyLevel => energySet.has(energy)));
         setSelectedTimeEstimates((criteria.timeEstimates ?? []).filter((estimate): estimate is TimeEstimate => estimateSet.has(estimate)));
+        setContextMatchMode(criteria.contextMatchMode ?? 'all');
         setFocusSortBy(filter.sortBy ?? DEFAULT_FOCUS_SORT_BY);
         setActiveSavedFilterId(filter.id);
         setFiltersOpen(false);
@@ -653,13 +714,19 @@ export function AgendaView() {
         }).catch(() => undefined);
     }, [activeSavedFilterId, filterPendingDelete, settings?.savedFilters, updateSettings]);
     useEffect(() => {
-        if (!prioritiesEnabled && selectedPriorities.length > 0) {
+        if (!showPriorityFilters && selectedPriorities.length > 0) {
             setSelectedPriorities([]);
         }
-        if (!timeEstimatesEnabled && selectedTimeEstimates.length > 0) {
+        if (!showEnergyLevelFilters && selectedEnergyLevels.length > 0) {
+            setSelectedEnergyLevels([]);
+        }
+        if (!showLocationFilter && locationFilter.trim().length > 0) {
+            setLocationFilter('');
+        }
+        if (!showTimeEstimateFilters && selectedTimeEstimates.length > 0) {
             setSelectedTimeEstimates([]);
         }
-    }, [prioritiesEnabled, timeEstimatesEnabled, selectedPriorities.length, selectedTimeEstimates.length]);
+    }, [locationFilter, selectedEnergyLevels.length, selectedPriorities.length, selectedTimeEstimates.length, showEnergyLevelFilters, showLocationFilter, showPriorityFilters, showTimeEstimateFilters]);
 
     useEffect(() => {
         if (!highlightTaskId) return;
@@ -787,42 +854,13 @@ export function AgendaView() {
         sequentialWithinSectionProjectIds,
         sortBySavedPerspective,
     ]);
-    const nextActionGroups = useMemo(() => {
-        if (effectiveNextGroupBy === 'none') return [] as TaskGroup[];
-        if (effectiveNextGroupBy === 'area') {
-            return groupTasksByArea({
-                areas,
-                tasks: sections.nextActions,
-                projectMap,
-                generalLabel: resolveText('settings.general', 'General'),
-            });
-        }
-        if (effectiveNextGroupBy === 'project') {
-            return groupTasksByProject({
-                tasks: sections.nextActions,
-                projectMap,
-                noProjectLabel: resolveText('taskEdit.noProjectOption', 'No project'),
-            });
-        }
-        if (effectiveNextGroupBy === 'priority') {
-            return groupTasksByPriority({
-                tasks: sections.nextActions,
-                getPriorityLabel: (priority) => t(`priority.${priority}`),
-                noPriorityLabel: resolveText('focus.group.noPriority', 'No priority'),
-            });
-        }
-        if (effectiveNextGroupBy === 'energy') {
-            return groupTasksByEnergy({
-                tasks: sections.nextActions,
-                getEnergyLabel: (energy) => t(`energyLevel.${energy}`),
-                noEnergyLabel: resolveText('focus.group.noEnergy', 'No energy'),
-            });
-        }
-        return groupTasksByContext({
-            tasks: sections.nextActions,
-            noContextLabel: resolveText('contexts.none', 'No context'),
-        });
-    }, [areas, effectiveNextGroupBy, projectMap, resolveText, sections.nextActions, t]);
+    const nextActionGroups = useMemo(() => (
+        groupTasks(effectiveNextGroupBy, { tasks: sections.nextActions, areas, projectMap, t })
+    ), [areas, effectiveNextGroupBy, projectMap, sections.nextActions, t]);
+    const activeGroupCollapseKey = getFocusGroupCollapseKey(effectiveNextGroupBy);
+    const collapsedNextActionGroupIds = useMemo(() => new Set(
+        activeGroupCollapseKey ? persistedViewState.collapsedGroups[activeGroupCollapseKey] ?? [] : []
+    ), [activeGroupCollapseKey, persistedViewState.collapsedGroups]);
     const getProjectDeadlineLabel = useCallback((taskId: string) => (
         getProjectDeadlineBoostLabel(sections.projectDeadlineBoosts.get(taskId), resolveText)
     ), [resolveText, sections.projectDeadlineBoosts]);
@@ -845,19 +883,22 @@ export function AgendaView() {
     const handleToggleFocus = useCallback((taskId: string) => {
         const task = tasksById.get(taskId);
         if (!task) return;
-
-        if (task.isFocusedToday) {
-            updateTask(taskId, { isFocusedToday: false });
-        } else if (focusedCount < focusTaskLimit) {
-            updateTask(taskId, {
-                isFocusedToday: true,
-                ...(task.status !== 'next' ? { status: 'next' as const } : {}),
-            });
+        // Core focus-star module decides eligibility, cap, and the patch;
+        // status promotion happens in the store's star↔status rules.
+        const action = useTaskStore.getState().getFocusStarAction(task);
+        if (!action.canToggle) {
+            const blockedText = getFocusStarBlockedText(t, action, focusTaskLimit);
+            if (blockedText) showToast(blockedText, 'info');
+            return;
         }
-    }, [focusTaskLimit, focusedCount, tasksById, updateTask]);
+        updateTask(taskId, action.patch);
+    }, [focusTaskLimit, showToast, t, tasksById, updateTask]);
 
     const buildFocusToggle = useCallback((task: Task) => {
         const isFocused = Boolean(task.isFocusedToday);
+        // Cheap cap-only gate at render time (rows are many); full eligibility
+        // is enforced on click via the core focus-star module, which toasts
+        // the blocked reason.
         const canToggle = isFocused || focusedCount < focusTaskLimit;
         const title = isFocused
             ? t('agenda.removeFromFocus')
@@ -883,6 +924,23 @@ export function AgendaView() {
             },
         }));
     }, [setPersistedViewState]);
+    const toggleNextActionGroup = useCallback((groupId: string) => {
+        const collapseKey = getFocusGroupCollapseKey(effectiveNextGroupBy);
+        if (!collapseKey) return;
+        setPersistedViewState((current) => {
+            const currentIds = current.collapsedGroups[collapseKey] ?? [];
+            const nextIds = currentIds.includes(groupId)
+                ? currentIds.filter((id) => id !== groupId)
+                : [...currentIds, groupId];
+            return {
+                ...current,
+                collapsedGroups: {
+                    ...current.collapsedGroups,
+                    [collapseKey]: nextIds,
+                },
+            };
+        });
+    }, [effectiveNextGroupBy, setPersistedViewState]);
 
     const nextActionsCount = sections.nextActions.length;
     const hasAgendaContent = focusedTasks.length > 0
@@ -918,7 +976,7 @@ export function AgendaView() {
             className="rounded-xl border border-border/70 border-l-4 border-l-amber-400 bg-card/70 p-6 shadow-sm dark:border-border/60 dark:border-l-amber-400/80 dark:bg-card/60"
         >
             <h3 className="font-bold text-lg flex items-center gap-2 mb-4 text-foreground">
-                <Star className="w-5 h-5 text-yellow-500 fill-yellow-500 dark:text-amber-300 dark:fill-amber-300" />
+                <FocusStarIcon className="w-5 h-5 text-yellow-500 dark:text-amber-300" filled />
                 {t('agenda.todaysFocus')}
                 <span className="text-sm font-normal text-muted-foreground">
                     ({focusedCount}/{focusTaskLimit})
@@ -1016,14 +1074,23 @@ export function AgendaView() {
                     allTokens={allTokens}
                     activeFilterChips={activeFilterChips}
                     canSaveFilter={canSaveFocusPerspective}
+                    contextMatchMode={effectiveContextMatchMode}
+                    contextMatchModeLabels={{
+                        title: resolveText('filters.contextMatchMode', 'Context match'),
+                        any: resolveText('filters.matchAny', 'Any'),
+                        all: resolveText('common.all', 'All'),
+                    }}
                     energyLevelOptions={energyLevelOptions}
                     focusSortBy={effectiveFocusSortBy}
                     formatEstimate={formatEstimate}
                     hasFilters={activeFilterCount > 0}
                     locationFilter={locationFilter}
+                    showEnergyLevelFilters={showEnergyLevelFilters}
+                    showLocationFilter={showLocationFilter}
                     onClearFilters={clearAllFilters}
                     onLocationChange={updateLocationFilter}
                     onSaveFilter={() => setSaveFilterPromptOpen(true)}
+                    onContextMatchModeChange={updateContextMatchMode}
                     onSearchChange={setSearchQuery}
                     onSortChange={updateFocusSortBy}
                     onToggleEnergy={toggleEnergyFilter}
@@ -1032,7 +1099,7 @@ export function AgendaView() {
                     onTogglePriority={togglePriorityFilter}
                     onToggleTime={toggleTimeFilter}
                     onToggleToken={toggleTokenFilter}
-                    prioritiesEnabled={prioritiesEnabled}
+                    showPriorityFilters={showPriorityFilters}
                     projectOptions={projectOptions}
                     priorityOptions={priorityOptions}
                     searchInputRef={filterInputRef}
@@ -1047,7 +1114,7 @@ export function AgendaView() {
                     showFiltersPanel={showFiltersPanel}
                     t={t}
                     timeEstimateOptions={timeEstimateOptions}
-                    timeEstimatesEnabled={timeEstimatesEnabled}
+                    showTimeEstimateFilters={showTimeEstimateFilters}
                 />
             )}
 
@@ -1171,33 +1238,54 @@ export function AgendaView() {
                                     controlsId="agenda-section-nextActions"
                                 >
                                     <div className="space-y-2">
-                                        {nextActionGroups.map((group) => (
-                                            <div key={group.id} className="overflow-hidden rounded-lg border border-border/50 bg-card/40">
-                                                <div className="flex items-center justify-between gap-3 border-b border-border/30 px-4 py-3">
-                                                    <span className={cn(
-                                                        'inline-flex min-w-0 items-center gap-2 text-sm font-semibold',
-                                                        group.muted ? 'text-muted-foreground' : 'text-foreground',
-                                                    )}>
-                                                        {group.dotColor && (
-                                                            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: group.dotColor }} aria-hidden="true" />
+                                        {nextActionGroups.map((group, index) => {
+                                            const collapsed = collapsedNextActionGroupIds.has(group.id);
+                                            const controlsId = `agenda-next-group-${getDomIdSegment(effectiveNextGroupBy)}-${index}-${getDomIdSegment(group.id)}`;
+                                            return (
+                                                <div key={group.id} className="overflow-hidden rounded-lg border border-border/50 bg-card/40">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleNextActionGroup(group.id)}
+                                                        aria-expanded={!collapsed}
+                                                        aria-controls={controlsId}
+                                                        className={cn(
+                                                            'flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/30',
+                                                            'focus:outline-none focus:ring-2 focus:ring-primary/30',
+                                                            !collapsed && 'border-b border-border/30',
                                                         )}
-                                                        <span className="truncate">{group.title}</span>
-                                                    </span>
-                                                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
-                                                        {group.tasks.length}
-                                                    </span>
+                                                    >
+                                                        <span className={cn(
+                                                            'inline-flex min-w-0 items-center gap-2 text-sm font-semibold',
+                                                            group.muted ? 'text-muted-foreground' : 'text-foreground',
+                                                        )}>
+                                                            {collapsed ? (
+                                                                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                                                            ) : (
+                                                                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                                                            )}
+                                                            {group.dotColor && (
+                                                                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: group.dotColor }} aria-hidden="true" />
+                                                            )}
+                                                            <span className="truncate">{group.title}</span>
+                                                        </span>
+                                                        <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                                                            {group.tasks.length}
+                                                        </span>
+                                                    </button>
+                                                    {!collapsed && (
+                                                        <div id={controlsId} className="ml-4 border-l border-border/40 pl-3">
+                                                            <AgendaTaskList
+                                                                tasks={group.tasks}
+                                                                buildFocusToggle={buildFocusToggle}
+                                                                getProjectDeadlineLabel={getProjectDeadlineLabel}
+                                                                showListDetails={showListDetails}
+                                                                highlightTaskId={highlightTaskId}
+                                                            />
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                <div className="ml-4 border-l border-border/40 pl-3">
-                                                    <AgendaTaskList
-                                                        tasks={group.tasks}
-                                                        buildFocusToggle={buildFocusToggle}
-                                                        getProjectDeadlineLabel={getProjectDeadlineLabel}
-                                                        showListDetails={showListDetails}
-                                                        highlightTaskId={highlightTaskId}
-                                                    />
-                                                </div>
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 </AgendaCollapsibleSection>
                             )

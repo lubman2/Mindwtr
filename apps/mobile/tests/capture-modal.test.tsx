@@ -1,13 +1,14 @@
 import React from 'react';
-import { Keyboard, KeyboardAvoidingView, ScrollView, TouchableOpacity } from 'react-native';
+import { Alert, Keyboard, KeyboardAvoidingView, ScrollView, Text, TouchableOpacity } from 'react-native';
 import { act, create } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import CaptureScreen from '@/app/capture-modal';
+import CaptureScreen, { sanitizeCaptureReturnToParam } from '@/app/capture-modal';
 
-const { parseQuickAdd, routerMocks, routeParams, storeState } = vi.hoisted(() => {
+const { openTaskScreen, parseQuickAdd, routerMocks, routeParams, storeState } = vi.hoisted(() => {
   const parseQuickAdd = vi.fn<(value: string) => any>((value: string) => ({ title: value, props: {}, invalidDateCommands: [] }));
   return {
+    openTaskScreen: vi.fn(),
     parseQuickAdd,
     routerMocks: {
       back: vi.fn(),
@@ -20,6 +21,7 @@ const { parseQuickAdd, routerMocks, routeParams, storeState } = vi.hoisted(() =>
     storeState: {
       addProject: vi.fn(),
       addTask: vi.fn(),
+      addTasks: vi.fn(),
       projects: [] as any[],
       tasks: [] as any[],
       settings: { ai: { enabled: false }, features: {} },
@@ -33,7 +35,12 @@ vi.mock('expo-router', () => ({
   useRouter: () => routerMocks,
 }));
 
-vi.mock('@mindwtr/core', () => ({
+vi.mock('@mindwtr/core', async () => {
+  // Capture assembly runs real: it is the pure policy under test.
+  const actual = await vi.importActual<typeof import('@mindwtr/core')>('@mindwtr/core');
+  return {
+  buildCaptureTaskProps: actual.buildCaptureTaskProps,
+  applyCapturedProject: actual.applyCapturedProject,
   createAIProvider: vi.fn(),
   DEFAULT_PROJECT_COLOR: '#94a3b8',
   getQuickAddProjectInitialProps: (props: any, fallbackAreaId?: string | null) => {
@@ -45,11 +52,28 @@ vi.mock('@mindwtr/core', () => ({
     !project.deletedAt && project.status !== 'archived' && project.status !== 'completed'
   )),
   parseQuickAdd,
+  normalizeClockTimeInput: (value?: string | null) => String(value ?? '').trim(),
+  resolveDefaultNewTaskAreaId: (settings: any, areas: any[]) => {
+    const areaId = settings?.gtd?.defaultAreaId;
+    return typeof areaId === 'string' && areas.some((area) => area.id === areaId && !area.deletedAt)
+      ? areaId
+      : undefined;
+  },
   shallow: (left: unknown, right: unknown) => Object.is(left, right),
+  splitQuickAddBulkLines: (input: string) => input
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean),
+  tFallback: (t: (key: string) => string, key: string, fallback: string) => {
+    const value = t(key);
+    return value && value !== key ? value : fallback;
+  },
   useTaskStore: (selector?: (state: typeof storeState) => unknown) => (
     typeof selector === 'function' ? selector(storeState) : storeState
   ),
-}));
+};
+});
 
 vi.mock('@/contexts/language-context', () => ({
   useLanguage: () => ({
@@ -61,6 +85,7 @@ vi.mock('@/contexts/language-context', () => ({
         'common.done': 'Done',
         'common.save': 'Save',
         'common.notice': 'Notice',
+        'quickAdd.saveAndEdit': 'Save & edit',
         'quickAdd.invalidDateCommand': 'Invalid date command',
         'copilot.suggested': 'Suggested',
         'copilot.applyHint': 'Tap to apply',
@@ -100,6 +125,19 @@ vi.mock('@/lib/app-log', () => ({
   logError: vi.fn(),
 }));
 
+vi.mock('@/lib/task-meta-navigation', () => ({
+  openTaskScreen,
+}));
+
+const findTouchableByText = (tree: ReturnType<typeof create>, label: string) => {
+  const button = tree.root.findAll((node) => (
+    node.type === TouchableOpacity
+    && node.findAllByType(Text).some((child) => child.props.children === label)
+  ))[0];
+  if (!button) throw new Error(`TouchableOpacity not found for ${label}`);
+  return button;
+};
+
 describe('CaptureScreen', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -107,6 +145,7 @@ describe('CaptureScreen', () => {
     routerMocks.canGoBack.mockReturnValue(false);
     routeParams.current = { text: encodeURIComponent('Shared text') };
     storeState.addProject.mockResolvedValue(null);
+    storeState.addTask.mockResolvedValue({ success: true, id: 'task-created' });
     storeState.projects = [];
     storeState.areas = [];
   });
@@ -126,6 +165,28 @@ describe('CaptureScreen', () => {
 
     expect(routerMocks.back).not.toHaveBeenCalled();
     expect(routerMocks.replace).toHaveBeenCalledWith('/inbox');
+  });
+
+  it('returns to a requested internal route when cancelling', () => {
+    routeParams.current = {
+      text: encodeURIComponent('Shared text'),
+      returnTo: encodeURIComponent('/projects-screen?projectId=project-1'),
+    };
+
+    let tree!: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<CaptureScreen />);
+    });
+
+    const cancelButton = tree.root.findAllByType(TouchableOpacity)[1];
+
+    act(() => {
+      cancelButton.props.onPress();
+    });
+
+    expect(routerMocks.back).not.toHaveBeenCalled();
+    expect(routerMocks.replace).toHaveBeenCalledWith('/projects-screen?projectId=project-1');
   });
 
   it('goes back when cancelling from a stacked navigation flow', () => {
@@ -173,12 +234,12 @@ describe('CaptureScreen', () => {
       listeners.get('keyboardDidShow')?.();
     });
 
-    const doneButton = tree.root.find(
-      (node) => node.type === TouchableOpacity && node.props.accessibilityLabel === 'Done'
+    const dismissButton = tree.root.find(
+      (node) => node.type === TouchableOpacity && node.props.accessibilityLabel === 'Hide keyboard'
     );
 
     act(() => {
-      doneButton.props.onPress();
+      dismissButton.props.onPress();
     });
 
     expect(dismissSpy).toHaveBeenCalledTimes(1);
@@ -199,7 +260,7 @@ describe('CaptureScreen', () => {
       tree = create(<CaptureScreen />);
     });
 
-    const saveButton = tree.root.findAllByType(TouchableOpacity)[2];
+    const saveButton = findTouchableByText(tree, 'Save');
 
     await act(async () => {
       await saveButton.props.onPress();
@@ -211,6 +272,128 @@ describe('CaptureScreen', () => {
       tags: ['#phone'],
     });
     expect(routerMocks.replace).toHaveBeenCalledWith('/inbox');
+  });
+
+  it('confirms multiline capture before creating one task per line', async () => {
+    routeParams.current = {
+      initialValue: encodeURIComponent('Email Bob\n\nCall Alice /next'),
+    };
+    parseQuickAdd.mockImplementation((value: string) => ({
+      title: value.replace(/\s+\/next$/u, ''),
+      props: value.endsWith('/next') ? { status: 'next' } : {},
+      invalidDateCommands: [],
+    }));
+    const alertSpy = vi.spyOn(Alert, 'alert').mockImplementation(vi.fn());
+
+    let tree!: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<CaptureScreen />);
+    });
+
+    const saveButton = findTouchableByText(tree, 'Save');
+
+    await act(async () => {
+      await saveButton.props.onPress();
+    });
+
+    expect(storeState.addTask).not.toHaveBeenCalled();
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Create 2 tasks?',
+      expect.stringContaining('Email Bob'),
+      expect.any(Array),
+    );
+
+    const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ text?: string; onPress?: () => void | Promise<void> }>;
+    const confirm = buttons.find((button) => button.text === 'Create tasks');
+    if (!confirm?.onPress) throw new Error('Confirm button not found');
+
+    await act(async () => {
+      await confirm.onPress?.();
+    });
+
+    expect(storeState.addTask).not.toHaveBeenCalled();
+    expect(storeState.addTasks).toHaveBeenCalledTimes(1);
+    expect(storeState.addTasks).toHaveBeenCalledWith([
+      { title: 'Email Bob', initialProps: expect.objectContaining({ status: 'inbox' }) },
+      { title: 'Call Alice', initialProps: expect.objectContaining({ status: 'next' }) },
+    ]);
+    expect(routerMocks.replace).toHaveBeenCalledWith('/inbox');
+  });
+
+  it('preserves safe status and project initial props from capture links', async () => {
+    routeParams.current = {
+      initialValue: encodeURIComponent('Project task'),
+      initialProps: encodeURIComponent(JSON.stringify({
+        projectId: 'project-1',
+        status: 'next',
+      })),
+    };
+    storeState.projects = [{
+      id: 'project-1',
+      title: 'Launch',
+      status: 'active',
+    }];
+
+    let tree!: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<CaptureScreen />);
+    });
+
+    const saveButton = findTouchableByText(tree, 'Save');
+
+    await act(async () => {
+      await saveButton.props.onPress();
+    });
+
+    expect(storeState.addTask).toHaveBeenCalledWith('Project task', {
+      status: 'next',
+      projectId: 'project-1',
+    });
+  });
+
+  it('returns to the requested project route after saving a project task', async () => {
+    routeParams.current = {
+      initialValue: encodeURIComponent('Project task'),
+      initialProps: encodeURIComponent(JSON.stringify({
+        projectId: 'project-1',
+        status: 'next',
+      })),
+      returnTo: encodeURIComponent('/projects-screen?projectId=project-1'),
+    };
+    storeState.projects = [{
+      id: 'project-1',
+      title: 'Launch',
+      status: 'active',
+    }];
+
+    let tree!: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<CaptureScreen />);
+    });
+
+    const saveButton = findTouchableByText(tree, 'Save');
+
+    await act(async () => {
+      await saveButton.props.onPress();
+    });
+
+    expect(storeState.addTask).toHaveBeenCalledWith('Project task', {
+      status: 'next',
+      projectId: 'project-1',
+    });
+    expect(routerMocks.replace).toHaveBeenCalledWith('/projects-screen?projectId=project-1');
+    expect(routerMocks.replace).not.toHaveBeenCalledWith('/inbox');
+  });
+
+  it('sanitizes capture return routes to app-internal paths', () => {
+    expect(sanitizeCaptureReturnToParam(encodeURIComponent('/projects-screen?projectId=project-1')))
+      .toBe('/projects-screen?projectId=project-1');
+    expect(sanitizeCaptureReturnToParam(encodeURIComponent('//example.com/path'))).toBeNull();
+    expect(sanitizeCaptureReturnToParam(encodeURIComponent('https://example.com/path'))).toBeNull();
+    expect(sanitizeCaptureReturnToParam('')).toBeNull();
   });
 
   it('ignores unsupported URL-controlled initial props', async () => {
@@ -231,7 +414,7 @@ describe('CaptureScreen', () => {
       tree = create(<CaptureScreen />);
     });
 
-    const saveButton = tree.root.findAllByType(TouchableOpacity)[2];
+    const saveButton = findTouchableByText(tree, 'Save');
 
     await act(async () => {
       await saveButton.props.onPress();
@@ -257,7 +440,7 @@ describe('CaptureScreen', () => {
       tree = create(<CaptureScreen />);
     });
 
-    const saveButton = tree.root.findAllByType(TouchableOpacity)[2];
+    const saveButton = findTouchableByText(tree, 'Save');
 
     await act(async () => {
       await saveButton.props.onPress();
@@ -288,7 +471,7 @@ describe('CaptureScreen', () => {
       tree = create(<CaptureScreen />);
     });
 
-    const saveButton = tree.root.findAllByType(TouchableOpacity)[2];
+    const saveButton = findTouchableByText(tree, 'Save');
 
     await act(async () => {
       await saveButton.props.onPress();
@@ -300,5 +483,40 @@ describe('CaptureScreen', () => {
       projectId: 'project-launch',
       areaId: undefined,
     });
+  });
+
+  it('opens the created task when save and edit is requested', async () => {
+    routeParams.current = {
+      initialValue: encodeURIComponent('Project task'),
+      initialProps: encodeURIComponent(JSON.stringify({
+        projectId: 'project-1',
+        status: 'next',
+      })),
+    };
+    storeState.projects = [{
+      id: 'project-1',
+      title: 'Launch',
+      status: 'active',
+    }];
+    storeState.addTask.mockResolvedValueOnce({ success: true, id: 'task-new' });
+
+    let tree!: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<CaptureScreen />);
+    });
+
+    const saveAndEditButton = findTouchableByText(tree, 'Save & edit');
+
+    await act(async () => {
+      await saveAndEditButton.props.onPress();
+    });
+
+    expect(storeState.addTask).toHaveBeenCalledWith('Project task', {
+      status: 'next',
+      projectId: 'project-1',
+    });
+    expect(openTaskScreen).toHaveBeenCalledWith('task-new', 'project-1', 'task');
+    expect(routerMocks.replace).not.toHaveBeenCalledWith('/inbox');
   });
 });

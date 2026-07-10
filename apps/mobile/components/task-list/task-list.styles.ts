@@ -237,6 +237,23 @@ export const styles = StyleSheet.create({
     paddingVertical: 8,
     fontSize: 14,
   },
+  bulkOrganizePickerRow: {
+    minHeight: 42,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  bulkOrganizePickerValue: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 14,
+    fontWeight: '600',
+  },
   bulkOrganizeValidation: {
     fontSize: 12,
     fontWeight: '600',
@@ -522,6 +539,35 @@ export const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
   },
+  taskFilterMatchModeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+  },
+  taskFilterMatchModeLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  taskFilterMatchModeControl: {
+    minHeight: 36,
+    flexDirection: 'row',
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 2,
+  },
+  taskFilterMatchModeButton: {
+    minWidth: 52,
+    minHeight: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 15,
+    paddingHorizontal: 10,
+  },
+  taskFilterMatchModeButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
   taskFilterChip: {
     borderWidth: 1,
     borderRadius: 999,
@@ -578,11 +624,12 @@ export const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  projectDragGroup: {
-    paddingHorizontal: 12,
+  projectDragSelfScrollList: {
+    flex: 1,
   },
-  projectDragList: {
-    overflow: 'visible',
+  projectDragSelfScrollContent: {
+    paddingHorizontal: 12,
+    paddingBottom: 24,
   },
   projectDragTaskRow: {
     flexDirection: 'row',
@@ -592,9 +639,27 @@ export const styles = StyleSheet.create({
   projectDragTaskRowActive: {
     opacity: 0.92,
   },
-  projectDragTaskContent: {
+  projectReorderTaskCard: {
     flex: 1,
     minWidth: 0,
+    minHeight: 72,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    justifyContent: 'center',
+  },
+  projectReorderTaskTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 19,
+  },
+  projectReorderTaskMeta: {
+    marginTop: 3,
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 15,
   },
   projectDragHandle: {
     width: 44,

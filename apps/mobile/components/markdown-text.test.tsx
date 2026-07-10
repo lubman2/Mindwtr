@@ -1,7 +1,9 @@
 import React from 'react';
 import renderer from 'react-test-renderer';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as Linking from 'expo-linking';
+
+import { openProjectScreen, openTaskScreen } from '@/lib/task-meta-navigation';
 
 import { MarkdownInlineText, MarkdownText } from './markdown-text';
 
@@ -9,14 +11,18 @@ const clipboardMocks = vi.hoisted(() => ({
   setStringAsync: vi.fn(async () => {}),
 }));
 
+const taskStoreMocks = vi.hoisted(() => ({
+  state: {
+    _allTasks: [] as any[],
+    _allProjects: [] as any[],
+    projects: [] as any[],
+  },
+}));
+
 vi.mock('@mindwtr/core', async () => {
   const actual = await vi.importActual<typeof import('@mindwtr/core')>('@mindwtr/core');
-  const mockState = {
-    _allTasks: [],
-    projects: [],
-  };
-  const useTaskStore = ((selector?: (state: typeof mockState) => unknown) => (
-    typeof selector === 'function' ? selector(mockState) : mockState
+  const useTaskStore = ((selector?: (state: typeof taskStoreMocks.state) => unknown) => (
+    typeof selector === 'function' ? selector(taskStoreMocks.state) : taskStoreMocks.state
   )) as typeof actual.useTaskStore;
 
   return {
@@ -61,6 +67,13 @@ const countByTestId = (
   if (Array.isArray(value)) return value.reduce((total, item) => total + countByTestId(item, testID), 0);
   return (value.props?.testID === testID ? 1 : 0) + countByTestId(value.children, testID);
 };
+
+beforeEach(() => {
+  taskStoreMocks.state._allTasks = [];
+  taskStoreMocks.state._allProjects = [];
+  taskStoreMocks.state.projects = [];
+  vi.clearAllMocks();
+});
 
 const flattenStyle = (style: unknown): Record<string, unknown> => {
   if (Array.isArray(style)) {
@@ -209,6 +222,62 @@ describe('MarkdownText', () => {
     expect(rendered).toContain('✓ Draft spec');
     expect(rendered).not.toContain('**');
     expect(rendered).not.toContain('](');
+  });
+
+  it('resolves internal links from indexed store maps without per-link scans', () => {
+    const now = '2026-06-11T00:00:00.000Z';
+    const taskFind = vi.fn(() => {
+      throw new Error('Task links should use the indexed lookup map');
+    });
+    const projectFind = vi.fn(() => {
+      throw new Error('Project links should use the indexed lookup map');
+    });
+    taskStoreMocks.state._allTasks = Object.assign([
+      {
+        id: 'task-1',
+        title: 'Indexed task',
+        status: 'next',
+        tags: [],
+        contexts: [],
+        projectId: 'project-1',
+        createdAt: now,
+        updatedAt: now,
+      },
+    ], { find: taskFind });
+    taskStoreMocks.state._allProjects = Object.assign([
+      {
+        id: 'project-1',
+        title: 'Indexed project',
+        status: 'active',
+        color: '#2563eb',
+        order: 0,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ], { find: projectFind });
+
+    const tree = renderMarkdown('[Task link](mindwtr://task/task-1) [Project link](mindwtr://project/project-1)');
+
+    expect(taskFind).not.toHaveBeenCalled();
+    expect(projectFind).not.toHaveBeenCalled();
+    expect(flattenText(tree.toJSON())).toContain('Task link Project link');
+
+    const taskLink = tree.root.findAll((node) => (
+      typeof node.props.onPress === 'function'
+      && flattenText(node.children as renderer.ReactTestRendererNode[]) === 'Task link'
+    ))[0];
+    const projectLink = tree.root.findAll((node) => (
+      typeof node.props.onPress === 'function'
+      && flattenText(node.children as renderer.ReactTestRendererNode[]) === 'Project link'
+    ))[0];
+
+    renderer.act(() => {
+      taskLink.props.onPress();
+      projectLink.props.onPress();
+    });
+
+    expect(openTaskScreen).toHaveBeenCalledWith('task-1', 'project-1');
+    expect(openProjectScreen).toHaveBeenCalledWith('project-1');
   });
 
   it('opens raw URL links from task descriptions', () => {

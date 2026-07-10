@@ -2,7 +2,9 @@ import React from 'react';
 import { Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 import { styles } from '../inbox-processing-modal.styles';
+import { EmojiLabel } from '../ui/emoji-label';
 import type { ThemeColors } from '@/hooks/use-theme-colors';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
 
 type Area = { id: string; name: string; color?: string };
 type Project = { id: string; title: string; areaId?: string };
@@ -25,6 +27,8 @@ type Props = {
   setProjectTitleDraft: (v: string) => void;
   nextActionDraft: string;
   setNextActionDraft: (v: string) => void;
+  extraActionDrafts: string[];
+  setExtraActionDrafts: (v: string[]) => void;
   filteredProjects: Project[];
   areaById: Map<string, Area>;
   hasExactProjectMatch: boolean;
@@ -53,6 +57,8 @@ export function InboxProjectSection({
   setProjectTitleDraft,
   nextActionDraft,
   setNextActionDraft,
+  extraActionDrafts,
+  setExtraActionDrafts,
   filteredProjects,
   areaById,
   hasExactProjectMatch,
@@ -62,6 +68,7 @@ export function InboxProjectSection({
   handleProjectConversionStart,
   selectProjectEarly,
 }: Props) {
+  const filledButton = useFilledButtonColors();
   if (!show) return null;
 
   const areaOptions = Array.from(areaById.values());
@@ -151,10 +158,10 @@ export function InboxProjectSection({
             />
             {!hasExactProjectMatch && projectSearch.trim() && (
               <TouchableOpacity
-                style={[styles.createProjectButton, { backgroundColor: tc.tint }]}
+                style={[styles.createProjectButton, { backgroundColor: filledButton.backgroundColor }]}
                 onPress={handleCreateProjectEarly}
               >
-                <Text style={styles.createProjectButtonText}>{t('projects.create')}</Text>
+                <Text style={[styles.createProjectButtonText, filledButton.textColor ? { color: filledButton.textColor } : null]}>{t('projects.create')}</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -222,6 +229,10 @@ export function InboxProjectSection({
           <Text style={[styles.projectFieldLabel, { color: tc.secondaryText }]}>
             {t('process.nextAction')}
           </Text>
+          {/* Enter chains into a fresh action row (desktop parity) and keeps
+              the keyboard up — blurring here collapses the Android keyboard
+              inset and makes the sheet visibly jump (#827 rc.3 feedback).
+              The Create project button is the only way to finish the step. */}
           <TextInput
             value={nextActionDraft}
             onChangeText={setNextActionDraft}
@@ -229,15 +240,55 @@ export function InboxProjectSection({
             placeholderTextColor={tc.secondaryText}
             accessibilityLabel={t('process.nextAction')}
             style={[styles.projectSearchInput, { backgroundColor: tc.inputBg, borderColor: tc.border, color: tc.text }]}
-            onSubmitEditing={handleConvertToProject}
-            returnKeyType="done"
+            onSubmitEditing={() => {
+              if (!nextActionDraft.trim()) return;
+              setExtraActionDrafts([...extraActionDrafts, '']);
+            }}
+            blurOnSubmit={false}
+            returnKeyType="next"
           />
+          {extraActionDrafts.map((draft, index) => (
+            <View key={index} style={styles.extraActionRow}>
+              <TextInput
+                autoFocus
+                value={draft}
+                onChangeText={(value) => setExtraActionDrafts(
+                  extraActionDrafts.map((current, i) => (i === index ? value : current)),
+                )}
+                placeholder={t('taskEdit.titleLabel')}
+                placeholderTextColor={tc.secondaryText}
+                accessibilityLabel={t('process.nextAction')}
+                style={[styles.projectSearchInput, styles.extraActionInput, { backgroundColor: tc.inputBg, borderColor: tc.border, color: tc.text }]}
+                onSubmitEditing={() => {
+                  if (index !== extraActionDrafts.length - 1 || !draft.trim()) return;
+                  setExtraActionDrafts([...extraActionDrafts, '']);
+                }}
+                blurOnSubmit={false}
+                returnKeyType="next"
+              />
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel={t('process.removeAction')}
+                onPress={() => setExtraActionDrafts(extraActionDrafts.filter((_, i) => i !== index))}
+                style={styles.extraActionRemove}
+              >
+                <Text style={[styles.extraActionRemoveText, { color: tc.secondaryText }]}>✕</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+          <TouchableOpacity
+            accessibilityRole="button"
+            onPress={() => setExtraActionDrafts([...extraActionDrafts, ''])}
+            style={styles.addActionButton}
+          >
+            <Text style={[styles.addActionText, { color: tc.tint }]}>+ {t('process.addAnotherAction')}</Text>
+          </TouchableOpacity>
         </View>
         <TouchableOpacity
-          style={[styles.createProjectButton, styles.projectConversionSubmit, { backgroundColor: tc.tint }]}
+          style={[styles.createProjectButton, styles.projectConversionSubmit, { backgroundColor: filledButton.backgroundColor }]}
           onPress={handleConvertToProject}
         >
-          <Text style={styles.createProjectButtonText}>{t('process.createProject')}</Text>
+          <Text style={[styles.createProjectButtonText, filledButton.textColor ? { color: filledButton.textColor } : null]}>{t('process.createProject')}</Text>
         </TouchableOpacity>
       </View>
     </>
@@ -245,9 +296,7 @@ export function InboxProjectSection({
 
   return (
     <View style={[styles.singleSection, { borderBottomColor: tc.border }]}>
-      <Text style={[styles.stepQuestion, { color: tc.text }]}>
-        📁 {showProjectField ? t('process.moreThanOneStep') : t('inbox.assignProjectQuestion')}
-      </Text>
+      <EmojiLabel emoji="📁" label={showProjectField ? t('process.moreThanOneStep') : t('inbox.assignProjectQuestion')} textStyle={[styles.stepQuestion, { color: tc.text }]} />
       {showProjectField && (
         <>
           <Text style={[styles.stepHint, { color: tc.secondaryText }]}>

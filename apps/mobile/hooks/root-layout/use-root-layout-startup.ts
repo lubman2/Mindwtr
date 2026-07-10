@@ -39,10 +39,6 @@ const supportsNativeICloudSync = (): boolean =>
 const getStartupLoggingReason = (loggingEnabled: boolean): string =>
     loggingEnabled ? 'user-enabled' : 'startup-force';
 
-const selectVisibleStartupTasks = (tasks: AppData['tasks']): AppData['tasks'] => (
-    tasks.filter((task) => !task.deletedAt && !task.purgedAt && task.status !== 'archived')
-);
-
 const hasRenderableStartupSnapshot = (data: AppData | null): data is AppData => {
     if (!data) return false;
     return data.tasks.length > 0
@@ -60,10 +56,6 @@ const applyStartupSnapshotToStore = (data: AppData): void => {
 
     // Keep lastDataChangeAt untouched so the canonical storage fetch can still apply.
     useTaskStore.setState({
-        tasks: selectVisibleStartupTasks(allTasks),
-        projects: allProjects.filter((project) => !project.deletedAt),
-        sections: allSections.filter((section) => !section.deletedAt),
-        areas: allAreas.filter((area) => !area.deletedAt),
         settings,
         _allTasks: allTasks,
         _allProjects: allProjects,

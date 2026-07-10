@@ -1,4 +1,5 @@
 import {
+  getDueReminderRepeatTimes,
   getNextScheduledAt,
   getSystemDefaultLanguage,
   getTranslations,
@@ -171,6 +172,10 @@ async function clearPomodoroAlarmEntry(): Promise<void> {
 
 function getTaskKey(taskId: string): string {
   return `${LOCAL_TASK_KEY_PREFIX}${taskId}`;
+}
+
+function getTaskRepeatKey(taskId: string, index: number): string {
+  return `${getTaskKey(taskId)}:r${index}`;
 }
 
 function getProjectKey(projectId: string): string {
@@ -751,6 +756,31 @@ async function runRescheduleCycle(api: AlarmNotificationsApi): Promise<void> {
         }
       }
 
+      // Bounded due-time repeat occurrences (after the due moment). Scheduled independently of the
+      // base reminder below: a task whose due time already passed has no future `next`, but its
+      // remaining repeat occurrences must still fire. Past occurrences are reaped via activeKeys.
+      const repeatTimes = getDueReminderRepeatTimes(task, { includeStartTime, includeDueDate, includeReviewAt });
+      for (let repeatIndex = 0; repeatIndex < repeatTimes.length; repeatIndex += 1) {
+        const repeatFireAt = repeatTimes[repeatIndex];
+        const repeatFireAtMs = repeatFireAt.getTime();
+        if (repeatFireAtMs <= nowMs) continue;
+        oneShotReminders.push({
+          key: getTaskRepeatKey(task.id, repeatIndex + 1), // 1-based: repeatTimes[0] = due + N => :r1
+          fireAtMs: repeatFireAtMs,
+          config: {
+            title: task.title,
+            message: task.description || '',
+            fireAt: repeatFireAt,
+            hasSnoozeAction: true,
+            hasCompleteAction: true,
+            data: {
+              kind: 'task-reminder',
+              taskId: task.id,
+            },
+          },
+        });
+      }
+
       const next = getNextScheduledAt(task, now, { includeStartTime, includeDueDate, includeReviewAt });
       const fireAtMs = next?.getTime() ?? NaN;
       if (!next || fireAtMs <= nowMs) continue;
@@ -1036,7 +1066,11 @@ export async function scheduleLocalPomodoroCompletionNotification(
 
 export async function startLocalMobileNotifications(): Promise<void> {
   if (started) {
-    logNotificationInfo('Start skipped; service already running');
+    logNotificationInfo('Start requested while service is already running; rescheduling current reminders');
+    const api = await loadAlarmApi();
+    if (api) {
+      await runRescheduleCycle(api);
+    }
     return;
   }
   started = true;
@@ -1065,7 +1099,16 @@ export async function startLocalMobileNotifications(): Promise<void> {
   logNotificationInfo('Service started');
 
   storeSubscription?.();
-  storeSubscription = useTaskStore.subscribe(() => {
+  storeSubscription = useTaskStore.subscribe((state, prevState) => {
+    // Reschedule cycles only read tasks, projects, and settings; skip store
+    // updates (sync status, loading flags, editor state) that leave them untouched.
+    if (
+      state.tasks === prevState.tasks
+      && state.projects === prevState.projects
+      && state.settings === prevState.settings
+    ) {
+      return;
+    }
     clearRescheduleTimer();
     rescheduleTimer = setTimeout(() => {
       rescheduleTimer = null;

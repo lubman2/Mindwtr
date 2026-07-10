@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { performance } from 'node:perf_hooks';
 import {
     buildTasksByProjectId,
+    getCalendarPlanningCandidates,
     sortTasks,
     sortFocusNextActions,
     sortTasksBySavedPreference,
@@ -12,15 +13,56 @@ import {
     extractWaitingPerson,
     getFocusSequentialFirstTaskIds,
     getSequentialFirstTaskIds,
+    getTaskFocusEligibility,
     getWaitingPerson,
     groupCompletedTasksLast,
     isTaskFutureStart,
     shouldShowTaskForStart,
+    sortDoneTasksForListView,
+    sortTasksByBoardOrder,
     splitCompletedTasks,
 } from './task-utils';
 import { Project, Task } from './types';
 
 describe('task-utils', () => {
+    describe('sortDoneTasksForListView', () => {
+        const createDoneTask = (id: string, title: string, completedAt?: string): Task => ({
+            id,
+            title,
+            status: 'done',
+            tags: [],
+            contexts: [],
+            completedAt,
+            createdAt: '2026-02-01T00:00:00.000Z',
+            updatedAt: completedAt ?? '2026-02-01T00:00:00.000Z',
+        });
+
+        it('sorts done tasks by most recent completion first', () => {
+            const sorted = sortDoneTasksForListView([
+                createDoneTask('old', 'Old', '2026-02-20T10:00:00.000Z'),
+                createDoneTask('newest', 'Newest', '2026-02-22T10:00:00.000Z'),
+                createDoneTask('middle', 'Middle', '2026-02-21T10:00:00.000Z'),
+            ]);
+
+            expect(sorted.map((task) => task.id)).toEqual(['newest', 'middle', 'old']);
+        });
+
+        it('falls back to updatedAt when completedAt is missing', () => {
+            const sorted = sortDoneTasksForListView([
+                {
+                    ...createDoneTask('alpha', 'Alpha'),
+                    updatedAt: '2026-02-20T10:00:00.000Z',
+                },
+                {
+                    ...createDoneTask('beta', 'Beta'),
+                    updatedAt: '2026-02-22T10:00:00.000Z',
+                },
+            ]);
+
+            expect(sorted.map((task) => task.id)).toEqual(['beta', 'alpha']);
+        });
+    });
+
     describe('buildTasksByProjectId', () => {
         it('profiles large project task lookup without repeated full-store scans', () => {
             const projectCount = 250;
@@ -88,6 +130,90 @@ describe('task-utils', () => {
             expect(indexedLookupCount).toBe(tasksPerProject * lookupIterations);
             expect(repeatedScanCount).toBe(tasksPerProject * repeatedScanIterations);
             expect(indexedLookupMs).toBeLessThan(repeatedScanMs);
+        });
+    });
+
+    describe('getCalendarPlanningCandidates', () => {
+        it('returns visible unscheduled next actions without sequentially blocked tasks', () => {
+            const projects = [
+                {
+                    id: 'sequential-project',
+                    title: 'Sequential project',
+                    status: 'active',
+                    isSequential: true,
+                    color: '#123456',
+                    order: 0,
+                    tagIds: [],
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z',
+                },
+            ] as Project[];
+            const tasks = [
+                {
+                    id: 'deadline-only',
+                    title: 'Deadline only',
+                    status: 'next',
+                    dueDate: '2026-01-05T17:00:00.000Z',
+                    tags: [],
+                    contexts: [],
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z',
+                },
+                {
+                    id: 'scheduled',
+                    title: 'Already scheduled',
+                    status: 'next',
+                    startTime: '2026-01-03T09:00:00.000Z',
+                    tags: [],
+                    contexts: [],
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z',
+                },
+                {
+                    id: 'focused',
+                    title: 'Focused today',
+                    status: 'next',
+                    isFocusedToday: true,
+                    tags: [],
+                    contexts: [],
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z',
+                },
+                {
+                    id: 'sequential-first',
+                    title: 'Sequential first',
+                    status: 'next',
+                    projectId: 'sequential-project',
+                    order: 0,
+                    orderNum: 0,
+                    tags: [],
+                    contexts: [],
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z',
+                },
+                {
+                    id: 'sequential-second',
+                    title: 'Sequential second',
+                    status: 'next',
+                    projectId: 'sequential-project',
+                    order: 1,
+                    orderNum: 1,
+                    tags: [],
+                    contexts: [],
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z',
+                },
+            ] as Task[];
+
+            const candidates = getCalendarPlanningCandidates(tasks, {
+                now: new Date('2026-01-01T12:00:00.000Z'),
+                projects,
+            });
+
+            expect(candidates.map((task) => task.id)).toEqual([
+                'deadline-only',
+                'sequential-first',
+            ]);
         });
     });
 
@@ -597,6 +723,107 @@ describe('task-utils', () => {
             expect(shouldShowTaskForStart(task, { now })).toBe(false);
             expect(shouldShowTaskForStart(task, { now, showFutureStarts: true })).toBe(true);
         });
+
+        it('defers a recurring due-only task until its due date arrives', () => {
+            const task = { startTime: undefined, dueDate: '2026-05-09', recurrence: { rule: 'weekly' as const } };
+
+            expect(isTaskFutureStart(task, now)).toBe(true);
+            expect(shouldShowTaskForStart(task, { now })).toBe(false);
+            expect(shouldShowTaskForStart(task, { now, showFutureStarts: true })).toBe(true);
+        });
+
+        it('defers a legacy string-recurrence due-only task until its due date arrives', () => {
+            expect(isTaskFutureStart({ startTime: undefined, dueDate: '2026-05-09', recurrence: 'weekly' }, now)).toBe(true);
+        });
+
+        it('shows a recurring due-only task once its due date is today or past', () => {
+            expect(isTaskFutureStart({ startTime: undefined, dueDate: '2026-05-02', recurrence: { rule: 'weekly' } }, now)).toBe(false);
+            expect(isTaskFutureStart({ startTime: undefined, dueDate: '2026-04-25', recurrence: { rule: 'weekly' } }, now)).toBe(false);
+        });
+
+        it('does not defer non-recurring tasks with a future due date', () => {
+            expect(isTaskFutureStart({ startTime: undefined, dueDate: '2026-05-09' }, now)).toBe(false);
+        });
+
+        it('lets an explicit start date override the due-date deferral for recurring tasks', () => {
+            const task = {
+                startTime: new Date(2026, 4, 1, 9, 0, 0, 0).toISOString(),
+                dueDate: '2026-05-09',
+                recurrence: { rule: 'weekly' as const },
+            };
+
+            expect(isTaskFutureStart(task, now)).toBe(false);
+        });
+    });
+
+    describe('getTaskFocusEligibility', () => {
+        const now = new Date('2026-04-05T12:00:00.000Z');
+        const makeTask = (overrides: Partial<Task>): Task => ({
+            id: overrides.id ?? 'task',
+            title: overrides.title ?? 'Task',
+            status: overrides.status ?? 'next',
+            tags: [],
+            contexts: [],
+            createdAt: '2026-04-01T00:00:00.000Z',
+            updatedAt: '2026-04-01T00:00:00.000Z',
+            ...overrides,
+        });
+
+        it('does not promote an elapsed-start someday task into Focus as next', () => {
+            const task = makeTask({
+                id: 'someday-started',
+                status: 'someday',
+                startTime: '2026-04-04T09:00:00.000Z',
+            });
+
+            expect(getTaskFocusEligibility(task, { tasks: [task], projects: [], now })).toEqual({
+                eligible: false,
+                reason: 'clarify',
+            });
+            expect(task.status).toBe('someday');
+        });
+
+        it('does not make inbox tasks Focus-eligible through review dates', () => {
+            const task = makeTask({
+                id: 'inbox-review',
+                status: 'inbox',
+                reviewAt: '2026-04-04T09:00:00.000Z',
+            });
+
+            expect(getTaskFocusEligibility(task, { tasks: [task], projects: [], now })).toEqual({
+                eligible: false,
+                reason: 'clarify',
+            });
+            expect(task.status).toBe('inbox');
+        });
+
+        it('can surface review-due waiting tasks without changing status', () => {
+            const task = makeTask({
+                id: 'waiting-review',
+                status: 'waiting',
+                reviewAt: '2026-04-04T09:00:00.000Z',
+            });
+
+            expect(getTaskFocusEligibility(task, { tasks: [task], projects: [], now })).toEqual({
+                eligible: true,
+                reason: 'eligible',
+            });
+            expect(task.status).toBe('waiting');
+        });
+
+        it('defers the next instance of a recurring due-only task until its due date', () => {
+            const task = makeTask({
+                id: 'recurring-due-only',
+                status: 'next',
+                dueDate: '2026-04-12',
+                recurrence: { rule: 'weekly' },
+            });
+
+            expect(getTaskFocusEligibility(task, { tasks: [task], projects: [], now })).toEqual({
+                eligible: false,
+                reason: 'deferred',
+            });
+        });
     });
 
     describe('getSequentialFirstTaskIds', () => {
@@ -701,6 +928,30 @@ describe('task-utils', () => {
             ], new Set(['p1']), { now, sectionScopedProjectIds: new Set(['p1']) });
 
             expect([...firstTaskIds]).toEqual(['section-a-first', 'section-b-first']);
+        });
+    });
+
+    describe('sortTasksByBoardOrder', () => {
+        const boardTask = (id: string, boardOrder?: number) => ({ id, boardOrder });
+
+        it('sorts tasks with boardOrder ascending ahead of tasks without one', () => {
+            const sorted = sortTasksByBoardOrder([
+                boardTask('no-order-1'),
+                boardTask('third', 2),
+                boardTask('first', 0),
+                boardTask('no-order-2'),
+                boardTask('second', 1),
+            ]);
+
+            expect(sorted.map((task) => task.id)).toEqual(['first', 'second', 'third', 'no-order-1', 'no-order-2']);
+        });
+
+        it('keeps the incoming order when no task has a boardOrder', () => {
+            const input = [boardTask('a'), boardTask('b'), boardTask('c')];
+
+            const sorted = sortTasksByBoardOrder(input);
+
+            expect(sorted.map((task) => task.id)).toEqual(['a', 'b', 'c']);
         });
     });
 });

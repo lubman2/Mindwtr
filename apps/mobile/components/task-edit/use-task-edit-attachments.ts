@@ -4,8 +4,8 @@ import type { Attachment, Task } from '@mindwtr/core';
 import {
     DEFAULT_PROJECT_COLOR,
     buildTaskUpdatesFromSpeechResult,
+    findSelectableProjectByTitleAndArea,
     generateUUID,
-    isSelectableProjectForTaskAssignment,
     normalizeLinkAttachmentInput,
     translateWithFallback,
     useTaskStore,
@@ -19,7 +19,7 @@ import { Paths } from 'expo-file-system';
 
 import { ensureAttachmentAvailable, persistAttachmentLocally } from '../../lib/attachment-sync';
 import { loadAIKey } from '../../lib/ai-config';
-import { ensureWhisperModelPathForConfig, processAudioCapture } from '../../lib/speech-to-text';
+import { ensureWhisperModelPathForConfigAsync, processAudioCapture, resolveSpeechToTextRuntimeSettings } from '../../lib/speech-to-text';
 import { normalizeAudioUri } from '../../lib/speech-to-text.helpers';
 import {
     isReleasedAudioPlayerError,
@@ -115,6 +115,10 @@ export function useTaskEditAttachments({
             localStatus: 'available',
         };
         const cached = await persistAttachmentLocally(attachment);
+        if (cached.uri === attachment.uri) {
+            Alert.alert(t('attachments.title'), t('attachments.fileNotReadable'));
+            return;
+        }
         setEditedTask((prev) => ({ ...prev, attachments: [...(prev.attachments || []), cached] }));
     }, [resolveValidationMessage, setEditedTask, t]);
 
@@ -174,6 +178,10 @@ export function useTaskEditAttachments({
             localStatus: 'available',
         };
         const cached = await persistAttachmentLocally(attachment);
+        if (cached.uri === attachment.uri) {
+            Alert.alert(t('attachments.title'), t('attachments.fileNotReadable'));
+            return;
+        }
         setEditedTask((prev) => ({ ...prev, attachments: [...(prev.attachments || []), cached] }));
     }, [resolveValidationMessage, setEditedTask, t]);
 
@@ -388,22 +396,21 @@ export function useTaskEditAttachments({
             }
 
             const speech = currentSettings.ai?.speechToText;
-            if (!speech?.enabled) {
+            const speechRuntime = resolveSpeechToTextRuntimeSettings(speech);
+            if (!speechRuntime.enabled) {
                 throw new Error(resolveText('attachments.transcriptionUnavailable', 'Speech-to-text is not ready. Check your AI settings and try again.'));
             }
 
-            const provider = speech.provider ?? 'gemini';
-            const model = speech.model ?? (provider === 'openai' ? 'gpt-4o-transcribe' : provider === 'gemini' ? 'gemini-2.5-flash' : 'whisper-tiny');
+            const { provider, model, modelPath } = speechRuntime;
             const apiKey = provider === 'whisper' ? '' : await loadAIKey(provider).catch(() => '');
-            const modelPath = provider === 'whisper' ? speech.offlineModelPath : undefined;
             const whisperResolved = provider === 'whisper'
-                ? ensureWhisperModelPathForConfig(model, modelPath)
+                ? await ensureWhisperModelPathForConfigAsync(model, modelPath)
                 : null;
             const whisperModelReady = provider === 'whisper' ? Boolean(whisperResolved?.exists) : false;
             const resolvedModelPath = provider === 'whisper'
                 ? (whisperResolved?.exists ? whisperResolved.path : modelPath)
                 : undefined;
-            const speechReady = provider === 'whisper' ? whisperModelReady : Boolean(apiKey);
+            const speechReady = provider === 'whisper' ? whisperModelReady || Boolean(modelPath?.trim()) : Boolean(apiKey);
             if (!speechReady) {
                 throw new Error(resolveText('attachments.transcriptionUnavailable', 'Speech-to-text is not ready. Check your AI settings and try again.'));
             }
@@ -416,9 +423,10 @@ export function useTaskEditAttachments({
                 apiKey,
                 model,
                 modelPath: resolvedModelPath,
-                language: speech.language,
-                mode: speech.mode ?? 'smart_parse',
-                fieldStrategy: speech.fieldStrategy ?? 'smart',
+                isFossBuild: speechRuntime.isFossBuild,
+                language: speechRuntime.language,
+                mode: speechRuntime.mode,
+                fieldStrategy: speechRuntime.fieldStrategy,
                 parseModel: provider === 'openai' && currentSettings.ai?.provider === 'openai' ? currentSettings.ai?.model : undefined,
                 now: new Date(),
                 timeZone,
@@ -426,13 +434,16 @@ export function useTaskEditAttachments({
 
             const { updates, suggestedProjectTitle } = buildTaskUpdatesFromSpeechResult(existing, result, currentSettings);
             if (suggestedProjectTitle && !existing.projectId) {
-                const match = currentProjects.find((project) => project.title.toLowerCase() === suggestedProjectTitle.toLowerCase());
+                const targetAreaId = updates.areaId ?? existing.areaId;
+                const match = findSelectableProjectByTitleAndArea(currentProjects, suggestedProjectTitle, targetAreaId);
                 if (match) {
-                    if (isSelectableProjectForTaskAssignment(match)) {
-                        updates.projectId = match.id;
-                    }
+                    updates.projectId = match.id;
                 } else {
-                    const created = await addProjectNow(suggestedProjectTitle, DEFAULT_PROJECT_COLOR);
+                    const created = await addProjectNow(
+                        suggestedProjectTitle,
+                        DEFAULT_PROJECT_COLOR,
+                        targetAreaId ? { areaId: targetAreaId } : undefined
+                    );
                     if (!created) {
                         throw new Error(resolveText('attachments.transcriptionFailed', 'Transcription failed. Please try again.'));
                     }

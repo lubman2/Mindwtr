@@ -18,6 +18,15 @@ class NotificationOpenIntentsModule : Module() {
       NotificationOpenPayloadStore.consume()
     }
 
+    Function("showPersistentCaptureNotification") { title: String, text: String, channelName: String ->
+      val context = appContext.reactContext ?: return@Function
+      PersistentCaptureNotifier.post(context, title, text, channelName)
+    }
+
+    Function("hidePersistentCaptureNotification") {
+      appContext.reactContext?.let { PersistentCaptureNotifier.cancel(it) }
+    }
+
     Function("ensureReminderChannel") { channelId: String, channelName: String ->
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
         return@Function

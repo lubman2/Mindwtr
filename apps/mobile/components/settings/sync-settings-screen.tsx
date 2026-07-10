@@ -5,12 +5,14 @@ import { Alert, Platform, ScrollView, Text, TouchableOpacity, View } from 'react
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
+    summarizeMergeStats,
     useTaskStore,
 } from '@mindwtr/core';
 
 import { useMobileSyncBadge } from '@/hooks/use-mobile-sync-badge';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { useToast } from '@/contexts/toast-context';
+import { CompactText } from '@/components/compact-text';
 import { isCloudKitAvailable } from '@/lib/cloudkit-sync';
 import {
     listLocalDataSnapshots,
@@ -29,6 +31,7 @@ import {
 import {
     isMobileAnalyticsHeartbeatConfigured,
     resetMobileAnalyticsOptOutMarker,
+    resolveMobileAnalyticsVersion,
     sendMobileAnalyticsOptOut,
 } from '@/lib/analytics-heartbeat';
 
@@ -53,8 +56,8 @@ import { useSyncSettingsTransportActions, type CloudKitAccountStatus } from './u
 import { SettingsGuideLink, SettingsTopBar } from './settings.shell';
 import { styles } from './settings.styles';
 
-const DATA_AND_SYNC_GUIDE_URL = 'https://github.com/dongdongbh/Mindwtr/wiki/Data-and-Sync';
-const IMPORT_GUIDE_URL = `${DATA_AND_SYNC_GUIDE_URL}#imports-and-migrations`;
+const DATA_AND_SYNC_GUIDE_URL = 'https://docs.mindwtr.app/data-sync/';
+const IMPORT_GUIDE_URL = 'https://docs.mindwtr.app/import/';
 
 type SettingsScreenMode = 'sync' | 'data';
 type VisibleSyncBackendOption = 'off' | 'file' | 'dropbox' | 'webdav' | 'selfhosted' | 'cloudkit';
@@ -94,7 +97,11 @@ function SyncSettingsView({
     const analyticsHeartbeatChannel = typeof extraConfig?.analyticsHeartbeatChannel === 'string'
         ? extraConfig.analyticsHeartbeatChannel.trim()
         : '';
+    const analyticsReleaseVersion = typeof extraConfig?.analyticsReleaseVersion === 'string'
+        ? extraConfig.analyticsReleaseVersion.trim()
+        : '';
     const appVersion = Constants.expoConfig?.version ?? '0.0.0';
+    const analyticsAppVersion = resolveMobileAnalyticsVersion(appVersion, analyticsReleaseVersion);
     const dropboxAppKey = typeof extraConfig?.dropboxAppKey === 'string' ? extraConfig.dropboxAppKey.trim() : '';
     const dropboxConfigured = !isFossBuild && isDropboxClientConfigured(dropboxAppKey);
     const isExpoGo = Constants.appOwnership === 'expo';
@@ -119,13 +126,11 @@ function SyncSettingsView({
     const syncHistoryEntries = syncHistory.slice(0, 5);
     const lastSyncStats = settings.lastSyncStats ?? null;
     const showLastSyncStats = Boolean(lastSyncStats) && (settings.lastSyncStatus === 'success' || settings.lastSyncStatus === 'conflict');
-    const syncConflictCount = (lastSyncStats?.tasks.conflicts || 0) + (lastSyncStats?.projects.conflicts || 0);
-    const maxClockSkewMs = Math.max(lastSyncStats?.tasks.maxClockSkewMs || 0, lastSyncStats?.projects.maxClockSkewMs || 0);
-    const timestampAdjustments = (lastSyncStats?.tasks.timestampAdjustments || 0) + (lastSyncStats?.projects.timestampAdjustments || 0);
-    const conflictIds = [
-        ...(lastSyncStats?.tasks.conflictIds ?? []),
-        ...(lastSyncStats?.projects.conflictIds ?? []),
-    ].slice(0, 6);
+    const lastSyncSummary = summarizeMergeStats(lastSyncStats);
+    const syncConflictCount = lastSyncSummary.conflicts;
+    const maxClockSkewMs = lastSyncSummary.maxClockSkewMs;
+    const timestampAdjustments = lastSyncSummary.timestampAdjustments;
+    const conflictIds = lastSyncSummary.conflictIds.slice(0, 6);
     const loggingEnabled = settings.diagnostics?.loggingEnabled === true;
     const analyticsHeartbeatAvailable = isMobileAnalyticsHeartbeatConfigured({
         analyticsHeartbeatUrl,
@@ -247,7 +252,7 @@ function SyncSettingsView({
                     await sendMobileAnalyticsOptOut({
                         analyticsHeartbeatUrl,
                         analyticsHeartbeatChannel,
-                        appVersion,
+                        appVersion: analyticsAppVersion,
                         isExpoGo,
                         isFossBuild,
                     });
@@ -275,7 +280,7 @@ function SyncSettingsView({
         analyticsHeartbeatAvailable,
         analyticsHeartbeatChannel,
         analyticsHeartbeatUrl,
-        appVersion,
+        analyticsAppVersion,
         isExpoGo,
         isFossBuild,
         settings.analytics,
@@ -375,6 +380,7 @@ function SyncSettingsView({
         handleClearLog,
         handleImportDgt,
         handleImportOmniFocus,
+        handleImportTickTick,
         handleImportTodoist,
         handleRestoreBackup,
         handleRestoreRecoverySnapshot,
@@ -645,14 +651,15 @@ function SyncSettingsView({
                                                     handleSelectVisibleBackend(backend);
                                                 }}
                                             >
-                                                <Text
+                                                <CompactText
                                                     style={[
                                                         styles.backendOptionText,
                                                         { color: selected ? tc.tint : tc.secondaryText },
                                                     ]}
+                                                    numberOfLines={2}
                                                 >
                                                     {getBackendOptionLabel(backend)}
-                                                </Text>
+                                                </CompactText>
                                             </TouchableOpacity>
                                         );
                                     })}
@@ -802,7 +809,7 @@ function SyncSettingsView({
                     <>
                         <SettingsGuideLink
                             title="Import setup guide"
-                            description="Supported Todoist, DGT GTD, OmniFocus, Apple Reminders, and backup import paths."
+                            description="Supported Todoist, TickTick, DGT GTD, OmniFocus, Apple Reminders, and backup import paths."
                             url={IMPORT_GUIDE_URL}
                             testID="import-guide-link"
                         />
@@ -812,6 +819,7 @@ function SyncSettingsView({
                             handleBackup={() => void handleBackup()}
                             handleImportDgt={() => void handleImportDgt()}
                             handleImportOmniFocus={() => void handleImportOmniFocus()}
+                            handleImportTickTick={() => void handleImportTickTick()}
                             handleImportTodoist={() => void handleImportTodoist()}
                             handleRestoreBackup={() => void handleRestoreBackup()}
                             isBackupBusy={isBackupBusy}
@@ -844,9 +852,12 @@ function SyncSettingsView({
                                     onPress={handleClearPendingRemoteDeletes}
                                     style={{ opacity: pendingRemoteDeleteCount === 0 ? 0.45 : 1 }}
                                 >
-                                    <Text style={[styles.linkText, { color: pendingRemoteDeleteCount === 0 ? tc.secondaryText : tc.tint }]}>
+                                    <CompactText
+                                        style={[styles.linkText, { color: pendingRemoteDeleteCount === 0 ? tc.secondaryText : tc.tint }]}
+                                        numberOfLines={2}
+                                    >
                                         {tr('filters.clear')}
-                                    </Text>
+                                    </CompactText>
                                 </TouchableOpacity>
                             </View>
                         </View>

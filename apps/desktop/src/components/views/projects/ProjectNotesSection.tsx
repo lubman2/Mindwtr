@@ -3,7 +3,9 @@ import { Link2, Maximize2, Paperclip } from 'lucide-react';
 import {
     applyMarkdownToolbarAction,
     continueMarkdownOnEnter,
+    isMarkdownEditorAssistEnabled,
     resolveAutoTextDirection,
+    useTaskStore,
     type Attachment,
     type MarkdownSelection,
     type MarkdownToolbarActionId,
@@ -16,6 +18,7 @@ import { MarkdownFormatToolbar } from '../../MarkdownFormatToolbar';
 import { Markdown } from '../../Markdown';
 import { MarkdownReferenceAutocompleteMenu, useMarkdownReferenceAutocomplete } from '../../MarkdownReferenceAutocomplete';
 import { AttachmentProgressIndicator } from '../../AttachmentProgressIndicator';
+import { useBareFileReferenceCheck } from '../../../lib/attachment-reference';
 import { getAttachmentDisplayTitle } from '../../../lib/attachment-utils';
 
 type ProjectNotesSectionProps = {
@@ -49,6 +52,8 @@ export function ProjectNotesSection({
     t,
     language,
 }: ProjectNotesSectionProps) {
+    const markdownEditorAssist = useTaskStore((state) => isMarkdownEditorAssistEnabled(state.settings));
+    const isBareFileReference = useBareFileReferenceCheck();
     const [draftNotes, setDraftNotes] = useState(project.supportNotes || '');
     const [notesExpanded, setNotesExpanded] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -167,7 +172,7 @@ export function ProjectNotesSection({
             start: event.currentTarget.selectionStart ?? currentValue.length,
             end: event.currentTarget.selectionEnd ?? currentValue.length,
         };
-        const next = continueMarkdownOnEnter(currentValue, selection);
+        const next = continueMarkdownOnEnter(currentValue, selection, { assist: markdownEditorAssist });
         if (!next) return;
 
         event.preventDefault();
@@ -292,18 +297,24 @@ export function ProjectNotesSection({
                         <div className="space-y-1.5">
                             {visibleAttachments.map((attachment) => {
                                 const displayTitle = getAttachmentDisplayTitle(attachment);
-                                const fullTitle = attachment.kind === 'link' ? attachment.uri : attachment.title;
+                                const isPointer = attachment.kind === 'link' || isBareFileReference(attachment);
+                                const fullTitle = isPointer ? attachment.uri : attachment.title;
                                 return (
                                     <div key={attachment.id} className="flex items-center justify-between gap-2 text-xs rounded-md border border-border/60 px-2 py-1.5">
                                         <div className="min-w-0 flex-1">
-                                            <button
-                                                type="button"
-                                                onClick={() => onOpenAttachment(attachment)}
-                                                className="truncate text-primary hover:underline"
-                                                title={fullTitle || displayTitle}
-                                            >
-                                                {displayTitle}
-                                            </button>
+                                            <div className="flex min-w-0 items-center gap-1.5">
+                                                {isPointer
+                                                    ? <Link2 className="w-3 h-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+                                                    : <Paperclip className="w-3 h-3 shrink-0 text-muted-foreground" aria-hidden="true" />}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onOpenAttachment(attachment)}
+                                                    className="truncate text-primary hover:underline"
+                                                    title={fullTitle || displayTitle}
+                                                >
+                                                    {displayTitle}
+                                                </button>
+                                            </div>
                                             <AttachmentProgressIndicator attachmentId={attachment.id} className="mt-1" />
                                         </div>
                                         <button

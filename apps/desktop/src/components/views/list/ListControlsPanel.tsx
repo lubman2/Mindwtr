@@ -15,12 +15,12 @@ import { BulkSelectionToolbar } from './BulkSelectionToolbar';
 import { ListFiltersPanel } from './ListFiltersPanel';
 import { ListHeader } from './ListHeader';
 import { ListQuickAdd } from './ListQuickAdd';
-import type { NextGroupBy } from './next-grouping';
+import type { TaskListGroupBy } from './next-grouping';
 
 const NEXT_WARNING_THRESHOLD = 15;
 
 type ListControlsPanelProps = {
-    activeNextGroupBy: NextGroupBy;
+    activeGroupBy: TaskListGroupBy;
     addInputRef: RefObject<HTMLInputElement | null>;
     allTokens: string[];
     areaById: Map<string, Area>;
@@ -33,6 +33,7 @@ type ListControlsPanelProps = {
     hasFilters: boolean;
     inboxProcessor: ReactNode;
     isBatchDeleting: boolean;
+    showGroupBy: boolean;
     isNextView: boolean;
     isProcessing: boolean;
     isWaitingView: boolean;
@@ -40,7 +41,8 @@ type ListControlsPanelProps = {
     onAddTag: () => void;
     onAssignArea: (areaId: string | null) => Promise<void>;
     onBulkOrganize?: () => void;
-    onChangeGroupBy: (value: NextGroupBy) => void;
+    groupByOptions: TaskListGroupBy[];
+    onChangeGroupBy: (value: TaskListGroupBy) => void;
     onChangeQuickAdd: (value: string) => void;
     onChangeSearch: (value: string) => void;
     onChangeSelectedWaitingPerson: (value: string) => void;
@@ -65,7 +67,7 @@ type ListControlsPanelProps = {
     onToggleSelection: () => void;
     onToggleToken: (token: string) => void;
     onToggleDensity: () => void;
-    prioritiesEnabled: boolean;
+    showPriorityFilters: boolean;
     priorityOptions: TaskPriority[];
     projects: Project[];
     quickAddFooter?: ReactNode;
@@ -88,7 +90,7 @@ type ListControlsPanelProps = {
     t: (key: string) => string;
     taskCount: number;
     timeEstimateOptions: TimeEstimate[];
-    timeEstimatesEnabled: boolean;
+    showTimeEstimateFilters: boolean;
     title: string;
     tokenCounts: Record<string, number>;
     waitingPeople: string[];
@@ -97,7 +99,7 @@ type ListControlsPanelProps = {
 };
 
 export function ListControlsPanel({
-    activeNextGroupBy,
+    activeGroupBy,
     addInputRef,
     allTokens,
     areaById,
@@ -110,6 +112,7 @@ export function ListControlsPanel({
     hasFilters,
     inboxProcessor,
     isBatchDeleting,
+    showGroupBy,
     isNextView,
     isProcessing,
     isWaitingView,
@@ -117,6 +120,7 @@ export function ListControlsPanel({
     onAddTag,
     onAssignArea,
     onBulkOrganize,
+    groupByOptions,
     onChangeGroupBy,
     onChangeQuickAdd,
     onChangeSearch,
@@ -142,7 +146,7 @@ export function ListControlsPanel({
     onToggleSelection,
     onToggleToken,
     onToggleDensity,
-    prioritiesEnabled,
+    showPriorityFilters,
     priorityOptions,
     projects,
     quickAddFooter,
@@ -165,7 +169,7 @@ export function ListControlsPanel({
     t,
     taskCount,
     timeEstimateOptions,
-    timeEstimatesEnabled,
+    showTimeEstimateFilters,
     title,
     tokenCounts,
     waitingPeople,
@@ -184,8 +188,9 @@ export function ListControlsPanel({
                 filterSummarySuffix={filterSummarySuffix}
                 sortBy={sortBy}
                 onChangeSortBy={onChangeSortBy}
-                showGroupBy={isNextView}
-                groupBy={activeNextGroupBy}
+                showGroupBy={showGroupBy}
+                groupBy={activeGroupBy}
+                groupByOptions={groupByOptions}
                 onChangeGroupBy={onChangeGroupBy}
                 selectionMode={selectionMode}
                 onToggleSelection={onToggleSelection}
@@ -342,11 +347,11 @@ export function ListControlsPanel({
                     selectedTokens={selectedTokens}
                     tokenCounts={tokenCounts}
                     onToggleToken={onToggleToken}
-                    prioritiesEnabled={prioritiesEnabled}
+                    showPriorityFilters={showPriorityFilters}
                     priorityOptions={priorityOptions}
                     selectedPriorities={selectedPriorities}
                     onTogglePriority={onTogglePriority}
-                    timeEstimatesEnabled={timeEstimatesEnabled}
+                    showTimeEstimateFilters={showTimeEstimateFilters}
                     timeEstimateOptions={timeEstimateOptions}
                     selectedTimeEstimates={selectedTimeEstimates}
                     onToggleEstimate={onToggleEstimate}

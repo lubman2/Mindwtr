@@ -21,6 +21,7 @@ import {
     SearchProjectResult,
     SearchResults,
     SearchTaskResult,
+    Task,
     getStorageAdapter,
     TaskStatus,
     PRESET_CONTEXTS,
@@ -37,6 +38,8 @@ import { useLanguage } from '../contexts/language-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Search, X, Folder, CheckCircle, ChevronRight, SlidersHorizontal } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { TaskEditModal } from '@/components/task-edit-modal';
+import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigation';
 
 const firstSearchParam = (value: string | string[] | undefined): string => {
     if (Array.isArray(value)) return value[0] ?? '';
@@ -54,12 +57,13 @@ const decodeSearchParam = (value: string | string[] | undefined): string => {
 };
 
 export default function SearchScreen() {
-    const { _allTasks, projects, areas, settings, updateSettings, setHighlightTask } = useTaskStore((state) => ({
+    const { _allTasks, projects, areas, settings, updateSettings, updateTask, setHighlightTask } = useTaskStore((state) => ({
         _allTasks: state._allTasks,
         projects: state.projects,
         areas: state.areas,
         settings: state.settings,
         updateSettings: state.updateSettings,
+        updateTask: state.updateTask,
         setHighlightTask: state.setHighlightTask,
     }), shallow);
     const tc = useThemeColors();
@@ -83,6 +87,7 @@ export default function SearchScreen() {
     const [locationQuery, setLocationQuery] = useState('');
     const [duePreset, setDuePreset] = useState<'any' | 'overdue' | 'today' | 'tomorrow' | 'this_week' | 'next_week' | 'none'>('any');
     const [scope, setScope] = useState<'all' | 'projects' | 'tasks' | 'project_tasks'>('all');
+    const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
     const inputRef = useRef<TextInput>(null);
 
     useEffect(() => {
@@ -98,6 +103,22 @@ export default function SearchScreen() {
 
   const trimmedQuery = query.trim();
   const shouldUseFts = debouncedQuery.length > 0 && !/\b\w+:/i.test(debouncedQuery);
+
+  const hasTaskOnlyFilters = (
+    selectedStatuses.length > 0
+    || selectedTokens.length > 0
+    || locationQuery.trim().length > 0
+    || duePreset !== 'any'
+    || !includeReference
+    || hideFutureTasks
+  );
+  const hasActiveFilters = (
+    hasTaskOnlyFilters
+    || selectedArea !== 'all'
+    || scope !== 'all'
+    || includeCompleted
+  );
+  const hasActiveSearch = trimmedQuery !== '' || hasActiveFilters;
 
   useEffect(() => {
     const handle = setTimeout(() => setDebouncedQuery(trimmedQuery), 200);
@@ -133,12 +154,33 @@ export default function SearchScreen() {
     };
   }, [debouncedQuery, shouldUseFts]);
 
+  const filterOnlyResults = useMemo<SearchResults>(() => {
+    if (!hasActiveFilters) return { tasks: [], projects: [] };
+    return {
+      tasks: _allTasks.filter((task) => !task.deletedAt),
+      projects: hasTaskOnlyFilters ? [] : projects,
+    };
+  }, [_allTasks, hasActiveFilters, hasTaskOnlyFilters, projects]);
   const fallbackResults = trimmedQuery === ''
-    ? { tasks: [] as SearchTaskResult[], projects: [] as SearchProjectResult[] }
+    ? filterOnlyResults
     : searchAll(_allTasks, projects, trimmedQuery);
-  const effectiveResults = ftsResults && (ftsResults.tasks.length + ftsResults.projects.length) > 0
-    ? ftsResults
-    : fallbackResults;
+  const effectiveResults = useMemo(() => {
+    if (!ftsResults || (ftsResults.tasks.length + ftsResults.projects.length) === 0) {
+      return fallbackResults;
+    }
+    const seenTaskIds = new Set(ftsResults.tasks.map((task) => task.id));
+    const seenProjectIds = new Set(ftsResults.projects.map((project) => project.id));
+    const fallbackOnlyTasks = fallbackResults.tasks.filter((task) => !seenTaskIds.has(task.id));
+    const fallbackOnlyProjects = fallbackResults.projects.filter((project) => !seenProjectIds.has(project.id));
+    const limited = ftsResults.limited === true || fallbackResults.limited === true;
+    const limit = ftsResults.limit ?? fallbackResults.limit;
+    return {
+      tasks: [...ftsResults.tasks, ...fallbackOnlyTasks],
+      projects: [...ftsResults.projects, ...fallbackOnlyProjects],
+      limited: limited || undefined,
+      limit: limited ? limit : undefined,
+    };
+  }, [fallbackResults, ftsResults]);
   const { tasks: taskResults, projects: projectResults } = effectiveResults;
     const sourceLimited = effectiveResults.limited === true;
     const sourceLimit = effectiveResults.limit ?? 200;
@@ -198,13 +240,7 @@ export default function SearchScreen() {
         if (duePreset === 'next_week') return due >= nextWeekStart && due < nextWeekEnd;
         return true;
     };
-    const filteredTasks = taskResults.filter((task) => {
-        if (hasStatusFilter) {
-            if (!selectedStatuses.includes(task.status)) return false;
-        } else {
-            if (!includeCompleted && (task.status === 'done' || task.status === 'archived')) return false;
-            if (!includeReference && task.status === 'reference') return false;
-        }
+    const passesNonStatusTaskFilters = (task: SearchTaskResult) => {
         if (!shouldShowTaskForStart(task, { showFutureStarts: !hideFutureTasks })) return false;
         if (scope === 'project_tasks' && !task.projectId) return false;
         if (!matchesTaskArea(task)) return false;
@@ -212,6 +248,15 @@ export default function SearchScreen() {
         if (!matchesLocation(task)) return false;
         if (!matchesDue(task)) return false;
         return true;
+    };
+    const filteredTasks = taskResults.filter((task) => {
+        if (hasStatusFilter) {
+            if (!selectedStatuses.includes(task.status)) return false;
+        } else {
+            if (!includeCompleted && (task.status === 'done' || task.status === 'archived')) return false;
+            if (!includeReference && task.status === 'reference') return false;
+        }
+        return passesNonStatusTaskFilters(task);
     });
     const filteredProjects = projectResults.filter((project) => {
         if (normalizedLocationQuery) return false;
@@ -219,15 +264,33 @@ export default function SearchScreen() {
         if (!matchesArea(project.areaId ?? null)) return false;
         return true;
     });
+    // Matches that only the default done/archived exclusion is hiding. Surfacing
+    // them keeps the search honest: a completed task must stay findable (#806).
+    const hiddenCompletedTaskCount = !hasStatusFilter && !includeCompleted && scope !== 'projects'
+        ? taskResults.filter((task) =>
+            (task.status === 'done' || task.status === 'archived') && passesNonStatusTaskFilters(task)
+        ).length
+        : 0;
+    const hiddenArchivedProjectCount = !includeCompleted && scope !== 'tasks' && scope !== 'project_tasks' && !normalizedLocationQuery
+        ? projectResults.filter((project) => project.status === 'archived' && matchesArea(project.areaId ?? null)).length
+        : 0;
+    const hiddenCompletedCount = hiddenCompletedTaskCount + hiddenArchivedProjectCount;
+    const editingTask = useMemo<Task | null>(
+        () => editingTaskId
+            ? _allTasks.find((task) => task.id === editingTaskId && !task.deletedAt) ?? null
+            : null,
+        [_allTasks, editingTaskId]
+    );
     const scopedProjects = scope === 'tasks' || scope === 'project_tasks' ? [] : filteredProjects;
     const scopedTasks = scope === 'projects' ? [] : filteredTasks;
     const totalResults = scopedProjects.length + scopedTasks.length;
     const totalResultsLabel = sourceLimited ? `${sourceLimit}+` : String(totalResults);
-    const results = trimmedQuery === '' ? [] : [
+    const results = !hasActiveSearch ? [] : [
         ...scopedProjects.map(p => ({ type: 'project' as const, item: p })),
         ...scopedTasks.map(t => ({ type: 'task' as const, item: t })),
     ].slice(0, 50);
     const isTruncated = totalResults > results.length || sourceLimited;
+    const noResultsLabel = trimmedQuery ? t('search.noResults') + ' "' + trimmedQuery + '"' : t('search.noResults');
 
     const savedSearches = settings?.savedSearches || [];
     const canSave = trimmedQuery.length > 0;
@@ -263,13 +326,7 @@ export default function SearchScreen() {
         router.push(`/saved-search/${newSearch.id}`);
     };
 
-    const handleSelect = (result: { type: 'project'; item: SearchProjectResult } | { type: 'task'; item: SearchTaskResult }) => {
-        if (result.type === 'project') {
-            router.push({ pathname: '/projects-screen', params: { projectId: result.item.id } });
-            return;
-        }
-
-        const task = result.item;
+    const navigateToTaskList = (task: SearchTaskResult) => {
         const status = task.status;
         setHighlightTask(task.id);
         if (status === 'done') {
@@ -294,7 +351,23 @@ export default function SearchScreen() {
         else router.push('/focus');
     };
 
-    const statusOptions: TaskStatus[] = ['inbox', 'next', 'waiting', 'someday', 'reference', 'done', 'archived'];
+    const handleSelect = (result: { type: 'project'; item: SearchProjectResult } | { type: 'task'; item: SearchTaskResult }) => {
+        if (result.type === 'project') {
+            router.push({ pathname: '/projects-screen', params: { projectId: result.item.id } });
+            return;
+        }
+
+        const task = _allTasks.find((item) => item.id === result.item.id && !item.deletedAt);
+        if (!task) {
+            navigateToTaskList(result.item);
+            return;
+        }
+
+        setHighlightTask(task.id);
+        setEditingTaskId(task.id);
+    };
+
+    const statusOptions: TaskStatus[] = ['inbox', 'next', 'waiting', 'someday', 'done', 'reference', 'archived'];
     const allTokens = useMemo(() => {
         const tokens = new Set<string>([...PRESET_CONTEXTS, ...PRESET_TAGS]);
         _allTasks.forEach((task) => {
@@ -339,17 +412,6 @@ export default function SearchScreen() {
         setIncludeReference(true);
         setHideFutureTasks(false);
     };
-    const hasActiveFilters = (
-        selectedStatuses.length > 0
-        || selectedArea !== 'all'
-        || selectedTokens.length > 0
-        || locationQuery.trim().length > 0
-        || duePreset !== 'any'
-        || scope !== 'all'
-        || includeCompleted
-        || !includeReference
-        || hideFutureTasks
-    );
     const activeChips: { key: string; label: string; onPress: () => void }[] = [];
     selectedStatuses.forEach((status) => {
         activeChips.push({
@@ -643,7 +705,7 @@ export default function SearchScreen() {
                     </View>
                 </KeyboardAvoidingView>
             </Modal>
-            {trimmedQuery !== '' && isTruncated && (
+            {hasActiveSearch && isTruncated && (
                 <Text style={[styles.helpText, { color: tc.secondaryText }]}>
                     {t('search.showingFirst')
                         .replace('{shown}', String(results.length))
@@ -658,6 +720,17 @@ export default function SearchScreen() {
                     </Text>
                 </View>
             )}
+            {hasActiveSearch && hiddenCompletedCount > 0 && (
+                <TouchableOpacity
+                    onPress={() => setIncludeCompleted(true)}
+                    accessibilityRole="button"
+                    style={[styles.hiddenMatchesHint, { backgroundColor: tc.cardBg, borderColor: tc.border }]}
+                >
+                    <Text style={[styles.hiddenMatchesHintText, { color: tc.tint }]}>
+                        {t('search.hiddenCompletedMatches').replace('{{count}}', String(hiddenCompletedCount))}
+                    </Text>
+                </TouchableOpacity>
+            )}
 
             <FlatList
                 data={results}
@@ -665,10 +738,10 @@ export default function SearchScreen() {
                 contentContainerStyle={styles.listContent}
                 keyboardShouldPersistTaps="handled"
                 ListEmptyComponent={
-                    trimmedQuery !== '' && !ftsLoading ? (
+                    hasActiveSearch && !ftsLoading ? (
                         <View style={styles.emptyContainer}>
                             <Text style={[styles.emptyText, { color: tc.secondaryText }]}>
-                                {t('search.noResults')} {'"'}{trimmedQuery}{'"'}
+                                {noResultsLabel}
                             </Text>
                         </View>
                     ) : null
@@ -696,6 +769,7 @@ export default function SearchScreen() {
                         <ChevronRight size={20} color={tc.secondaryText} />
                     </TouchableOpacity>
                 )}
+              removeClippedSubviews={false}
             />
 
             <Modal
@@ -726,6 +800,23 @@ export default function SearchScreen() {
                     </View>
                 </View>
             </Modal>
+            <TaskEditModal
+                visible={Boolean(editingTask)}
+                task={editingTask}
+                onClose={() => setEditingTaskId(null)}
+                onSave={(taskId, updates) => {
+                    updateTask(taskId, updates);
+                    setEditingTaskId(null);
+                }}
+                defaultTab="view"
+                onProjectNavigate={openProjectScreen}
+                onContextNavigate={openContextsScreen}
+                onTagNavigate={openContextsScreen}
+                onFocusMode={(taskId) => {
+                    setEditingTaskId(null);
+                    router.push(`/check-focus?id=${taskId}`);
+                }}
+            />
         </SafeAreaView>
     );
 }
@@ -765,6 +856,19 @@ const styles = StyleSheet.create({
         gap: 8,
         paddingHorizontal: 16,
         paddingTop: 8,
+    },
+    hiddenMatchesHint: {
+        marginHorizontal: 16,
+        marginTop: 8,
+        paddingVertical: 8,
+        paddingHorizontal: 12,
+        borderRadius: 8,
+        borderWidth: 1,
+    },
+    hiddenMatchesHintText: {
+        fontSize: 13,
+        fontWeight: '600',
+        textAlign: 'center',
     },
     loadingText: {
         fontSize: 12,

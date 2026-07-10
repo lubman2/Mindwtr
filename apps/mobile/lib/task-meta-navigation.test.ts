@@ -51,6 +51,17 @@ describe('task-meta-navigation', () => {
         });
     });
 
+    it('can open a task directly on the task edit tab', () => {
+        vi.spyOn(Date, 'now').mockReturnValueOnce(67890);
+
+        openTaskScreen('task-2', 'project-2', 'task');
+
+        expect(routerMocks.push).toHaveBeenCalledWith({
+            pathname: '/projects-screen',
+            params: { projectId: 'project-2', taskId: 'task-2', openToken: '67890', taskTab: 'task' },
+        });
+    });
+
     it('opens an unprojected task on the focus screen', () => {
         vi.spyOn(Date, 'now').mockReturnValueOnce(98765);
 

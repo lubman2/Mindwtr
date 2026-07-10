@@ -32,17 +32,19 @@ const reportedZhHantLabels = {
     restoreBackupDesc: '從 Mindwtr 備份 JSON 文件替換本地數據。',
     importTodoist: '從 Todoist 導入',
     importTodoistDesc: '將 Todoist 的 CSV 或 ZIP 導出導入為 Mindwtr 項目。',
+    importTickTick: '從 TickTick 導入',
+    importTickTickDesc: '將 TickTick 的 CSV 或 ZIP 備份導入為 Mindwtr 的領域、項目和任務。',
     importDgt: '從 DGT GTD 導入',
     importDgtDesc: '將 DGT GTD 的 JSON 或 ZIP 導出導入為 Mindwtr 的領域、項目和任務。',
     importOmniFocus: '從 OmniFocus 導入',
     importOmniFocusDesc: '將 OmniFocus 的 CSV、JSON 或 ZIP 導出導入為 Mindwtr 項目和收集箱任務。',
     backgroundSync: '後台同步',
-    backgroundSyncDesc: '桌面端會在 Mindwtr 運行時每 15 分鐘同步一次。關閉到托盤可保持運行；開機自動啟動可在登錄後啟動。退出應用會停止桌面後台同步。',
+    backgroundSyncDesc: '桌面端會在啟動時、應用重新獲得焦點時、Mindwtr 運行時每 15 分鐘一次，以及任務/項目變更後短暫延遲同步。關閉到托盤可保持運行；開機自動啟動可在登錄後啟動。退出應用會停止桌面後台同步。',
     attachmentsCleanupPendingDeletes: '待處理遠程刪除',
     attachmentsCleanupPendingDeletesClear: '清除待處理刪除',
     calendarChooseLocalFile: '選擇本地 .ics 文件',
-    obsidianVault: 'Obsidian 資料庫',
-    obsidianVaultDesc: '連接本地 Obsidian 資料庫，並將 Markdown 複選框任務作為只讀外部任務導入。',
+    obsidianVault: 'Obsidian 資料庫導入',
+    obsidianVaultDesc: '從本地 Obsidian 資料庫導入任務。Obsidian 保留筆記與捕獲來源，Mindwtr 管理原生承諾事項。',
 } as const;
 
 describe('settings label fallbacks', () => {

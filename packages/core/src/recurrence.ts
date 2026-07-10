@@ -1,10 +1,12 @@
 import { addDays, addMonths, addWeeks, format } from 'date-fns';
 
-import { safeParseDate } from './date';
+import { safeFormatDate, safeParseDate } from './date';
 import { generateUUID as uuidv4 } from './uuid';
+import { computeRelativeStartTime } from './task-relative-start';
 import type { Recurrence, RecurrenceByDay, RecurrenceRule, RecurrenceStrategy, RecurrenceWeekday, Task, TaskStatus, ChecklistItem, Attachment } from './types';
 
 export const RECURRENCE_RULES: RecurrenceRule[] = ['daily', 'weekly', 'monthly', 'yearly'];
+export const RECURRENCE_INTERVAL_MAX = 999;
 
 const WEEKDAY_ORDER: RecurrenceWeekday[] = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
 
@@ -36,6 +38,12 @@ type BuildRRuleOptions = {
     until?: string;
 };
 
+type FormatRecurrenceLabelOptions = {
+    recurrence: Task['recurrence'];
+    t: (key: string) => string;
+    formatDate?: (value: string) => string;
+};
+
 export type ProjectedRecurringTask = Task & {
     isProjectedRecurringTask: true;
     sourceTaskId: string;
@@ -57,6 +65,10 @@ export const isProjectedRecurringTask = (task: Partial<Task> | null | undefined)
         && (task as Partial<ProjectedRecurringTask>).isProjectedRecurringTask === true
         && typeof (task as Partial<ProjectedRecurringTask>).sourceTaskId === 'string'
     )
+);
+
+export const getTaskCalendarOccurrenceDate = (task: Pick<Task, 'startTime' | 'dueDate'>): string | undefined => (
+    task.startTime ?? task.dueDate
 );
 
 const parseByDayToken = (token: string): RecurrenceByDay | null => {
@@ -291,6 +303,10 @@ export function buildRRuleString(
     return parts.join(';');
 }
 
+export function hasRecurrenceRule(value: Task['recurrence']): boolean {
+    return getRecurrenceRule(value) !== null;
+}
+
 function getRecurrenceRule(value: Task['recurrence']): RecurrenceRule | null {
     if (!value) return null;
     if (typeof value === 'string') {
@@ -391,6 +407,34 @@ export function getRecurrenceCompletedOccurrencesValue(value: Task['recurrence']
         return undefined;
     }
     return Math.floor(recurrence.completedOccurrences);
+}
+
+export function formatRecurrenceLabel({ recurrence, t, formatDate }: FormatRecurrenceLabelOptions): string {
+    const rule = getRecurrenceRule(recurrence);
+    if (!rule) return '';
+
+    const strategy = getRecurrenceStrategy(recurrence);
+    const interval = getRecurrenceInterval(recurrence);
+    const until = getRecurrenceUntilValue(recurrence);
+    const count = getRecurrenceCountValue(recurrence);
+    const unitKey = rule === 'daily'
+        ? 'recurrence.dayUnit'
+        : rule === 'weekly'
+            ? 'recurrence.weekUnit'
+            : rule === 'monthly'
+                ? 'recurrence.monthUnit'
+                : rule === 'yearly'
+                    ? 'recurrence.yearUnit'
+                    : undefined;
+
+    return [
+        `${t(`recurrence.${rule}`) || rule}${strategy === 'fluid' ? ` · ${t('recurrence.afterCompletionShort')}` : ''}`,
+        unitKey && interval > 1
+            ? `${t('recurrence.repeatEvery')} ${interval} ${t(unitKey)}`
+            : undefined,
+        until ? `${t('recurrence.endsOnDate')} ${(formatDate ?? ((value: string) => safeFormatDate(value, 'P')))(until)}` : undefined,
+        count ? `${t('recurrence.endsAfterCount')} ${count} ${t('recurrence.occurrenceUnit')}` : undefined,
+    ].filter(Boolean).join(' · ');
 }
 
 function getRecurrenceFieldAnchorDay(
@@ -660,6 +704,15 @@ function nextIsoFrom(
     return hasTimezone ? nextDate.toISOString() : format(nextDate, "yyyy-MM-dd'T'HH:mm");
 }
 
+const preserveDateOnlyFormat = (
+    nextIso: string | undefined,
+    sourceIso: string | undefined
+): string | undefined => {
+    if (!nextIso || !sourceIso || !/^\d{4}-\d{2}-\d{2}$/.test(sourceIso)) return nextIso;
+    const parsed = safeParseDate(nextIso);
+    return parsed ? format(parsed, 'yyyy-MM-dd') : nextIso;
+};
+
 function resetChecklist(checklist: ChecklistItem[] | undefined): ChecklistItem[] | undefined {
     if (!checklist || checklist.length === 0) return undefined;
     return checklist.map((item) => ({
@@ -822,6 +875,30 @@ export function createProjectedRecurringTask(
     };
 }
 
+export function getProjectedRecurringTaskCalendarDate(
+    task: Task,
+    projectedAtIso: string = new Date().toISOString()
+): string | undefined {
+    const projectedTask = createProjectedRecurringTask(task, projectedAtIso);
+    return projectedTask ? getTaskCalendarOccurrenceDate(projectedTask) : undefined;
+}
+
+/**
+ * Toggle-independent date for a recurring task's preview row: the first
+ * upcoming occurrence for unscheduled tasks, or the occurrence after the
+ * current one for scheduled tasks. `showFutureRecurrence` only opts a task
+ * into Calendar projection entities; it must not hide this display date.
+ */
+export function getRecurringTaskPreviewDate(
+    task: Task,
+    projectedAtIso: string = new Date().toISOString()
+): string | undefined {
+    const previewSource: Task = task.showFutureRecurrence ? task : { ...task, showFutureRecurrence: true };
+    const current = createCurrentRecurringCalendarTask(previewSource, projectedAtIso);
+    if (current?.startTime) return current.startTime;
+    return getProjectedRecurringTaskCalendarDate(previewSource, projectedAtIso);
+}
+
 export function createCurrentRecurringCalendarTask(
     task: Task,
     projectedAtIso: string = new Date().toISOString()
@@ -904,29 +981,35 @@ export function createNextRecurringTask(
     })();
     const completedAtDate = parsedCompletedAt ?? fallbackCompletedAt;
     const nextDueDate = task.dueDate
-        ? nextIsoFrom(
-            strategy === 'fluid' ? completedAtIso : task.dueDate,
-            rule,
-            completedAtDate,
-            byDay,
-            interval,
-            byMonthDay,
-            weekStart,
-            undefined,
-            strategy === 'fluid' ? undefined : dueAnchorDay
+        ? preserveDateOnlyFormat(
+            nextIsoFrom(
+                strategy === 'fluid' ? completedAtIso : task.dueDate,
+                rule,
+                completedAtDate,
+                byDay,
+                interval,
+                byMonthDay,
+                weekStart,
+                undefined,
+                strategy === 'fluid' ? undefined : dueAnchorDay
+            ),
+            task.dueDate
         )
         : undefined;
     let nextStartTime = task.startTime
-        ? nextIsoFrom(
-            strategy === 'fluid' ? completedAtIso : task.startTime,
-            rule,
-            completedAtDate,
-            byDay,
-            interval,
-            byMonthDay,
-            weekStart,
-            undefined,
-            strategy === 'fluid' ? undefined : startAnchorDay
+        ? preserveDateOnlyFormat(
+            nextIsoFrom(
+                strategy === 'fluid' ? completedAtIso : task.startTime,
+                rule,
+                completedAtDate,
+                byDay,
+                interval,
+                byMonthDay,
+                weekStart,
+                undefined,
+                strategy === 'fluid' ? undefined : startAnchorDay
+            ),
+            task.startTime
         )
         : undefined;
     if (strategy === 'strict' && task.startTime && task.dueDate && nextStartTime) {
@@ -935,23 +1018,44 @@ export function createNextRecurringTask(
             nextStartTime = nextIsoFrom(task.startTime, rule, completedAtDate, byDay, interval, byMonthDay, weekStart, completedAtDate, startAnchorDay);
         }
     }
+    let nextRelativeStartOffset = task.relativeStartOffset ? { ...task.relativeStartOffset } : undefined;
+    if (nextRelativeStartOffset) {
+        if (nextDueDate) {
+            const computedStartTime = computeRelativeStartTime(nextDueDate, nextRelativeStartOffset);
+            if (computedStartTime) {
+                nextStartTime = computedStartTime;
+            } else {
+                nextRelativeStartOffset = undefined;
+            }
+        } else {
+            nextRelativeStartOffset = undefined;
+        }
+    }
     const nextReviewAt = task.reviewAt
-        ? nextIsoFrom(
-            strategy === 'fluid' ? completedAtIso : task.reviewAt,
-            rule,
-            completedAtDate,
-            byDay,
-            interval,
-            byMonthDay,
-            weekStart,
-            undefined,
-            strategy === 'fluid' ? undefined : reviewAnchorDay
+        ? preserveDateOnlyFormat(
+            nextIsoFrom(
+                strategy === 'fluid' ? completedAtIso : task.reviewAt,
+                rule,
+                completedAtDate,
+                byDay,
+                interval,
+                byMonthDay,
+                weekStart,
+                undefined,
+                strategy === 'fluid' ? undefined : reviewAnchorDay
+            ),
+            task.reviewAt
         )
         : undefined;
     if (!nextStartTime && !nextDueDate && !nextReviewAt) {
         // When recurrence exists but no schedule fields are set, defer the next instance
-        // from completion so it does not reappear in Next immediately.
-        nextStartTime = nextIsoFrom(completedAtIso, rule, completedAtDate, byDay, interval, byMonthDay, weekStart);
+        // from completion so it does not reappear in Next immediately. Seed with the
+        // completion's date part only: the task never had a time, so its next instance
+        // must stay date-only instead of inheriting the completion's time of day. The
+        // ISO prefix (not the local date) keeps parity with the Rust local API.
+        const completedAtDatePart = /^\d{4}-\d{2}-\d{2}/.exec(completedAtIso)?.[0]
+            ?? format(completedAtDate, 'yyyy-MM-dd');
+        nextStartTime = nextIsoFrom(completedAtDatePart, rule, completedAtDate, byDay, interval, byMonthDay, weekStart);
     }
 
     if (count && completedOccurrences + 1 >= count) {
@@ -968,6 +1072,10 @@ export function createNextRecurringTask(
         newStatus = 'next';
     }
 
+    // The next instance keeps its attachments, so the copies intentionally share
+    // cloudKey/uri with the completed instance (unlike duplicateTask, which drops
+    // file attachments). Every remote-delete and cleanup path must therefore
+    // refcount cloudKeys across all tasks before deleting remote bytes.
     const duplicatedAttachments = (task.attachments || [])
         .filter((attachment) => !attachment.deletedAt)
         .map<Attachment>((attachment) => ({
@@ -1015,15 +1123,19 @@ export function createNextRecurringTask(
         priority: task.priority,
         energyLevel: task.energyLevel,
         assignedTo: task.assignedTo,
+        taskMode: task.taskMode,
         startTime: nextStartTime,
+        relativeStartOffset: nextRelativeStartOffset,
         dueDate: nextDueDate,
         recurrence: nextRecurrence,
         showFutureRecurrence: task.showFutureRecurrence ? true : undefined,
         suppressMindwtrReminders: task.suppressMindwtrReminders ? true : undefined,
+        repeatReminderMinutes: task.repeatReminderMinutes,
         tags: [...(task.tags || [])],
         contexts: [...(task.contexts || [])],
         checklist: resetChecklist(task.checklist),
         description: task.description,
+        textDirection: task.textDirection,
         attachments: duplicatedAttachments.length > 0 ? duplicatedAttachments : undefined,
         location: task.location,
         projectId: task.projectId,

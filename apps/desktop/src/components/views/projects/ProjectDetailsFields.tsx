@@ -1,6 +1,7 @@
 import type { Project } from '@mindwtr/core';
 import { Calendar, CalendarClock, FolderOpenDot, ListOrdered, Plus, Settings2, Signal, Tags } from 'lucide-react';
 import { cn } from '../../../lib/utils';
+import { TokenAutocompleteInput } from '../../Task/TokenAutocompleteInput';
 
 type ProjectDetailsFieldsProps = {
     project: Project;
@@ -9,6 +10,7 @@ type ProjectDetailsFieldsProps = {
     noAreaId: string;
     t: (key: string) => string;
     tagDraft: string;
+    tagSuggestions?: readonly string[];
     onTagDraftChange: (value: string) => void;
     onCommitTags: () => void;
     onNewArea: () => void;
@@ -33,6 +35,7 @@ export function ProjectDetailsFields({
     noAreaId,
     t,
     tagDraft,
+    tagSuggestions = [],
     onTagDraftChange,
     onCommitTags,
     onNewArea,
@@ -164,11 +167,13 @@ export function ProjectDetailsFields({
                         <Tags className="h-3.5 w-3.5" />
                         {t('taskEdit.tagsLabel')}
                     </label>
-                    <input
+                    <TokenAutocompleteInput
                         key={`${project.id}-tags`}
-                        type="text"
                         value={tagDraft}
-                        onChange={(e) => onTagDraftChange(e.target.value)}
+                        onChange={onTagDraftChange}
+                        suggestions={tagSuggestions}
+                        prefix="#"
+                        ariaLabel={t('taskEdit.tagsLabel')}
                         onBlur={onCommitTags}
                         onKeyDown={(e) => {
                             if (e.key === 'Enter') {

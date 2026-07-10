@@ -46,12 +46,14 @@ import {
 import { useToast } from '@/contexts/toast-context';
 import { maskCalendarUrl } from '@/lib/settings-utils';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
+import { CompactText } from '@/components/compact-text';
 
 import { useSettingsLocalization, useSettingsScrollContent } from './settings.hooks';
 import { SettingsGuideLink, SettingsTopBar } from './settings.shell';
 import { styles } from './settings.styles';
 
-const CALENDAR_INTEGRATION_GUIDE_URL = 'https://github.com/dongdongbh/Mindwtr/wiki/Calendar-Integration';
+const CALENDAR_INTEGRATION_GUIDE_URL = 'https://docs.mindwtr.app/use/calendar-integration';
 
 type CollapsibleSettingHeaderProps = {
     title: string;
@@ -92,6 +94,7 @@ function CollapsibleSettingHeader({
 
 export function CalendarSettingsScreen() {
     const tc = useThemeColors();
+    const filledButton = useFilledButtonColors();
     const { showToast } = useToast();
     const { isChineseLanguage, tr, t } = useSettingsLocalization();
     const { settings, updateSettings } = useTaskStore();
@@ -771,7 +774,12 @@ export function CalendarSettingsScreen() {
                                         ]}
                                         onPress={() => void loadSystemCalendarState(true)}
                                     >
-                                        <Text style={[styles.backendOptionText, { color: tc.text }]}>{t('settings.grantCalendarAccess')}</Text>
+                                        <CompactText
+                                            style={[styles.backendOptionText, { color: tc.text }]}
+                                            numberOfLines={2}
+                                        >
+                                            {t('settings.grantCalendarAccess')}
+                                        </CompactText>
                                     </TouchableOpacity>
                                 </View>
                             ) : isSystemCalendarLoading ? (
@@ -790,10 +798,10 @@ export function CalendarSettingsScreen() {
                                                 style={[styles.settingRow, idx > 0 && { borderTopWidth: 1, borderTopColor: tc.border }]}
                                             >
                                                 <View style={styles.settingInfo}>
-                                                    <Text style={[styles.settingLabel, { color: tc.text }]} numberOfLines={1}>
+                                                    <Text style={[styles.settingLabel, { color: tc.text }]} numberOfLines={2}>
                                                         {calendar.name}
                                                     </Text>
-                                                    <Text style={[styles.settingDescription, { color: tc.secondaryText }]} numberOfLines={1}>
+                                                    <Text style={[styles.settingDescription, { color: tc.secondaryText }]} numberOfLines={2}>
                                                         {t('settings.deviceCalendar')}
                                                     </Text>
                                                 </View>
@@ -845,25 +853,33 @@ export function CalendarSettingsScreen() {
                             onChangeText={setNewCalendarUrl}
                         />
 
-                        <View style={{ flexDirection: 'row', gap: 12, marginTop: 12 }}>
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 12 }}>
                             <TouchableOpacity
                                 style={[
                                     styles.backendOption,
-                                    { borderColor: tc.border, backgroundColor: newCalendarUrl.trim() ? tc.tint : tc.filterBg },
+                                    { borderColor: tc.border, backgroundColor: newCalendarUrl.trim() ? filledButton.backgroundColor : tc.filterBg },
                                 ]}
                                 onPress={() => void handleAddCalendar()}
                                 disabled={!newCalendarUrl.trim()}
                             >
-                                <Text style={[styles.backendOptionText, { color: newCalendarUrl.trim() ? '#FFFFFF' : tc.secondaryText }]}>
+                                <CompactText
+                                    style={[styles.backendOptionText, { color: newCalendarUrl.trim() ? (filledButton.textColor ?? '#FFFFFF') : tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
                                     {t('settings.externalCalendarAdd')}
-                                </Text>
+                                </CompactText>
                             </TouchableOpacity>
 
                             <TouchableOpacity
                                 style={[styles.backendOption, { borderColor: tc.border, backgroundColor: tc.filterBg }]}
                                 onPress={() => void handleTestFetch()}
                             >
-                                <Text style={[styles.backendOptionText, { color: tc.text }]}>{tr('settings.calendarMobile.test')}</Text>
+                                <CompactText
+                                    style={[styles.backendOptionText, { color: tc.text }]}
+                                    numberOfLines={2}
+                                >
+                                    {tr('settings.calendarMobile.test')}
+                                </CompactText>
                             </TouchableOpacity>
                         </View>
 
@@ -874,9 +890,12 @@ export function CalendarSettingsScreen() {
                             ]}
                             onPress={() => void handleChooseLocalCalendar()}
                         >
-                            <Text style={[styles.backendOptionText, { color: tc.text }]}>
+                            <CompactText
+                                style={[styles.backendOptionText, { color: tc.text }]}
+                                numberOfLines={2}
+                            >
                                 {tr('settings.calendarMobile.chooseLocalIcsFile')}
-                            </Text>
+                            </CompactText>
                         </TouchableOpacity>
                     </View>
                 </View>
@@ -891,10 +910,10 @@ export function CalendarSettingsScreen() {
                                     style={[styles.settingRow, idx > 0 && { borderTopWidth: 1, borderTopColor: tc.border }]}
                                 >
                                     <View style={styles.settingInfo}>
-                                        <Text style={[styles.settingLabel, { color: tc.text }]} numberOfLines={1}>
+                                        <Text style={[styles.settingLabel, { color: tc.text }]} numberOfLines={2}>
                                             {calendar.name}
                                         </Text>
-                                        <Text style={[styles.settingDescription, { color: tc.secondaryText }]} numberOfLines={1}>
+                                        <Text style={[styles.settingDescription, { color: tc.secondaryText }]} numberOfLines={2}>
                                             {maskCalendarUrl(calendar.url)}
                                         </Text>
                                         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>

@@ -8,6 +8,7 @@ type DataTransferSectionProps = Pick<
     | 'onExportBackup'
     | 'onRestoreBackup'
     | 'onImportTodoist'
+    | 'onImportTickTick'
     | 'onImportDgt'
     | 'onImportOmniFocus'
 > & {
@@ -47,6 +48,7 @@ export function DataTransferSection({
     onExportBackup,
     onImportDgt,
     onImportOmniFocus,
+    onImportTickTick,
     onImportTodoist,
     onRestoreBackup,
     onAddGettingStartedContent,
@@ -63,7 +65,7 @@ export function DataTransferSection({
             </h2>
             <div className="bg-card border border-border rounded-lg p-6 space-y-3">
                 <a
-                    href="https://github.com/dongdongbh/Mindwtr/wiki/Data-and-Sync#imports-and-migrations"
+                    href="https://docs.mindwtr.app/import/"
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
@@ -100,6 +102,13 @@ export function DataTransferSection({
                         description={t.importTodoistDesc}
                         statusText={transferAction === 'import' ? t.syncing : null}
                         onClick={() => void onImportTodoist()}
+                    />
+                    <TransferActionButton
+                        disabled={disabled}
+                        label={t.importTickTick}
+                        description={t.importTickTickDesc}
+                        statusText={transferAction === 'import' ? t.syncing : null}
+                        onClick={() => void onImportTickTick()}
                     />
                     <TransferActionButton
                         disabled={disabled}

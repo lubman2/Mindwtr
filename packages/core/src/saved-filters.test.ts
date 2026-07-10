@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
     applyFilter,
+    createTaskFilterPredicate,
     hasActiveFilterCriteria,
     markSavedFilterDeleted,
     normalizeSavedFilters,
@@ -49,6 +50,22 @@ describe('saved filters', () => {
         }, { tokenMatchMode: 'all' });
 
         expect(filtered.map((item) => item.id)).toEqual(['desk-phone']);
+    });
+
+    it('can override context matching to any while keeping tag matching strict', () => {
+        const tasks = [
+            task({ id: 'desk-urgent', contexts: ['@desk'], tags: ['#urgent'] }),
+            task({ id: 'phone-urgent', contexts: ['@phone'], tags: ['#urgent'] }),
+            task({ id: 'desk-later', contexts: ['@desk'], tags: ['#later'] }),
+        ];
+
+        const filtered = applyFilter(tasks, {
+            contexts: ['@desk', '@phone'],
+            contextMatchMode: 'any',
+            tags: ['#urgent'],
+        }, { tokenMatchMode: 'all' });
+
+        expect(filtered.map((item) => item.id)).toEqual(['desk-urgent', 'phone-urgent']);
     });
 
     it('supports due date presets and no-project filters', () => {
@@ -107,6 +124,80 @@ describe('saved filters', () => {
         expect(filtered.map((item) => item.id)).toEqual(['office']);
     });
 
+    it('prepares the project lookup once when applying area filters', () => {
+        const OriginalMap = globalThis.Map;
+        const setGlobalMap = (value: MapConstructor) => {
+            (globalThis as typeof globalThis & { Map: MapConstructor }).Map = value;
+        };
+        let mapConstructions = 0;
+        class CountingMap<K, V> extends OriginalMap<K, V> {
+            constructor(entries?: Iterable<readonly [K, V]> | null) {
+                mapConstructions += 1;
+                super(entries);
+            }
+        }
+        setGlobalMap(CountingMap as unknown as MapConstructor);
+
+        try {
+            const tasks = [
+                task({ id: 'work-a', projectId: 'project-work' }),
+                task({ id: 'work-b', projectId: 'project-work' }),
+                task({ id: 'home', projectId: 'project-home' }),
+            ];
+
+            const filtered = applyFilter(tasks, {
+                areas: ['area-work'],
+            }, {
+                projects: [
+                    { id: 'project-work', title: 'Work', status: 'active', areaId: 'area-work', createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
+                    { id: 'project-home', title: 'Home', status: 'active', areaId: 'area-home', createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
+                ],
+            });
+
+            expect(filtered.map((item) => item.id)).toEqual(['work-a', 'work-b']);
+            expect(mapConstructions).toBe(1);
+        } finally {
+            setGlobalMap(OriginalMap);
+        }
+    });
+
+    it('creates a reusable predicate without rebuilding project lookup per task', () => {
+        const OriginalMap = globalThis.Map;
+        const setGlobalMap = (value: MapConstructor) => {
+            (globalThis as typeof globalThis & { Map: MapConstructor }).Map = value;
+        };
+        let mapConstructions = 0;
+        class CountingMap<K, V> extends OriginalMap<K, V> {
+            constructor(entries?: Iterable<readonly [K, V]> | null) {
+                mapConstructions += 1;
+                super(entries);
+            }
+        }
+        setGlobalMap(CountingMap as unknown as MapConstructor);
+
+        try {
+            const tasks = [
+                task({ id: 'work-a', projectId: 'project-work' }),
+                task({ id: 'work-b', projectId: 'project-work' }),
+                task({ id: 'home', projectId: 'project-home' }),
+            ];
+            const predicate = createTaskFilterPredicate({
+                areas: ['area-work'],
+            }, {
+                projects: [
+                    { id: 'project-work', title: 'Work', status: 'active', areaId: 'area-work', createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
+                    { id: 'project-home', title: 'Home', status: 'active', areaId: 'area-home', createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z' },
+                ],
+            });
+
+            expect(tasks.filter(predicate).map((item) => item.id)).toEqual(['work-a', 'work-b']);
+            expect(tasks.filter(predicate).map((item) => item.id)).toEqual(['work-a', 'work-b']);
+            expect(mapConstructions).toBe(1);
+        } finally {
+            setGlobalMap(OriginalMap);
+        }
+    });
+
     it('normalizes saved filter payloads for settings sync and storage', () => {
         const filters = normalizeSavedFilters([
             {
@@ -115,6 +206,7 @@ describe('saved filters', () => {
                 view: 'focus',
                 criteria: {
                     contexts: ['desk', '@desk'],
+                    contextMatchMode: 'any',
                     priority: ['high', 'invalid'],
                     locations: [' Office ', ''],
                 },
@@ -134,6 +226,7 @@ describe('saved filters', () => {
             name: 'Desk',
             criteria: {
                 contexts: ['@desk'],
+                contextMatchMode: 'any',
                 priority: ['high'],
                 locations: ['Office'],
             },
@@ -143,6 +236,22 @@ describe('saved filters', () => {
             deletedAt: '2026-05-03T00:00:00.000Z',
         });
         expect(hasActiveFilterCriteria(filters[0]?.criteria)).toBe(true);
+    });
+
+    it('preserves tag grouping for saved Focus filters', () => {
+        const filters = normalizeSavedFilters([
+            {
+                id: 'filter-1',
+                name: 'Tag view',
+                view: 'focus',
+                criteria: { tags: ['#deep'] },
+                groupBy: 'tag',
+                createdAt: '2026-05-02T00:00:00.000Z',
+                updatedAt: '2026-05-02T00:00:00.000Z',
+            },
+        ]);
+
+        expect(filters[0]?.groupBy).toBe('tag');
     });
 
     it('marks saved filters as tombstones instead of removing them', () => {

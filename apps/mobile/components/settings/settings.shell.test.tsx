@@ -63,7 +63,7 @@ describe('SettingsGuideLink', () => {
                 <SettingsGuideLink
                     title="Import guide"
                     description="Import setup details."
-                    url="https://github.com/dongdongbh/Mindwtr/wiki/Data-and-Sync#imports-and-migrations"
+                    url="https://docs.mindwtr.app/import/"
                     testID="guide-link"
                 />,
             );
@@ -77,7 +77,7 @@ describe('SettingsGuideLink', () => {
         });
 
         expect(openURL).toHaveBeenCalledWith(
-            'https://github.com/dongdongbh/Mindwtr/wiki/Data-and-Sync#imports-and-migrations',
+            'https://docs.mindwtr.app/import/',
         );
     });
 });

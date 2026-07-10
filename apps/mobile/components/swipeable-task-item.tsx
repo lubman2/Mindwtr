@@ -1,9 +1,8 @@
-import { Text, Pressable, Alert } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import {
-    formatFocusTaskLimitText,
+    getFocusStarBlockedText,
+    formatRecurrenceLabel,
     getProjectNextActionPromptData,
-    getStatusColor,
     hasTimeComponent,
     normalizeFocusTaskLimit,
     safeFormatDate,
@@ -13,18 +12,22 @@ import {
     tFallback,
     useTaskStore,
 } from '@mindwtr/core';
-import type { ProjectSequenceTaskCue, Task, TaskStatus } from '@mindwtr/core';
+import type { Area, Project, ProjectSequenceTaskCue, Task, TaskStatus } from '@mindwtr/core';
 import { useLanguage } from '../contexts/language-context';
 import React, { useCallback, useRef, useState } from 'react';
 import { ArrowRight, Check, RotateCcw, Trash2 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { ThemeColors } from '../hooks/use-theme-colors';
+import { useStatusColors } from '../hooks/use-status-colors';
 import { useToast } from '../contexts/toast-context';
+import { AppPressable } from './app-pressable';
 import { presentProjectNextActionPrompt } from './project-next-action-prompt';
 import { SwipeableTaskItemContent } from './swipeable-task-item/SwipeableTaskItemContent';
 import { ProjectNextActionPromptModal } from './swipeable-task-item/ProjectNextActionPromptModal';
 import { SwipeableTaskItemStatusMenu } from './swipeable-task-item/SwipeableTaskItemStatusMenu';
+import { CompletedAtPicker } from './completed-at-picker';
 import { styles } from './swipeable-task-item/swipeable-task-item.styles';
+import { CompactText } from '@/components/compact-text';
 import { useSwipeableChecklist } from './swipeable-task-item/useSwipeableChecklist';
 
 export interface SwipeableTaskItemProps {
@@ -46,6 +49,8 @@ export interface SwipeableTaskItemProps {
     isHighlighted?: boolean;
     showFocusToggle?: boolean;
     hideStatusBadge?: boolean;
+    /** Render the status control as a compact icon button (no status-name label) for single-status lists */
+    statusBadgeAsIcon?: boolean;
     sequenceCue?: ProjectSequenceTaskCue;
     sequenceLabel?: string;
     disableSwipe?: boolean;
@@ -56,6 +61,7 @@ export interface SwipeableTaskItemProps {
     onContextPress?: (context: string) => void;
     onTagPress?: (tag: string) => void;
     projectDeadlineLabel?: string;
+    rowContext?: SwipeableTaskItemRowContext;
 }
 
 type ProjectNextActionPromptState = {
@@ -64,6 +70,21 @@ type ProjectNextActionPromptState = {
     projectTitle: string;
     sectionId?: string;
 };
+
+type TaskStoreActions = ReturnType<typeof useTaskStore.getState>;
+
+export type SwipeableTaskItemRowContext = {
+    addTask: TaskStoreActions['addTask'];
+    updateTask: TaskStoreActions['updateTask'];
+    restoreTask: TaskStoreActions['restoreTask'];
+    projects: Project[];
+    areas: Area[];
+    focusedCount: number;
+    focusTaskLimit: number;
+    timeEstimatesEnabled: boolean;
+    showTaskAge: boolean;
+};
+
 
 const TASK_SWIPE_FRICTION = 1.25;
 const TASK_SWIPE_OPEN_THRESHOLD = 72;
@@ -84,6 +105,32 @@ const getUnknownErrorMessage = (error: unknown): string | undefined => {
     return undefined;
 };
 
+type SwipeableTaskItemInnerProps = Omit<SwipeableTaskItemProps, 'rowContext'> & {
+    rowContext: SwipeableTaskItemRowContext;
+};
+
+export function SwipeableTaskItem(props: SwipeableTaskItemProps) {
+    if (props.rowContext) {
+        return <SwipeableTaskItemInner {...props} rowContext={props.rowContext} />;
+    }
+    return <StoreBackedSwipeableTaskItem {...props} />;
+}
+
+function StoreBackedSwipeableTaskItem(props: SwipeableTaskItemProps) {
+    const rowContext = useTaskStore((state): SwipeableTaskItemRowContext => ({
+        addTask: state.addTask,
+        updateTask: state.updateTask,
+        restoreTask: state.restoreTask,
+        projects: state.projects,
+        areas: state.areas,
+        focusedCount: state.getDerivedState().focusedCount,
+        focusTaskLimit: normalizeFocusTaskLimit(state.settings?.gtd?.focusTaskLimit),
+        timeEstimatesEnabled: state.settings?.features?.timeEstimates !== false,
+        showTaskAge: state.settings?.appearance?.showTaskAge === true,
+    }), shallow);
+    return <SwipeableTaskItemInner {...props} rowContext={rowContext} />;
+}
+
 /**
  * A swipeable task item with context-aware left swipe actions:
  * - Inbox: swipe to Next
@@ -93,7 +140,7 @@ const getUnknownErrorMessage = (error: unknown): string | undefined => {
  * 
  * Right swipe always shows Delete action.
  */
-export function SwipeableTaskItem({
+function SwipeableTaskItemInner({
     task,
     isDark,
     tc,
@@ -109,6 +156,7 @@ export function SwipeableTaskItem({
     isHighlighted = false,
     showFocusToggle = false,
     hideStatusBadge = false,
+    statusBadgeAsIcon = false,
     sequenceCue,
     sequenceLabel,
     disableSwipe = false,
@@ -119,11 +167,13 @@ export function SwipeableTaskItem({
     onContextPress,
     onTagPress,
     projectDeadlineLabel,
-}: SwipeableTaskItemProps) {
+    rowContext,
+}: SwipeableTaskItemInnerProps) {
     const swipeableRef = useRef<Swipeable>(null);
     const ignorePressUntil = useRef<number>(0);
     const { t, language } = useLanguage();
     const { showToast } = useToast();
+    const statusColors = useStatusColors();
     const {
         addTask,
         updateTask,
@@ -134,19 +184,7 @@ export function SwipeableTaskItem({
         focusTaskLimit,
         timeEstimatesEnabled,
         showTaskAge,
-        undoNotificationsEnabled,
-    } = useTaskStore((state) => ({
-        addTask: state.addTask,
-        updateTask: state.updateTask,
-        restoreTask: state.restoreTask,
-        projects: state.projects,
-        areas: state.areas,
-        focusedCount: state.getDerivedState().focusedCount,
-        focusTaskLimit: normalizeFocusTaskLimit(state.settings?.gtd?.focusTaskLimit),
-        timeEstimatesEnabled: state.settings?.features?.timeEstimates !== false,
-        showTaskAge: state.settings?.appearance?.showTaskAge === true,
-        undoNotificationsEnabled: state.settings?.undoNotificationsEnabled !== false,
-    }), shallow);
+    } = rowContext;
     const canShowFocusToggle = showFocusToggle
         && task.status !== 'done'
         && task.status !== 'reference'
@@ -229,6 +267,30 @@ export function SwipeableTaskItem({
             });
     }, [onStatusChange, openProjectNextActionPromptIfNeeded, showActionFailure, task.id, task.status]);
 
+    const [completedAtPicker, setCompletedAtPicker] = useState<null | 'complete' | 'edit'>(null);
+    const applyCompletedAt = useCallback((iso: string) => {
+        const mode = completedAtPicker;
+        setCompletedAtPicker(null);
+        if (!mode) return;
+        const updates: Partial<Task> = mode === 'complete'
+            ? { status: 'done', completedAt: iso }
+            : { completedAt: iso };
+        void Promise.resolve(updateTask(task.id, updates))
+            .then((result) => {
+                const failure = getActionFailureMessage(result);
+                if (failure) {
+                    showActionFailure(failure);
+                    return;
+                }
+                if (mode === 'complete' && task.status !== 'done') {
+                    openProjectNextActionPromptIfNeeded(task.id);
+                }
+            })
+            .catch((error) => {
+                showActionFailure(getUnknownErrorMessage(error));
+            });
+    }, [completedAtPicker, openProjectNextActionPromptIfNeeded, showActionFailure, task.id, task.status, updateTask]);
+
     const handlePromoteProjectNextAction = useCallback((nextTaskId: string) => {
         if (isProjectNextActionSubmitting) return;
         setIsProjectNextActionSubmitting(true);
@@ -274,44 +336,40 @@ export function SwipeableTaskItem({
 
     const toggleFocus = () => {
         if (selectionMode) return;
-        if (task.isFocusedToday) {
-            updateTask(task.id, { isFocusedToday: false });
+        // Core focus-star module decides eligibility, cap, and the patch;
+        // status promotion happens in the store's star↔status rules.
+        const action = useTaskStore.getState().getFocusStarAction(task);
+        if (!action.canToggle) {
+            const blockedText = getFocusStarBlockedText(t, action, focusTaskLimit);
+            if (blockedText) {
+                showToast({
+                    title: t('digest.focus') || 'Focus',
+                    message: blockedText,
+                    tone: 'warning',
+                });
+            }
             return;
         }
-        if (focusedCount >= focusTaskLimit) {
-            showToast({
-                title: t('digest.focus') || 'Focus',
-                message: formatFocusTaskLimitText(
-                    tFallback(t, 'agenda.maxFocusItems', 'Max {{count}} focus items.'),
-                    focusTaskLimit
-                ),
-                tone: 'warning',
-            });
-            return;
-        }
-        const updates: Partial<Task> = {
-            isFocusedToday: true,
-            ...(task.status !== 'next' ? { status: 'next' } : {}),
-        };
-        updateTask(task.id, updates);
+        updateTask(task.id, action.patch);
     };
 
     // Status-aware left swipe action
     const getLeftAction = (): { label: string; color: string; action: TaskStatus } => {
         if (task.status === 'done') {
-            return { label: t('archived.restoreToInbox') || 'Restore', color: getStatusColor('inbox').text, action: 'inbox' };
+            return { label: t('archived.restoreToInbox') || 'Restore', color: statusColors.inbox.text, action: 'inbox' };
         } else if (task.status === 'next') {
-            return { label: t('common.done') || 'Done', color: getStatusColor('done').text, action: 'done' };
+            return { label: t('common.done') || 'Done', color: statusColors.done.text, action: 'done' };
         } else if (task.status === 'waiting' || task.status === 'someday' || task.status === 'reference') {
-            return { label: t('status.next') || 'Next', color: getStatusColor('next').text, action: 'next' };
+            return { label: t('status.next') || 'Next', color: statusColors.next.text, action: 'next' };
         } else if (task.status === 'inbox') {
-            return { label: t('status.next') || 'Next', color: getStatusColor('next').text, action: 'next' };
+            return { label: t('status.next') || 'Next', color: statusColors.next.text, action: 'next' };
         } else {
-            return { label: t('common.done') || 'Done', color: getStatusColor('done').text, action: 'done' };
+            return { label: t('common.done') || 'Done', color: statusColors.done.text, action: 'done' };
         }
     };
 
     const leftAction = getLeftAction();
+    const recurrenceLabel = formatRecurrenceLabel({ recurrence: task.recurrence, t });
     const longPressAccessibilityHint = onLongPressAction && onLongPressActionLabel
         ? ` Long press for ${onLongPressActionLabel.toLowerCase()}.`
         : '';
@@ -324,8 +382,9 @@ export function SwipeableTaskItem({
     const renderLeftActions = () => {
         const LeftIcon = leftAction.action === 'inbox' ? RotateCcw : leftAction.action === 'done' ? Check : ArrowRight;
         return (
-            <Pressable
+            <AppPressable
                 style={[styles.swipeActionLeft, { backgroundColor: leftAction.color }]}
+                pressedColor="rgba(0, 0, 0, 0.18)"
                 onPress={() => {
                     swipeableRef.current?.close();
                     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
@@ -335,24 +394,29 @@ export function SwipeableTaskItem({
                 accessibilityRole="button"
             >
                 <LeftIcon size={20} color="#FFFFFF" />
-                <Text style={styles.swipeActionText}>{leftAction.label}</Text>
-            </Pressable>
+                <CompactText style={styles.swipeActionText} numberOfLines={1}>
+                    {leftAction.label}
+                </CompactText>
+            </AppPressable>
         );
     };
 
     const renderRightActions = () => (
-        <Pressable
+        <AppPressable
             style={styles.swipeActionRight}
+            pressedColor="rgba(0, 0, 0, 0.18)"
             onPress={() => {
                 swipeableRef.current?.close();
-                confirmDelete();
+                handleDelete();
             }}
             accessibilityLabel={t('task.aria.delete') || 'Delete task'}
             accessibilityRole="button"
         >
             <Trash2 size={20} color="#FFFFFF" />
-            <Text style={styles.swipeActionText}>{t('common.delete')}</Text>
-        </Pressable>
+            <CompactText style={styles.swipeActionText} numberOfLines={1}>
+                {t('common.delete')}
+            </CompactText>
+        </AppPressable>
     );
 
     const accessibilityLabel = [
@@ -372,6 +436,7 @@ export function SwipeableTaskItem({
         })(),
         sequenceCue === 'available' ? sequenceLabel : null,
         projectDeadlineLabel,
+        recurrenceLabel ? `${tFallback(t, 'taskEdit.recurrenceLabel', 'Recurrence')}: ${recurrenceLabel}` : null,
     ].filter(Boolean).join('. ');
 
     const handlePress = () => {
@@ -384,42 +449,30 @@ export function SwipeableTaskItem({
         onPress();
     };
 
-    const confirmDelete = () => {
-        Alert.alert(
-            task.title,
-            t('task.deleteConfirmBody') || 'Move this task to Trash?',
-            [
-                { text: t('common.cancel') || 'Cancel', style: 'cancel' },
-                {
-                    text: t('common.delete') || 'Delete',
-                    style: 'destructive',
-                    onPress: () => {
-                        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
-                        cancelPendingChecklist();
-                        let deletePromise: Promise<unknown>;
-                        try {
-                            deletePromise = Promise.resolve(onDelete());
-                        } catch (error) {
-                            deletePromise = Promise.reject(error);
-                        }
-                        void deletePromise
-                            .then(() => {
-                                if (!undoNotificationsEnabled) return;
-                                showToast({
-                                    title: t('common.notice') || 'Notice',
-                                    message: t('list.taskDeleted') || 'Task deleted',
-                                    tone: 'info',
-                                    actionLabel: t('common.undo') || 'Undo',
-                                    onAction: () => { void restoreTask(task.id); },
-                                    durationMs: 5200,
-                                });
-                            })
-                            .catch(() => undefined);
-                    },
-                },
-            ],
-            { cancelable: true }
-        );
+    // Deleting is a recoverable move to Trash, so it happens immediately with
+    // an undo toast instead of a confirmation alert. Permanent purge (in Trash)
+    // keeps its confirmation.
+    const handleDelete = () => {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
+        cancelPendingChecklist();
+        let deletePromise: Promise<unknown>;
+        try {
+            deletePromise = Promise.resolve(onDelete());
+        } catch (error) {
+            deletePromise = Promise.reject(error);
+        }
+        void deletePromise
+            .then(() => {
+                showToast({
+                    title: t('common.notice') || 'Notice',
+                    message: t('list.taskDeleted') || 'Task deleted',
+                    tone: 'info',
+                    actionLabel: t('common.undo') || 'Undo',
+                    onAction: () => { void restoreTask(task.id); },
+                    durationMs: 5200,
+                });
+            })
+            .catch(() => undefined);
     };
 
     const handleLongPress = () => {
@@ -462,7 +515,7 @@ export function SwipeableTaskItem({
             return;
         }
         if (actionName === 'delete') {
-            confirmDelete();
+            handleDelete();
         }
     };
 
@@ -478,6 +531,7 @@ export function SwipeableTaskItem({
             hideContexts={hideContexts}
             hideProjectMeta={hideProjectMeta}
             hideStatusBadge={hideStatusBadge}
+            statusBadgeAsIcon={statusBadgeAsIcon}
             isDark={isDark}
             isHighlighted={isHighlighted}
             isMultiSelected={isMultiSelected}
@@ -486,12 +540,16 @@ export function SwipeableTaskItem({
             localChecklist={localChecklist}
             onAccessibilityAction={handleAccessibilityAction}
             onContextPress={onContextPress}
+            onEditCompletedAt={(task.status === 'done' || task.status === 'archived') && !selectionMode
+                ? () => setCompletedAtPicker('edit')
+                : undefined}
             onLongPress={handleLongPress}
             onOpenStatusMenu={() => setShowStatusMenu(true)}
             onPress={handlePress}
             onProjectPress={onProjectPress}
             onTagPress={onTagPress}
             projectDeadlineLabel={projectDeadlineLabel}
+            recurrenceLabel={recurrenceLabel}
             onToggleChecklist={toggleChecklist}
             onToggleChecklistItem={toggleChecklistItem}
             onToggleFocus={toggleFocus}
@@ -535,10 +593,20 @@ export function SwipeableTaskItem({
                 visible={showStatusMenu}
                 onClose={() => setShowStatusMenu(false)}
                 onStatusChange={handleStatusChange}
+                onBackdatedComplete={task.status === 'done' ? undefined : () => setCompletedAtPicker('complete')}
                 taskStatus={task.status}
                 tc={tc}
                 t={t}
             />
+            {completedAtPicker ? (
+                <CompletedAtPicker
+                    initialValue={completedAtPicker === 'edit' ? (task.completedAt || task.updatedAt) : undefined}
+                    onCancel={() => setCompletedAtPicker(null)}
+                    onConfirm={applyCompletedAt}
+                    t={t}
+                    tc={tc}
+                />
+            ) : null}
             {projectNextActionPrompt ? (
                 <ProjectNextActionPromptModal
                     visible={Boolean(projectNextActionPrompt)}

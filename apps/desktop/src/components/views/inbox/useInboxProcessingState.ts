@@ -23,7 +23,7 @@ import type {
 import type { InboxProcessingScheduleFieldKey, InboxProcessingScheduleFieldsControls } from '../../InboxProcessingScheduleFields';
 import type { ProcessingStep } from '../../InboxProcessingWizard';
 import { DEFAULT_TASK_EDITOR_HIDDEN } from '../../Task/task-item-helpers';
-import { resolveAreaFilter, taskMatchesAreaFilter } from '../../../lib/area-filter';
+import { resolveAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
 import {
     getDateFieldDraft,
     mergeSuggestedTokens,
@@ -70,6 +70,7 @@ export function useInboxProcessingState({
     const [convertToProject, setConvertToProject] = useState(false);
     const [projectTitleDraft, setProjectTitleDraft] = useState('');
     const [nextActionDraft, setNextActionDraft] = useState('');
+    const [extraActionDrafts, setExtraActionDrafts] = useState<string[]>([]);
     const [customContext, setCustomContext] = useState('');
     const [customTag, setCustomTag] = useState('');
     const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -207,6 +208,7 @@ export function useInboxProcessingState({
         setConvertToProject(false);
         setProjectTitleDraft('');
         setNextActionDraft('');
+        setExtraActionDrafts([]);
         setCustomContext('');
         setCustomTag('');
         setSelectedProjectId(null);
@@ -248,8 +250,11 @@ export function useInboxProcessingState({
         setConvertToProject(false);
         setProjectTitleDraft(task.title);
         setNextActionDraft('');
+        setExtraActionDrafts([]);
         setSelectedProjectId(task.projectId ?? null);
-        setSelectedAreaId(null);
+        // Keep an area assigned while the task sat in the inbox; a project home
+        // outranks the direct area (container exclusivity).
+        setSelectedAreaId(task.projectId ? null : (task.areaId ?? null));
         const startDraft = getDateFieldDraft(task.startTime);
         setScheduleDate(startDraft.date);
         setScheduleTime(startDraft.time);
@@ -353,36 +358,58 @@ export function useInboxProcessingState({
         setReviewTimeDraft('');
     }, []);
 
+    const setScheduleDateOnly = useCallback(() => {
+        setScheduleTime('');
+        setScheduleTimeDraft('');
+    }, []);
+
+    const setDueDateOnly = useCallback(() => {
+        setDueTime('');
+        setDueTimeDraft('');
+    }, []);
+
+    const setReviewDateOnly = useCallback(() => {
+        setReviewTime('');
+        setReviewTimeDraft('');
+    }, []);
+
     const scheduleFields = useMemo<InboxProcessingScheduleFieldsControls>(() => ({
         start: {
             date: scheduleDate,
             timeDraft: scheduleTimeDraft,
+            hasTime: Boolean(scheduleTime),
             onDateChange: handleScheduleDateChange,
             onTimeDraftChange: setScheduleTimeDraft,
             onTimeCommit: handleScheduleTimeCommit,
             onClear: clearScheduleDate,
+            onDateOnly: setScheduleDateOnly,
         },
         due: {
             date: dueDate,
             timeDraft: dueTimeDraft,
+            hasTime: Boolean(dueTime),
             onDateChange: handleDueDateChange,
             onTimeDraftChange: setDueTimeDraft,
             onTimeCommit: handleDueTimeCommit,
             onClear: clearDueDate,
+            onDateOnly: setDueDateOnly,
         },
         review: {
             date: reviewDate,
             timeDraft: reviewTimeDraft,
+            hasTime: Boolean(reviewTime),
             onDateChange: handleReviewDateChange,
             onTimeDraftChange: setReviewTimeDraft,
             onTimeCommit: handleReviewTimeCommit,
             onClear: clearReviewDate,
+            onDateOnly: setReviewDateOnly,
         },
     }), [
         clearDueDate,
         clearReviewDate,
         clearScheduleDate,
         dueDate,
+        dueTime,
         dueTimeDraft,
         handleDueDateChange,
         handleDueTimeCommit,
@@ -391,9 +418,14 @@ export function useInboxProcessingState({
         handleScheduleDateChange,
         handleScheduleTimeCommit,
         reviewDate,
+        reviewTime,
         reviewTimeDraft,
         scheduleDate,
+        scheduleTime,
         scheduleTimeDraft,
+        setDueDateOnly,
+        setReviewDateOnly,
+        setScheduleDateOnly,
     ]);
 
     const timeEstimateOptions = useMemo<TimeEstimate[]>(() => {
@@ -456,6 +488,8 @@ export function useInboxProcessingState({
         setProjectTitleDraft,
         nextActionDraft,
         setNextActionDraft,
+        extraActionDrafts,
+        setExtraActionDrafts,
         customContext,
         setCustomContext,
         customTag,

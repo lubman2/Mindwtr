@@ -3,8 +3,10 @@ import {
   checkForUpdates,
   findPortableZipAsset,
   getFlatpakInstallChannel,
+  MS_STORE_UPDATES_URL,
   normalizeInstallSource,
 } from "./update-service";
+import tauriConfig from "../../src-tauri/tauri.conf.json";
 
 const jsonResponse = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), {
@@ -191,6 +193,74 @@ describe("update-service channel selection", () => {
     expect(result.latestVersion).toBe("1.3.0");
   });
 
+  it("normalizes scoop and chocolatey installs", () => {
+    expect(normalizeInstallSource("scoop")).toBe("scoop");
+    expect(normalizeInstallSource("SCOOP")).toBe("scoop");
+    expect(normalizeInstallSource("chocolatey")).toBe("chocolatey");
+    expect(normalizeInstallSource("choco")).toBe("chocolatey");
+  });
+
+  it("reports the GitHub release for scoop manual checks without a bucket lookup", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (
+        url.includes("api.github.com/repos/dongdongbh/Mindwtr/releases/latest")
+      ) {
+        return jsonResponse({
+          tag_name: "v1.9.0",
+          html_url: "https://github.com/dongdongbh/Mindwtr/releases/tag/v1.9.0",
+          body: "latest notes",
+          assets: [],
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkForUpdates("1.0.0", { installSource: "scoop" });
+
+    expect(result.hasUpdate).toBe(true);
+    expect(result.source).toBe("github-release");
+    expect(result.latestVersion).toBe("1.9.0");
+    // Only the GitHub API is contacted; no per-bucket guessing.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("pins chocolatey installs to the Chocolatey package version", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("community.chocolatey.org/api/v2/Packages()")) {
+        return new Response(
+          "<feed><entry><id>http://community.chocolatey.org/api/v2/Packages(Id='mindwtr',Version='1.1.0')</id></entry></feed>",
+          { status: 200 },
+        );
+      }
+      if (
+        url.includes("api.github.com/repos/dongdongbh/Mindwtr/releases/latest")
+      ) {
+        return jsonResponse({
+          tag_name: "v1.9.0",
+          html_url: "https://github.com/dongdongbh/Mindwtr/releases/tag/v1.9.0",
+          body: "latest notes",
+          assets: [],
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkForUpdates("1.0.0", {
+      installSource: "chocolatey",
+    });
+
+    expect(result.hasUpdate).toBe(true);
+    expect(result.source).toBe("chocolatey");
+    expect(result.latestVersion).toBe("1.1.0");
+    expect(result.releaseUrl).toBe(
+      "https://community.chocolatey.org/packages/mindwtr",
+    );
+  });
+
   it("normalizes flatpak branch installs while keeping the branch available for UI display", () => {
     expect(normalizeInstallSource("flatpak:test")).toBe("flatpak");
     expect(normalizeInstallSource("flatpak:master")).toBe("flatpak");
@@ -238,6 +308,44 @@ describe("update-service channel selection", () => {
       "https://example.com/mindwtr_1.2.0_windows_x64_portable.zip",
     );
     expect(normalizeInstallSource("portable")).toBe("portable");
+  });
+
+  it("uses Microsoft Store availability instead of GitHub for Microsoft Store installs", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (
+        url.includes("api.github.com/repos/dongdongbh/Mindwtr/releases/latest")
+      ) {
+        return jsonResponse({
+          tag_name: "v9.9.9",
+          html_url: "https://github.com/dongdongbh/Mindwtr/releases/tag/v9.9.9",
+          body: "github notes",
+          assets: [],
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkForUpdates("1.0.0", {
+      installSource: "microsoft-store",
+      microsoftStoreUpdateProvider: vi.fn().mockResolvedValue({
+        hasUpdate: false,
+        latestVersion: null,
+      }),
+    });
+
+    expect(result.hasUpdate).toBe(false);
+    expect(result.source).toBe("microsoft-store");
+    expect(result.latestVersion).toBe("1.0.0");
+    expect(result.releaseUrl).toBe(MS_STORE_UPDATES_URL);
+    expect(result.downloadUrl).toBeNull();
+  });
+
+  it("allows the Microsoft Store updates page through the Tauri shell scope", () => {
+    const openScope = tauriConfig.plugins.shell.open;
+
+    expect(new RegExp(openScope).test(MS_STORE_UPDATES_URL)).toBe(true);
   });
 
   it("prefers explicitly windows-named portable assets when multiple portable zips exist", () => {

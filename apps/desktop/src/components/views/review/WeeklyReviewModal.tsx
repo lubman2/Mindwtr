@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import {
     createAIProvider,
     DEFAULT_AREA_COLOR,
+    formatI18nTemplate,
     getStaleItems,
+    getUsedTaskTokens,
     isDueForReview,
     isTaskInActiveProject,
     parseQuickAddDateCommands,
@@ -13,22 +15,25 @@ import {
     type ExternalCalendarEvent,
     type ReviewSuggestion,
     useTaskStore,
+    type Project,
     type Task,
     type TaskStatus,
     type AIProviderId,
 } from '@mindwtr/core';
-import { Archive, ArrowRight, Calendar, Check, CheckSquare, ChevronLeft, Layers, MapPin, RefreshCw, Sparkles, X, type LucideIcon } from 'lucide-react';
+import { Archive, ArrowRight, Calendar, Check, CheckSquare, ChevronLeft, History, Layers, MapPin, RefreshCw, X, type LucideIcon } from 'lucide-react';
 
 import { TaskItem } from '../../TaskItem';
 import { ModalPortal } from '../../ModalPortal';
+import { MindSweepLauncher } from '../../MindSweepModal';
 import { PromptModal } from '../../PromptModal';
+import { InboxProcessor } from '../InboxProcessor';
 import { cn } from '../../../lib/utils';
 import { useLanguage } from '../../../contexts/language-context';
 import { buildAIConfig, isAIKeyRequired, loadAIKey } from '../../../lib/ai-config';
 import { fetchExternalCalendarEvents, summarizeExternalCalendarWarnings } from '../../../lib/external-calendar-events';
 import { useUiStore } from '../../../store/ui-store';
 
-type ReviewStep = 'inbox' | 'ai' | 'calendar' | 'waiting' | 'contexts' | 'projects' | 'someday' | 'completed';
+type ReviewStep = 'inbox' | 'stale' | 'calendar' | 'waiting' | 'contexts' | 'projects' | 'someday' | 'completed';
 type ReviewStepDefinition = {
     id: ReviewStep;
     title: string;
@@ -57,15 +62,20 @@ type WeeklyReviewGuideModalProps = {
 
 export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps) {
     const [currentStep, setCurrentStep] = useState<ReviewStep>('inbox');
+    const [isProcessing, setIsProcessing] = useState(false);
     const [expandedExternalDays, setExpandedExternalDays] = useState<Set<string>>(new Set());
     const [expandedContextGroups, setExpandedContextGroups] = useState<Set<string>>(new Set());
     const [projectTaskPrompt, setProjectTaskPrompt] = useState<{ projectId: string; projectTitle: string } | null>(null);
-    const { tasks, projects, areas, settings, batchUpdateTasks } = useTaskStore(
+    const { tasks, projects, areas, settings, addProject, updateProject, updateTask, deleteTask, batchUpdateTasks } = useTaskStore(
         (state) => ({
             tasks: state.tasks,
             projects: state.projects,
             areas: state.areas,
             settings: state.settings,
+            addProject: state.addProject,
+            updateProject: state.updateProject,
+            updateTask: state.updateTask,
+            deleteTask: state.deleteTask,
             batchUpdateTasks: state.batchUpdateTasks,
         }),
         shallow
@@ -74,6 +84,12 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
     const showToast = useUiStore((state) => state.showToast);
     const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
     const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+    const activeTasks = useMemo(
+        () => tasks.filter((task) => !task.deletedAt && task.status !== 'reference' && isTaskInActiveProject(task, projectMap)),
+        [projectMap, tasks],
+    );
+    const allContexts = useMemo(() => getUsedTaskTokens(activeTasks, (task) => task.contexts, { prefix: '@' }), [activeTasks]);
+    const allTags = useMemo(() => getUsedTaskTokens(activeTasks, (task) => task.tags, { prefix: '#' }), [activeTasks]);
     const { t } = useLanguage();
     const [aiSuggestions, setAiSuggestions] = useState<ReviewSuggestion[]>([]);
     const [aiSelectedIds, setAiSelectedIds] = useState<Set<string>>(new Set());
@@ -94,6 +110,17 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
             return acc;
         }, {} as Record<string, string>);
     }, [staleItems]);
+    const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+    const staleTaskEntries = useMemo(() => staleItems
+        .filter((item) => !item.id.startsWith('project:'))
+        .flatMap((item) => {
+            const task = taskById.get(item.id);
+            return task ? [{ daysStale: item.daysStale, task }] : [];
+        }), [staleItems, taskById]);
+    const staleProjectItems = useMemo(
+        () => staleItems.filter((item) => item.id.startsWith('project:')),
+        [staleItems],
+    );
     const calendarReviewItems = useMemo(() => {
         const now = new Date();
         const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -202,10 +229,8 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
             || Boolean(externalCalendarError);
         const list: ReviewStepDefinition[] = [
             { id: 'inbox', title: t('review.inboxStep'), description: t('review.inboxStepDesc'), icon: CheckSquare, hasWork: inboxTasks.length > 0 },
+            { id: 'stale', title: t('review.staleStep'), description: t('review.staleStepDesc'), icon: History, hasWork: staleItems.length > 0 },
         ];
-        if (aiEnabled) {
-            list.push({ id: 'ai', title: t('review.aiStep'), description: t('review.aiStepDesc'), icon: Sparkles, hasWork: staleItems.length > 0 });
-        }
         list.push(
             { id: 'calendar', title: t('review.calendarStep'), description: t('review.calendarStepDesc'), icon: Calendar, hasWork: calendarHasWork },
             { id: 'waiting', title: t('review.waitingStep'), description: t('review.waitingStepDesc'), icon: ArrowRight, hasWork: waitingTasks.length > 0 },
@@ -220,7 +245,6 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
         );
         return list;
     }, [
-        aiEnabled,
         calendarReviewItems.length,
         contextReviewGroups.length,
         externalCalendarError,
@@ -251,6 +275,12 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
             setCurrentStep(activeSteps[0]?.id ?? 'completed');
         }
     }, [activeSteps, currentStep]);
+
+    useEffect(() => {
+        if (displayedStep !== 'inbox' && isProcessing) {
+            setIsProcessing(false);
+        }
+    }, [displayedStep, isProcessing]);
 
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
@@ -345,10 +375,19 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
         </div>
     );
 
-    const isActionableSuggestion = (suggestion: ReviewSuggestion) => {
-        if (suggestion.id.startsWith('project:')) return false;
-        return suggestion.action === 'someday' || suggestion.action === 'archive';
+    const getSuggestionProjectId = (id: string) => (
+        id.startsWith('project:') ? id.slice('project:'.length) : null
+    );
+
+    const getSuggestionProjectStatus = (action: ReviewSuggestion['action']): Project['status'] | null => {
+        if (action === 'someday') return 'someday';
+        if (action === 'archive') return 'archived';
+        return null;
     };
+
+    const isActionableSuggestion = (suggestion: ReviewSuggestion) => (
+        suggestion.action === 'someday' || suggestion.action === 'archive'
+    );
 
     const toggleSuggestion = (id: string) => {
         setAiSelectedIds((prev) => {
@@ -399,9 +438,12 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
     };
 
     const applyAiSuggestions = async () => {
-        const updates = aiSuggestions
+        const selectedSuggestions = aiSuggestions
             .filter((suggestion) => aiSelectedIds.has(suggestion.id))
-            .filter(isActionableSuggestion)
+            .filter(isActionableSuggestion);
+
+        const taskUpdates = selectedSuggestions
+            .filter((suggestion) => !getSuggestionProjectId(suggestion.id))
             .map((suggestion) => {
                 if (suggestion.action === 'someday') {
                     return { id: suggestion.id, updates: { status: 'someday' as TaskStatus } };
@@ -413,8 +455,19 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
             })
             .filter(Boolean) as Array<{ id: string; updates: Partial<Task> }>;
 
-        if (updates.length === 0) return;
-        await batchUpdateTasks(updates);
+        const projectUpdates = selectedSuggestions
+            .map((suggestion) => {
+                const projectId = getSuggestionProjectId(suggestion.id);
+                const status = getSuggestionProjectStatus(suggestion.action);
+                return projectId && status ? { id: projectId, updates: { status } } : null;
+            })
+            .filter(Boolean) as Array<{ id: string; updates: Partial<Project> }>;
+
+        if (taskUpdates.length === 0 && projectUpdates.length === 0) return;
+        if (taskUpdates.length > 0) {
+            await batchUpdateTasks(taskUpdates);
+        }
+        await Promise.all(projectUpdates.map((update) => updateProject(update.id, update.updates)));
     };
 
     const openQuickAdd = (initialProps?: Partial<Task>) => {
@@ -454,7 +507,9 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
         const trimmed = value.trim();
         if (!trimmed) return;
 
-        const { title, props, invalidDateCommands } = parseQuickAddDateCommands(trimmed, new Date());
+        const { title, props, invalidDateCommands } = parseQuickAddDateCommands(trimmed, new Date(), {
+            preserveText: settings.quickAddAutoClean !== true,
+        });
         if (invalidDateCommands && invalidDateCommands.length > 0) {
             showToast(`${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`, 'error');
             return;
@@ -472,6 +527,16 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
             setProjectTaskPrompt(null);
         })();
     };
+
+    const renderMindSweepNudge = () => (
+        <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+                <div className="text-sm font-semibold text-foreground">{t('mindSweep.title')}</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('mindSweep.intro')}</p>
+            </div>
+            <MindSweepLauncher t={t} addTask={addTask} />
+        </div>
+    );
 
     const renderCalendarList = (items: CalendarReviewEntry[]) => {
         if (items.length === 0) {
@@ -560,6 +625,23 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                                 <span className="font-bold text-foreground">{inboxTasks.length}</span> {t('review.inboxZeroDesc')}
                             </p>
                         </div>
+                        {renderMindSweepNudge()}
+                        <InboxProcessor
+                            t={t}
+                            isInbox
+                            tasks={tasks}
+                            projects={projects}
+                            areas={areas}
+                            settings={settings}
+                            addTask={addTask}
+                            addProject={addProject}
+                            updateTask={updateTask}
+                            deleteTask={deleteTask}
+                            allContexts={allContexts}
+                            allTags={allTags}
+                            isProcessing={isProcessing}
+                            setIsProcessing={setIsProcessing}
+                        />
                         <div className="space-y-2">
                             {inboxTasks.length === 0 ? (
                                 <div className="text-center py-12 text-muted-foreground">
@@ -688,9 +770,41 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                 );
             }
 
-            case 'ai': {
+            case 'stale': {
                 return (
                     <div className="space-y-4">
+                        <p className="text-muted-foreground">{t('review.staleStepDesc')}</p>
+                        {staleItems.length === 0 ? (
+                            <div className="text-center py-12 text-muted-foreground">
+                                <p>{t('review.aiEmpty')}</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-2">
+                                {staleTaskEntries.map(({ daysStale, task }) => (
+                                    <div key={task.id} className="flex items-center gap-3">
+                                        <div className="flex-1 min-w-0">
+                                            <TaskItem task={task} showProjectBadgeInActions={false} />
+                                        </div>
+                                        <span className="shrink-0 text-xs text-muted-foreground whitespace-nowrap">
+                                            {formatI18nTemplate(t('review.staleDaysInactive'), { days: daysStale })}
+                                        </span>
+                                    </div>
+                                ))}
+                                {staleProjectItems.map((item) => (
+                                    <div key={item.id} className="border border-border rounded-lg p-3 flex items-center justify-between gap-3">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <Layers className="h-4 w-4 shrink-0 text-muted-foreground" />
+                                            <span className="text-sm font-medium truncate">{item.title}</span>
+                                        </div>
+                                        <span className="shrink-0 text-xs text-muted-foreground whitespace-nowrap">
+                                            {formatI18nTemplate(t('review.staleDaysInactive'), { days: item.daysStale })}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {aiEnabled && (
+                    <div className="space-y-4 border-t border-border pt-4">
                         <div className="flex items-center justify-between gap-4">
                             <div className="text-sm text-muted-foreground">
                                 {t('review.aiStepDesc')}
@@ -718,6 +832,8 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                             <div className="space-y-3">
                                 {aiSuggestions.map((suggestion) => {
                                     const actionable = isActionableSuggestion(suggestion);
+                                    const suggestionTitle = staleItemTitleMap[suggestion.id] || suggestion.id;
+                                    const actionLabel = t(`review.aiAction.${suggestion.action}`);
                                     return (
                                         <div
                                             key={suggestion.id}
@@ -733,6 +849,7 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                                                             ? "bg-primary text-primary-foreground border-primary"
                                                             : "border-border text-muted-foreground",
                                                     )}
+                                                    aria-label={`${suggestionTitle}: ${actionLabel}`}
                                                     aria-pressed={aiSelectedIds.has(suggestion.id)}
                                                 >
                                                     {aiSelectedIds.has(suggestion.id) ? <Check className="h-3 w-3" strokeWidth={3} /> : null}
@@ -742,9 +859,9 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                                             )}
                                             <div className="flex-1">
                                                 <div className="flex items-center gap-2">
-                                                    <span className="text-sm font-medium">{staleItemTitleMap[suggestion.id] || suggestion.id}</span>
+                                                    <span className="text-sm font-medium">{suggestionTitle}</span>
                                                     <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
-                                                        {t(`review.aiAction.${suggestion.action}`)}
+                                                        {actionLabel}
                                                     </span>
                                                 </div>
                                                 <div className="text-xs text-muted-foreground mt-1">{suggestion.reason}</div>
@@ -762,6 +879,8 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                                     </button>
                                 </div>
                             </div>
+                        )}
+                    </div>
                         )}
                     </div>
                 );
@@ -868,6 +987,9 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                         <p className="text-muted-foreground text-lg max-w-md mx-auto">
                             {t('review.completeDesc')}
                         </p>
+                        <div className="mx-auto max-w-lg text-left">
+                            {renderMindSweepNudge()}
+                        </div>
                         <button
                             onClick={onClose}
                             className="bg-primary text-primary-foreground px-8 py-3 rounded-lg text-lg font-medium hover:bg-primary/90 transition-colors"

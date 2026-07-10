@@ -77,6 +77,7 @@ const emptyData = (): AppData => ({
     projects: [],
     sections: [],
     areas: [],
+    people: [],
     settings: { deviceId: 'dev-local' },
 });
 
@@ -108,10 +109,13 @@ beforeEach(() => {
         projects: [],
         sections: [],
         areas: [],
+        people: [],
         _allTasks: [],
         _allProjects: [],
         _allSections: [],
         _allAreas: [],
+        _allPeople: [],
+        _peopleById: new Map(),
         settings: { deviceId: 'dev-local' },
         lastDataChangeAt: 0,
         error: null,
@@ -174,6 +178,31 @@ describe('local-data-watcher', () => {
         expect(useTaskStore.getState().tasks[0]?.id).toBe('mcp-1');
     });
 
+    it('ignores SQLite shared-memory events from read activity', async () => {
+        const watchers: Array<{ path: string; callback: (event: { path?: string; paths?: string[] }) => void }> = [];
+        const refreshStorageData = vi.fn();
+
+        __localDataWatcherTestUtils.setDependenciesForTests({
+            watchFile: async (path, callback) => {
+                watchers.push({ path, callback });
+                return () => undefined;
+            },
+            refreshStorageData,
+        });
+
+        await start('/tmp/mindwtr/data.json', '/tmp/mindwtr/mindwtr.db');
+
+        watchers[1]?.callback({ paths: ['/tmp/mindwtr/mindwtr.db-shm'] });
+        await flushScheduledTimers();
+
+        expect(refreshStorageData).not.toHaveBeenCalled();
+
+        watchers[1]?.callback({ paths: ['/tmp/mindwtr/mindwtr.db-wal'] });
+        await flushScheduledTimers();
+
+        expect(refreshStorageData).toHaveBeenCalledTimes(1);
+    });
+
     it('ignores SQLite watcher events caused by local SQLite writes', async () => {
         const watchers: Array<{ path: string; callback: (event: { path?: string; paths?: string[] }) => void }> = [];
         const refreshStorageData = vi.fn();
@@ -195,6 +224,82 @@ describe('local-data-watcher', () => {
         expect(refreshStorageData).not.toHaveBeenCalled();
 
         nowMs = 2100;
+        watchers[1]?.callback({ paths: ['/tmp/mindwtr/mindwtr.db-wal'] });
+        await flushScheduledTimers();
+
+        expect(refreshStorageData).not.toHaveBeenCalled();
+
+        nowMs = 15100;
+        watchers[1]?.callback({ paths: ['/tmp/mindwtr/mindwtr.db-wal'] });
+        await flushScheduledTimers();
+
+        expect(refreshStorageData).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not feed SQLite watcher loops when a refresh finds no data changes', async () => {
+        const watchers: Array<{ path: string; callback: (event: { path?: string; paths?: string[] }) => void }> = [];
+        const refreshStorageData = vi.fn();
+
+        __localDataWatcherTestUtils.setDependenciesForTests({
+            watchFile: async (path, callback) => {
+                watchers.push({ path, callback });
+                return () => undefined;
+            },
+            refreshStorageData,
+        });
+
+        await start('/tmp/mindwtr/data.json', '/tmp/mindwtr/mindwtr.db');
+
+        watchers[1]?.callback({ paths: ['/tmp/mindwtr/mindwtr.db-wal'] });
+        await flushScheduledTimers();
+
+        expect(refreshStorageData).toHaveBeenCalledTimes(1);
+
+        watchers[1]?.callback({ paths: ['/tmp/mindwtr/mindwtr.db-wal'] });
+        await flushScheduledTimers();
+
+        expect(refreshStorageData).toHaveBeenCalledTimes(1);
+
+        nowMs = 2100;
+        watchers[1]?.callback({ paths: ['/tmp/mindwtr/mindwtr.db-wal'] });
+        await flushScheduledTimers();
+
+        expect(refreshStorageData).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not treat sync bookkeeping-only SQLite refreshes as app data changes', async () => {
+        const watchers: Array<{ path: string; callback: (event: { path?: string; paths?: string[] }) => void }> = [];
+        const logInfo = vi.fn();
+        const refreshStorageData = vi.fn(async () => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                settings: {
+                    ...state.settings,
+                    lastSyncAt: '2026-01-01T00:00:00.000Z',
+                    lastSyncStatus: 'success',
+                },
+                lastDataChangeAt: 1,
+            }));
+        });
+
+        __localDataWatcherTestUtils.setDependenciesForTests({
+            watchFile: async (path, callback) => {
+                watchers.push({ path, callback });
+                return () => undefined;
+            },
+            refreshStorageData,
+            logInfo,
+        });
+
+        await start('/tmp/mindwtr/data.json', '/tmp/mindwtr/mindwtr.db');
+        logInfo.mockClear();
+
+        watchers[1]?.callback({ paths: ['/tmp/mindwtr/mindwtr.db-wal'] });
+        await flushScheduledTimers();
+
+        expect(refreshStorageData).toHaveBeenCalledTimes(1);
+        expect(logInfo).not.toHaveBeenCalledWith('[local-data-watcher] Refreshed after SQLite change');
+
         watchers[1]?.callback({ paths: ['/tmp/mindwtr/mindwtr.db-wal'] });
         await flushScheduledTimers();
 
@@ -371,6 +476,29 @@ describe('local-data-watcher', () => {
         expect(invokeMock.mock.calls.some(([command]) => command === 'save_data')).toBe(false);
         expect(saveCalls).toHaveLength(1);
         expect(saveCalls[0]?.tasks.some((task) => task.id === 'ext-2')).toBe(true);
+    });
+
+    it('preserves merged people when writing external data through the store', async () => {
+        externalData = {
+            ...emptyData(),
+            people: [
+                {
+                    id: 'person-1',
+                    name: 'Alex',
+                    createdAt: '2026-01-02T00:00:00.000Z',
+                    updatedAt: '2026-01-02T00:00:00.000Z',
+                },
+            ],
+        };
+
+        await __localDataWatcherTestUtils.triggerChangeForTests();
+        await flushScheduledTimers();
+
+        expect(saveCalls).toHaveLength(1);
+        expect(saveCalls[0]?.people?.some((person) => person.id === 'person-1')).toBe(true);
+        expect(useTaskStore.getState().people.some((person) => person.id === 'person-1')).toBe(true);
+        expect(useTaskStore.getState()._allPeople.some((person) => person.id === 'person-1')).toBe(true);
+        expect(useTaskStore.getState()._peopleById.get('person-1')?.name).toBe('Alex');
     });
 
     it('skips merge work when the external payload already matches the local snapshot', async () => {

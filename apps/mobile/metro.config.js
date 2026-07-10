@@ -52,6 +52,7 @@ config.watchFolders = Array.from(new Set([...defaultWatchFolders, workspaceRoot]
 config.resolver.blockList = [
     /apps\/desktop\/src-tauri\/target\/.*/,
     /apps\/mobile\/app\/.*\.(?:test|spec)\.[jt]sx?$/,
+    /(^|\/)\.worktrees\/.*/,
     /\.git\/.*/,
     /node_modules\/.*\/\.git\/.*/,
 ];

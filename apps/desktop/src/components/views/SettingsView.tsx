@@ -26,6 +26,7 @@ import {
   resolveDateLocaleTag,
   DEFAULT_ANTHROPIC_THINKING_BUDGET,
   safeFormatDate,
+  summarizeMergeStats,
   translateText,
   translateWithFallback,
   submitFeedbackSubmission,
@@ -79,6 +80,11 @@ import {
   setLocalApiServerConfig,
   type LocalApiServerStatus,
 } from "../../lib/local-api-server";
+import {
+  getDesktopRenderingConfig,
+  setDesktopRenderingConfig,
+  type DesktopRenderingConfig,
+} from "../../lib/desktop-rendering";
 import {
   dismissDesktopOnboardingHandoffHint,
   isDesktopOnboardingHandoffHintDismissed,
@@ -175,6 +181,7 @@ const SettingsAboutPage = lazy(
 
 const LANGUAGES: { id: Language; label: string; native: string }[] = [
   { id: "en", label: "English", native: "English" },
+  { id: "vi", label: "Vietnamese", native: "Tiếng Việt" },
   { id: "zh", label: "Chinese (Simplified)", native: "中文（简体）" },
   { id: "zh-Hant", label: "Chinese (Traditional)", native: "中文（繁體）" },
   { id: "es", label: "Spanish", native: "Español" },
@@ -186,6 +193,7 @@ const LANGUAGES: { id: Language; label: string; native: string }[] = [
   { id: "fr", label: "French", native: "Français" },
   { id: "pt", label: "Portuguese", native: "Português" },
   { id: "pl", label: "Polish", native: "Polski" },
+  { id: "cs", label: "Czech", native: "Čeština" },
   { id: "ko", label: "Korean", native: "한국어" },
   { id: "it", label: "Italian", native: "Italiano" },
   { id: "tr", label: "Turkish", native: "Türkçe" },
@@ -244,6 +252,7 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
   } = useKeybindings();
   const settings =
     useTaskStore((state) => state.settings) ?? ({} as AppData["settings"]);
+  const areas = useTaskStore((state) => state.areas);
   const updateSettings = useTaskStore((state) => state.updateSettings);
   const seedGettingStarted = useTaskStore((state) => state.seedGettingStarted);
   const visibleDataCount = useTaskStore((state) => (
@@ -284,6 +293,10 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
   const [networkProxyUrl, setNetworkProxyUrl] = useState(() =>
     normalizeProxyUrl(settings?.network?.proxyUrl),
   );
+  const [desktopRenderingConfig, setDesktopRenderingConfigState] = useState<DesktopRenderingConfig>({
+    disableHardwareAcceleration: false,
+  });
+  const [desktopRenderingBusy, setDesktopRenderingBusy] = useState(false);
   const notificationsEnabled = settings?.notificationsEnabled !== false;
   const startDateNotificationsEnabled =
     settings?.startDateNotificationsEnabled !== false;
@@ -332,6 +345,21 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
   useEffect(() => {
     if (!isTauri) return;
     let cancelled = false;
+    getDesktopRenderingConfig()
+      .then((config) => {
+        if (!cancelled) setDesktopRenderingConfigState(config);
+      })
+      .catch((error) => {
+        if (!cancelled) reportError("Failed to read desktop rendering setting", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isTauri]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let cancelled = false;
     getLocalApiServerStatus()
       .then((status) => {
         if (!cancelled) applyLocalApiStatus(status);
@@ -368,9 +396,12 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
     speechFieldStrategy,
     speechApiKey,
     speechOfflineReady,
+    speechOfflineModelPath,
+    speechOfflineEstimatedSize,
     speechOfflineSize,
     speechDownloadState,
     speechDownloadError,
+    speechDownloadProgress,
     onUpdateAISettings,
     onUpdateSpeechSettings,
     onProviderChange,
@@ -412,6 +443,21 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
     );
     return result;
   }, [language, translate]);
+
+  const handleDesktopRenderingToggle = useCallback(async (disableHardwareAcceleration: boolean) => {
+    if (!isTauri || desktopRenderingBusy) return;
+    setDesktopRenderingBusy(true);
+    try {
+      const config = await setDesktopRenderingConfig({ disableHardwareAcceleration });
+      setDesktopRenderingConfigState(config);
+      showSaved();
+    } catch (error) {
+      reportError("Failed to update desktop rendering setting", error);
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setDesktopRenderingBusy(false);
+    }
+  }, [desktopRenderingBusy, isTauri, showSaved, showToast]);
 
   const handleSaveNetworkProxy = useCallback(async () => {
     const trimmedProxyUrl = normalizeProxyUrl(networkProxyUrl);
@@ -712,9 +758,7 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
   const lastSyncDisplay = lastSyncAt
     ? safeFormatDate(lastSyncAt, "PPpp", lastSyncAt)
     : t.lastSyncNever;
-  const conflictCount =
-    (lastSyncStats?.tasks.conflicts || 0) +
-    (lastSyncStats?.projects.conflicts || 0);
+  const conflictCount = summarizeMergeStats(lastSyncStats).conflicts;
   const weeklyReviewEnabled = settings?.weeklyReviewEnabled === true;
   const weeklyReviewTime = settings?.weeklyReviewTime || "18:00";
   const weeklyReviewDay = Number.isFinite(settings?.weeklyReviewDay)
@@ -986,6 +1030,8 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
     setCloudUrl,
     cloudToken,
     setCloudToken,
+    cloudRememberToken,
+    setCloudRememberToken,
     cloudAllowInsecureHttp,
     setCloudAllowInsecureHttp,
     cloudProvider,
@@ -1015,6 +1061,7 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
     handleExportBackup,
     handleRestoreBackup,
     handleImportTodoist,
+    handleImportTickTick,
     handleImportDgt,
     handleImportOmniFocus,
   } = useSyncSettings({
@@ -1035,6 +1082,8 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
     setObsidianInboxFile,
     obsidianTaskNotesIncludeArchived,
     setObsidianTaskNotesIncludeArchived,
+    obsidianDataviewMetadataEnabled,
+    setObsidianDataviewMetadataEnabled,
     obsidianNewTaskFormat,
     setObsidianNewTaskFormat,
     obsidianLastScannedAt,
@@ -1110,12 +1159,13 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
           updateSettings={updateSettings}
           showSaved={showSaved}
           autoArchiveDays={autoArchiveDays}
+          areas={areas}
         />
       );
     }
 
     if (page === "manage") {
-      return <SettingsManagePage t={t} translate={translate} />;
+      return <SettingsManagePage t={t} translate={translate} requestConfirmation={requestConfirmation} />;
     }
 
     if (page === "ai") {
@@ -1144,9 +1194,12 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
           speechFieldStrategy={speechFieldStrategy}
           speechApiKey={speechApiKey}
           speechOfflineReady={speechOfflineReady}
+          speechOfflineModelPath={speechOfflineModelPath}
+          speechOfflineEstimatedSize={speechOfflineEstimatedSize}
           speechOfflineSize={speechOfflineSize}
           speechDownloadState={speechDownloadState}
           speechDownloadError={speechDownloadError}
+          speechDownloadProgress={speechDownloadProgress}
           onUpdateAISettings={onUpdateAISettings}
           onUpdateSpeechSettings={onUpdateSpeechSettings}
           onProviderChange={onProviderChange}
@@ -1216,6 +1269,7 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
           obsidianScanFoldersText={obsidianScanFoldersText}
           obsidianInboxFile={obsidianInboxFile}
           obsidianTaskNotesIncludeArchived={obsidianTaskNotesIncludeArchived}
+          obsidianDataviewMetadataEnabled={obsidianDataviewMetadataEnabled}
           obsidianNewTaskFormat={obsidianNewTaskFormat}
           obsidianLastScannedAt={obsidianLastScannedAt}
           obsidianHasVaultMarker={obsidianHasVaultMarker}
@@ -1230,6 +1284,9 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
           onObsidianInboxFileChange={setObsidianInboxFile}
           onObsidianTaskNotesIncludeArchivedChange={
             setObsidianTaskNotesIncludeArchived
+          }
+          onObsidianDataviewMetadataEnabledChange={
+            setObsidianDataviewMetadataEnabled
           }
           onObsidianNewTaskFormatChange={setObsidianNewTaskFormat}
           onBrowseObsidianVault={onBrowseObsidianVault}
@@ -1274,6 +1331,7 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
           onTestWebDavConnection={handleTestWebDavConnection}
           cloudUrl={cloudUrl}
           cloudToken={cloudToken}
+          cloudRememberToken={cloudRememberToken}
           cloudAllowInsecureHttp={cloudAllowInsecureHttp}
           cloudProvider={cloudProvider}
           dropboxAppKey={dropboxAppKey}
@@ -1285,6 +1343,7 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
           dropboxTestState={dropboxTestState}
           onCloudUrlChange={setCloudUrl}
           onCloudTokenChange={setCloudToken}
+          onCloudRememberTokenChange={setCloudRememberToken}
           onCloudAllowInsecureHttpChange={setCloudAllowInsecureHttp}
           onCloudProviderChange={handleSetCloudProvider}
           onSaveCloud={handleSaveCloud}
@@ -1318,6 +1377,7 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
           onExportBackup={handleExportBackup}
           onRestoreBackup={handleRestoreBackup}
           onImportTodoist={handleImportTodoist}
+          onImportTickTick={handleImportTickTick}
           onImportDgt={handleImportDgt}
           onImportOmniFocus={handleImportOmniFocus}
         />
@@ -1340,6 +1400,7 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
           onExportBackup={handleExportBackup}
           onRestoreBackup={handleRestoreBackup}
           onImportTodoist={handleImportTodoist}
+          onImportTickTick={handleImportTickTick}
           onImportDgt={handleImportDgt}
           onImportOmniFocus={handleImportOmniFocus}
           onAddGettingStartedContent={handleAddGettingStartedContent}
@@ -1362,11 +1423,14 @@ export function SettingsView({ initialPage, onboardingHintPage, onResumeOnboardi
           localApiBusy={localApiBusy}
           localApiPortError={localApiPortError}
           networkProxyUrl={networkProxyUrl}
+          desktopRenderingConfig={desktopRenderingConfig}
+          desktopRenderingBusy={desktopRenderingBusy}
           onLocalApiToggle={handleLocalApiToggle}
           onLocalApiPortInputChange={setLocalApiPortInput}
           onLocalApiPortCommit={handleLocalApiPortCommit}
           onNetworkProxyUrlChange={setNetworkProxyUrl}
           onSaveNetworkProxy={handleSaveNetworkProxy}
+          onDesktopRenderingToggle={handleDesktopRenderingToggle}
         />
       );
     }

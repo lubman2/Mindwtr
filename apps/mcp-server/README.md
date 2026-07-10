@@ -1,8 +1,8 @@
 # Mindwtr MCP Server
 
-Local MCP server for Mindwtr. Connect MCP clients (Claude Desktop, etc.) to your local Mindwtr SQLite database.
+MCP server for Mindwtr. Connect MCP clients (Claude Desktop, etc.) to either your local Mindwtr SQLite database or a self-hosted Mindwtr Cloud endpoint in read-only mode.
 
-This is a **local stdio** server (no HTTP). MCP clients launch it as a subprocess and talk over JSON‑RPC on stdin/stdout.
+This is a **stdio** server (no hosted HTTP endpoint). MCP clients launch it as a subprocess and talk over JSON-RPC on stdin/stdout.
 
 ---
 
@@ -19,8 +19,9 @@ On desktop, the app shows the exact local data path in **Settings -> Sync -> Loc
 ## Requirements
 
 - Node.js 18+ (for the MCP client that spawns the server)
+- npm package installs use better-sqlite3, a native SQLite addon. If no prebuilt binary is available for your platform, npm needs a working C/C++ build toolchain and Python for node-gyp.
 - Bun (recommended for development in this repo)
-- A local Mindwtr database (`mindwtr.db`)
+- A local Mindwtr database (`mindwtr.db`) for local mode, or a self-hosted Mindwtr Cloud URL and bearer token for read-only Cloud mode
 
 Default database locations:
 - Linux: `~/.local/share/mindwtr/mindwtr.db`
@@ -33,16 +34,73 @@ Additional macOS path for sandboxed builds:
 If `mindwtr.db` is missing but `data.json` exists in the same desktop data folder, the MCP server will bootstrap a fresh SQLite database from that local data snapshot on first start.
 Desktop Settings → Sync → Local Data shows the exact storage location used by the app.
 
-You can override with:
+You can override local mode with:
 - `--db /path/to/mindwtr.db`
 - `MINDWTR_DB_PATH=/path/to/mindwtr.db`
 - `MINDWTR_DB=/path/to/mindwtr.db`
+
+For self-hosted Cloud mode, use:
+- `--cloud-url https://mindwtr.example.com` or `MINDWTR_MCP_CLOUD_URL`
+- `--cloud-token <token>` or `MINDWTR_MCP_CLOUD_TOKEN`
+- optional `--cloud-allow-insecure-http=true` for trusted private HTTP deployments
 
 ---
 
 ## Start / Stop
 
-### 1) Run directly from the repo (recommended)
+### Run from npm
+
+After installing the published package, run it directly:
+
+```bash
+mindwtr-mcp --db "/path/to/mindwtr.db"
+```
+
+Or let an MCP client launch it through npx:
+
+```json
+{
+  "mcpServers": {
+    "mindwtr": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mindwtr-mcp",
+        "--db",
+        "~/.local/share/mindwtr/mindwtr.db"
+      ]
+    }
+  }
+}
+```
+
+The npm package is read-only by default. Add `--write` only when you explicitly want add/update/complete/delete tools enabled against a local database.
+
+### Read-only self-hosted Cloud mode
+
+Use Cloud mode when you run your own Mindwtr Cloud server and want MCP read tools without pointing the helper at a local SQLite database:
+
+```bash
+npx -y mindwtr-mcp \
+  --cloud-url "https://mindwtr.example.com" \
+  --cloud-token "$MINDWTR_TOKEN"
+```
+
+Or pass the same values through environment variables:
+
+```bash
+MINDWTR_MCP_CLOUD_URL="https://mindwtr.example.com" \
+MINDWTR_MCP_CLOUD_TOKEN="$MINDWTR_TOKEN" \
+npx -y mindwtr-mcp
+```
+
+Cloud mode uses the self-hosted Cloud API and is always read-only. It reads the current `/v1/data` snapshot, exposes task/project/section/area/person read tools through MCP, and returns `read_only` for write tools. Do not pass `--write` with `--cloud-url`.
+
+This does not make Mindwtr Cloud itself a hosted MCP server. It is still the same stdio helper, backed by a Cloud URL that you operate.
+
+For private HTTP test deployments, local/private HTTP URLs are allowed by the shared Cloud client rules. Use `--cloud-allow-insecure-http=true` only for a self-hosted endpoint you intentionally trust.
+
+### Run directly from the repo
 
 ```bash
 # from repo root (read-only by default)
@@ -71,20 +129,20 @@ bun run mindwtr:mcp -- --db "/path/to/mindwtr.db" --nowait
 
 Note: When an MCP client launches the server, it keeps stdin open, so the server should remain connected.
 
-### 2) Run without the helper script
+### Run without the helper script
 
 ```bash
-bun run --filter mindwtr-mcp-server dev -- --db "/path/to/mindwtr.db"
+bun run --filter mindwtr-mcp dev -- --db "/path/to/mindwtr.db"
 ```
 
 Stop:
 - Press `Ctrl+C` in the terminal.
 
-### 3) Build and run the binary entry (Node)
+### Build and run the binary entry (Node)
 
 ```bash
 # from repo root
-bun run --filter mindwtr-mcp-server build
+bun run --filter mindwtr-mcp build
 node apps/mcp-server/dist/index.js --db "/path/to/mindwtr.db"
 ```
 
@@ -95,16 +153,16 @@ Stop:
 
 ## Why `mindwtr-mcp` is “command not found”
 
-`mindwtr-mcp` is the **package binary**. It only exists after you build the package and run it via Node, or when you use the Bun workspace script.
+`mindwtr-mcp` is the package binary. It exists after installing the npm package globally, after an MCP client launches it through `npx`, or after you build the source package and run it with Node.
 
-Use one of these instead:
+Use one of these source-tree options instead:
 
 ```bash
 # ✅ works immediately
 bun run mindwtr:mcp -- --db "/path/to/mindwtr.db"
 
 # ✅ build then run
-bun run --filter mindwtr-mcp-server build
+bun run --filter mindwtr-mcp build
 node apps/mcp-server/dist/index.js --db "/path/to/mindwtr.db"
 ```
 
@@ -150,7 +208,7 @@ MCP clients run the server as a subprocess. You point them to **the command** an
       "args": [
         "/absolute/path/to/Mindwtr/apps/mcp-server/src/index.ts",
         "--db",
-        "/home/dd/.local/share/mindwtr/mindwtr.db"
+        "~/.local/share/mindwtr/mindwtr.db"
       ]
     }
   }
@@ -163,7 +221,7 @@ If your client doesn't support Bun, build first and use Node:
 
 ```bash
 # Build once
-cd /path/to/Mindwtr && bun run --filter mindwtr-mcp-server build
+cd /path/to/Mindwtr && bun run --filter mindwtr-mcp build
 ```
 
 ```json
@@ -174,7 +232,7 @@ cd /path/to/Mindwtr && bun run --filter mindwtr-mcp-server build
       "args": [
         "/absolute/path/to/Mindwtr/apps/mcp-server/dist/index.js",
         "--db",
-        "/home/dd/.local/share/mindwtr/mindwtr.db"
+        "~/.local/share/mindwtr/mindwtr.db"
       ]
     }
   }
@@ -215,7 +273,7 @@ Or edit `~/.claude.json` directly:
           "args": [
             "/absolute/path/to/Mindwtr/apps/mcp-server/src/index.ts",
             "--db",
-            "/home/dd/.local/share/mindwtr/mindwtr.db",
+            "~/.local/share/mindwtr/mindwtr.db",
             "--write"
           ]
         }
@@ -323,6 +381,10 @@ Any MCP-compatible client can work as long as it can launch a **stdio** server w
   - Input: `{ id, includeDeleted? }`
 - `mindwtr_list_areas`
   - Input: `{}`
+- `mindwtr_list_people`
+  - Input: `{ includeDeleted? }`
+- `mindwtr_get_person`
+  - Input: `{ id, includeDeleted? }`
 - `mindwtr_get_task`
   - Input: `{ id, includeDeleted? }`
 - `mindwtr_add_task` **(requires `--write`)**
@@ -353,8 +415,16 @@ Any MCP-compatible client can work as long as it can launch a **stdio** server w
   - Input: `{ id, name?, color?, icon? }`
 - `mindwtr_delete_area` **(requires `--write`)**
   - Input: `{ id }`
+- `mindwtr_add_person` **(requires `--write`)**
+  - Input: `{ name, note?, referenceLink? }`
+- `mindwtr_update_person` **(requires `--write`)**
+  - Input: `{ id, name?, note?, referenceLink? }`
+- `mindwtr_rename_person` **(requires `--write`)**
+  - Input: `{ id, name, updateTasks? }`
+- `mindwtr_delete_person` **(requires `--write`)**
+  - Input: `{ id }`
 
-All tools return JSON text payloads with the resulting task, project, section, area, or collection payload.
+All tools return JSON text payloads with the resulting task, project, section, area, person, or collection payload.
 
 ---
 
@@ -364,7 +434,7 @@ All tools return JSON text payloads with the resulting task, project, section, a
 
 1) Start the server (read‑only):
 ```bash
-bun run mindwtr:mcp -- --db "/home/dd/.local/share/mindwtr/mindwtr.db"
+bun run mindwtr:mcp -- --db "~/.local/share/mindwtr/mindwtr.db"
 ```
 
 2) Connect via your MCP client and run:
@@ -372,7 +442,7 @@ bun run mindwtr:mcp -- --db "/home/dd/.local/share/mindwtr/mindwtr.db"
 
 If you want to test writes, restart with `--write`:
 ```bash
-bun run mindwtr:mcp -- --db "/home/dd/.local/share/mindwtr/mindwtr.db" --write
+bun run mindwtr:mcp -- --db "~/.local/share/mindwtr/mindwtr.db" --write
 ```
 
 Then test:
@@ -385,12 +455,18 @@ Then test:
 - `mindwtr_list_projects`
 - `mindwtr_get_project` (use returned project id)
 - `mindwtr_list_areas`
+- `mindwtr_list_people`
 - `mindwtr_add_project`
 - `mindwtr_update_project`
 - `mindwtr_delete_project`
 - `mindwtr_add_area`
 - `mindwtr_update_area`
 - `mindwtr_delete_area`
+- `mindwtr_add_person`
+- `mindwtr_update_person`
+- `mindwtr_rename_person`
+- `mindwtr_get_person` (use returned person id)
+- `mindwtr_delete_person`
 - `mindwtr_list_tasks` with `dueDateFrom`, `dueDateTo`, `sortBy`, `sortOrder`
 
 If the list returns tasks and add/complete works, the server is healthy.
@@ -422,11 +498,12 @@ claude mcp add mindwtr -- \
 
 ## Safety & Concurrency
 
-- The server uses **SQLite WAL mode** and a 5s busy timeout.
-- Writes will fail if the DB is locked; clients should retry.
+- The server uses **SQLite WAL mode**. Read-only tools can run while the desktop app is open.
+- Write tools fail fast on SQLite writer locks, then retry the whole Mindwtr write operation. Each retry reloads current data before applying the requested change, so a delayed MCP write does not keep working from a stale pre-lock snapshot.
 - Writes are **disabled by default**. Use `--write` to enable edits.
 - Write operations go through the shared **@mindwtr/core** store to enforce business rules (both Bun and Node).
 - SQL is reserved for read-heavy paths (list/search) where performance matters.
+- Do not point a separate container/server deployment at the same local storage or sync data while the desktop app is also writing. That creates independent writers outside the local SQLite coordination path and is unsupported.
 
 ---
 

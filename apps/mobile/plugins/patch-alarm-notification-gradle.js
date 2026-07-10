@@ -152,6 +152,49 @@ const applyAlarmTimingPatchToSource = (original) => {
         Calendar calendar = Calendar.getInstance();
 `
   );
+  const firedNotificationIdMarker = 'int firedNotificationId = alarm.getAlarmId();';
+  if (!next.includes(firedNotificationIdMarker)) {
+    const withFiredNotificationId = next.replace(
+      `    void snoozeAlarm(AlarmModel alarm) {
+        Calendar calendar = Calendar.getInstance();
+
+        this.stopAlarmSound();
+`,
+      `    void snoozeAlarm(AlarmModel alarm) {
+        Calendar calendar = Calendar.getInstance();
+
+        this.stopAlarmSound();
+
+        int firedNotificationId = alarm.getAlarmId();
+`
+    );
+    if (withFiredNotificationId !== next) {
+      next = withFiredNotificationId;
+    }
+  }
+  if (
+    next.includes(firedNotificationIdMarker)
+    && !next.includes('int snoozedAlarmRowId = getAlarmDB().insert(alarm);')
+  ) {
+    // Snooze persists the rescheduled reminder as its own alarm row instead of
+    // mutating the original. The JS reschedule cycle only tracks alarms it
+    // scheduled (keyed by their original row id); the past-due task would
+    // otherwise be reaped on the next cycle, cancelling the snoozed alarm
+    // before it fires. An independent row is invisible to that reconciliation.
+    next = next.replace(
+      `        getAlarmDB().update(alarm);
+
+        Log.e(TAG, "snooze data - " + alarm.toString());
+`,
+      `        int snoozedAlarmRowId = getAlarmDB().insert(alarm);
+        alarm.setId(snoozedAlarmRowId);
+
+        getNotificationManager().cancel(firedNotificationId);
+
+        Log.e(TAG, "snooze data - " + alarm.toString());
+`
+    );
+  }
 
   return next;
 };
@@ -210,6 +253,19 @@ const applyAlarmReminderBehaviorPatchToSource = (original) => {
 };
 
 const applyAlarmReminderBehaviorPatch = (filePath) => patchFile(filePath, applyAlarmReminderBehaviorPatchToSource);
+
+const applyAlarmLockScreenPrivacyPatchToSource = (original) => {
+  // Android's lock screen "hide sensitive content" setting only redacts
+  // notifications marked VISIBILITY_PRIVATE; the library ships reminders as
+  // VISIBILITY_PUBLIC, which keeps task titles visible on the locked phone
+  // no matter what the user chose (#823).
+  return original.replace(
+    '.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)',
+    '.setVisibility(NotificationCompat.VISIBILITY_PRIVATE)'
+  );
+};
+
+const applyAlarmLockScreenPrivacyPatch = (filePath) => patchFile(filePath, applyAlarmLockScreenPrivacyPatchToSource);
 
 const applyAlarmAudioInterfacePatchToSource = (original) => {
   return original.replace(
@@ -626,7 +682,6 @@ API_AVAILABLE(ios(10.0)) {
 const applyAlarmIosCompleteActionPatch = (filePath) => patchFile(filePath, applyAlarmIosCompleteActionPatchToSource);
 
 const logPatchedCandidate = (label, candidate) => {
-  // eslint-disable-next-line no-console
   console.log(`[${label}] patched ${candidate}`);
 };
 
@@ -778,6 +833,9 @@ function withAlarmNotificationGradlePatch(config) {
         if (applyAlarmReminderBehaviorPatch(candidate)) {
           logPatchedCandidate('alarm-reminder-behavior-patch', candidate);
         }
+        if (applyAlarmLockScreenPrivacyPatch(candidate)) {
+          logPatchedCandidate('alarm-lock-screen-privacy-patch', candidate);
+        }
         if (applyAlarmCompleteUtilPatch(candidate)) {
           logPatchedCandidate('alarm-complete-action-util-patch', candidate);
         }
@@ -837,6 +895,7 @@ module.exports.__testables = {
   applyAlarmDuplicateToastPatchToSource,
   applyAlarmTimingPatchToSource,
   applyAlarmReminderBehaviorPatchToSource,
+  applyAlarmLockScreenPrivacyPatchToSource,
   applyAlarmAudioInterfacePatchToSource,
   applyAlarmDismissReceiverPatchToSource,
   applyAlarmReceiverPatchToSource,

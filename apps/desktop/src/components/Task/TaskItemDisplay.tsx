@@ -1,7 +1,8 @@
-import { AlertTriangle, Calendar as CalendarIcon, Tag, Trash2, ArrowRight, Repeat, Check, Clock, Timer, Paperclip, RotateCcw, Copy, MapPin, Hourglass, Star, Zap, MoreHorizontal } from 'lucide-react';
+import { AlertTriangle, Calendar as CalendarIcon, Tag, Trash2, ArrowRight, Repeat, Check, Clock, Timer, Link2, Paperclip, RotateCcw, Copy, MapPin, History, Hourglass, Play, Zap, MoreHorizontal } from 'lucide-react';
 import type { Area, Attachment, Project, RangeSelectionOptions, Task, TaskStatus, RecurrenceRule, RecurrenceStrategy, Language } from '@mindwtr/core';
-import { DEFAULT_AREA_COLOR, formatTimeEstimateLabel, getChecklistProgress, getRecurrenceCountValue, getRecurrenceUntilValue, getTaskAgeLabel, getTaskDateCoherenceIssues, getTaskStaleness, getTaskUrgency, hasTimeComponent, parseRRuleString, safeFormatDate, resolveTaskTextDirection, tFallback } from '@mindwtr/core';
+import { DEFAULT_AREA_COLOR, formatRecurrenceLabel, formatTimeEstimateLabel, getChecklistProgress, getInlineMarkdownPreview, getRecurringTaskPreviewDate, getTaskAgeLabel, getTaskDateCoherenceIssues, getTaskStaleness, getTaskUrgency, hasTimeComponent, safeFormatDate, resolveTaskTextDirection, tFallback } from '@mindwtr/core';
 import { cn } from '../../lib/utils';
+import { useBareFileReferenceCheck } from '../../lib/attachment-reference';
 import { getAttachmentDisplayTitle } from '../../lib/attachment-utils';
 import { getContextColor } from '../../lib/context-color';
 import { MetadataBadge } from '../ui/MetadataBadge';
@@ -9,17 +10,21 @@ import { AttachmentProgressIndicator } from '../AttachmentProgressIndicator';
 import { RichMarkdown } from '../RichMarkdown';
 import { InlineMarkdown } from '../Markdown';
 import type { KeyboardEvent, MouseEvent, ReactNode } from 'react';
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { isImageAttachment } from './task-item-attachment-utils';
 import { AttachmentImage } from './AttachmentImage';
+import { FocusStarIcon } from '../FocusStarIcon';
 
 interface TaskItemDisplayActions {
     onToggleSelect?: (options?: RangeSelectionOptions) => void;
     onToggleView: () => void;
     onEdit: () => void;
+    onRenameTitle?: (title: string) => void;
     onDelete: () => void;
     onDuplicate: () => void;
     onStatusChange: (status: TaskStatus) => void;
+    onRequestBackdatedComplete?: () => void;
+    onEditCompletedAt?: () => void;
     onOpenQuickActions?: (event: MouseEvent<HTMLButtonElement>) => void;
     onOpenProject?: (projectId: string) => void;
     onOpenContextToken?: (token: string) => void;
@@ -32,6 +37,10 @@ interface TaskItemDisplayActions {
         title: string;
         ariaLabel: string;
         alwaysVisible?: boolean;
+    };
+    pomodoroQuickStart?: {
+        onStart: () => void;
+        sessionCount: number;
     };
 }
 
@@ -50,6 +59,7 @@ interface TaskItemDisplayProps {
     recurrenceStrategy: RecurrenceStrategy;
     prioritiesEnabled: boolean;
     timeEstimatesEnabled: boolean;
+    timeSpentEnabled?: boolean;
     isStagnant: boolean;
     showQuickDone: boolean;
     showStatusSelect?: boolean;
@@ -63,6 +73,7 @@ interface TaskItemDisplayProps {
     showTaskAge?: boolean;
     showHoverHint?: boolean;
     projectDeadlineLabel?: string;
+    renameRequestToken?: number;
     t: (key: string) => string;
 }
 
@@ -78,6 +89,13 @@ const getUrgencyColor = (task: Task) => {
 
 const formatTimeEstimate = formatTimeEstimateLabel;
 
+const formatTimeSpent = (minutes: number) => {
+    const hrs = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    if (hrs <= 0) return `${mins}m`;
+    return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+};
+
 export const TaskItemDisplay = memo(function TaskItemDisplay({
     task,
     language,
@@ -89,10 +107,9 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
     quickActionsOpen = false,
     actions,
     visibleAttachments,
-    recurrenceRule,
-    recurrenceStrategy,
     prioritiesEnabled,
     timeEstimatesEnabled,
+    timeSpentEnabled = false,
     isStagnant,
     showQuickDone,
     showStatusSelect = true,
@@ -106,44 +123,49 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
     showTaskAge = false,
     showHoverHint = true,
     projectDeadlineLabel,
+    renameRequestToken = 0,
     t,
 }: TaskItemDisplayProps) {
     const {
         onToggleSelect,
         onToggleView,
         onEdit,
+        onRenameTitle,
         onDelete,
         onDuplicate,
         onStatusChange,
+        onRequestBackdatedComplete,
+        onEditCompletedAt,
         onOpenQuickActions,
         onOpenProject,
         onOpenContextToken,
         openAttachment,
         onToggleChecklistItem,
         focusToggle,
+        pomodoroQuickStart,
     } = actions;
+    const pomodoroQuickStartTitle = pomodoroQuickStart
+        ? tFallback(t, 'pomodoro.startForTask', 'Start focus session')
+            + (pomodoroQuickStart.sessionCount > 0
+                ? ` · ${tFallback(t, 'pomodoro.sessionsDone', 'Focus sessions completed')}: ${pomodoroQuickStart.sessionCount}`
+                : '')
+        : '';
     const isReference = task.status === 'reference';
     const checklistProgress = isReference ? null : getChecklistProgress(task);
-    const recurrenceCount = getRecurrenceCountValue(task.recurrence);
-    const recurrenceUntil = getRecurrenceUntilValue(task.recurrence);
-    const recurrenceInterval = task.recurrence && typeof task.recurrence === 'object' && task.recurrence.rrule
-        ? parseRRuleString(task.recurrence.rrule).interval
-        : undefined;
-    const recurrenceLabel = recurrenceRule
-        ? [
-            `${t(`recurrence.${recurrenceRule}`)}${recurrenceStrategy === 'fluid' ? ` · ${t('recurrence.afterCompletionShort')}` : ''}`,
-            recurrenceRule === 'weekly' && recurrenceInterval && recurrenceInterval > 1
-                ? `${t('recurrence.repeatEvery')} ${recurrenceInterval} ${t('recurrence.weekUnit')}`
-                : undefined,
-            recurrenceRule === 'monthly' && recurrenceInterval && recurrenceInterval > 1
-                ? `${t('recurrence.repeatEvery')} ${recurrenceInterval} ${t('recurrence.monthUnit')}`
-                : undefined,
-            recurrenceUntil ? `${t('recurrence.endsOnDate')} ${safeFormatDate(recurrenceUntil, 'P')}` : undefined,
-            recurrenceCount ? `${t('recurrence.endsAfterCount')} ${recurrenceCount} ${t('recurrence.occurrenceUnit')}` : undefined,
-        ].filter(Boolean).join(' · ')
+    const recurrenceLabel = formatRecurrenceLabel({ recurrence: task.recurrence, t });
+    const projectedRecurrenceDateLabel = recurrenceLabel
+        ? safeFormatDate(getRecurringTaskPreviewDate(task), 'PP')
         : '';
+    const recurrencePreviewLabel = recurrenceLabel && projectedRecurrenceDateLabel
+        ? `${recurrenceLabel} · ${tFallback(t, 'recurrence.nextCalendarPreview', 'Next calendar preview')}: ${projectedRecurrenceDateLabel}`
+        : recurrenceLabel;
     const ageLabel = getTaskAgeLabel(task.createdAt, language);
+    const isBareFileReference = useBareFileReferenceCheck();
     const showCompactMeta = compactMetaEnabled && !isViewOpen;
+    const descriptionPreview = useMemo(
+        () => getInlineMarkdownPreview(task.description ?? ''),
+        [task.description],
+    );
     const showAgeBadge = showTaskAge && task.status !== 'done' && Boolean(ageLabel);
     const completionTimestamp = task.status === 'done' || task.status === 'archived'
         ? task.completedAt || task.updatedAt
@@ -163,7 +185,7 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
         || task.dueDate
         || dateIssueLabel
         || task.location
-        || recurrenceRule
+        || recurrencePreviewLabel
         || (prioritiesEnabled && task.priority)
         || (!isReference && task.energyLevel)
         || task.assignedTo
@@ -198,6 +220,23 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
             clearClickTimer();
         };
     }, []);
+    const [renameDraft, setRenameDraft] = useState<string | null>(null);
+    const canInlineRename = !readOnly && !selectionMode && Boolean(onRenameTitle);
+    // Rename is requested from the quick-actions menu (TaskItem bumps the token);
+    // double-click stays reserved for opening the full editor.
+    const lastRenameTokenRef = useRef(renameRequestToken);
+    useEffect(() => {
+        if (renameRequestToken === lastRenameTokenRef.current) return;
+        lastRenameTokenRef.current = renameRequestToken;
+        if (canInlineRename) setRenameDraft(task.title);
+    }, [renameRequestToken, canInlineRename, task.title]);
+    const commitInlineRename = () => {
+        if (renameDraft === null) return;
+        const next = renameDraft.replace(/\s+/g, ' ').trim();
+        setRenameDraft(null);
+        if (next && next !== task.title) onRenameTitle?.(next);
+    };
+    const cancelInlineRename = () => setRenameDraft(null);
     const handleTitleClick = (event: MouseEvent<HTMLButtonElement>) => {
         if (selectionMode) {
             onToggleSelect?.({ range: event.shiftKey });
@@ -209,6 +248,7 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
             return;
         }
         if (!readOnly && event.detail >= 2) {
+            event.stopPropagation();
             clearClickTimer();
             onEdit();
             return;
@@ -219,8 +259,9 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
             clickTimerRef.current = null;
         }, 180);
     };
-    const handleTitleDoubleClick = () => {
+    const handleTitleDoubleClick = (event: MouseEvent<HTMLButtonElement>) => {
         if (selectionMode || readOnly) return;
+        event.stopPropagation();
         clearClickTimer();
         onEdit();
     };
@@ -331,12 +372,30 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
         && task.status !== 'reference';
     const renderCompletionMetadataBadge = () => {
         if (!completionLabel) return null;
-        return (
+        const badge = (
             <MetadataBadge
                 variant="info"
                 icon={Check}
                 label={`${tFallback(t, 'list.done', 'Completed')}: ${completionLabel}`}
             />
+        );
+        // Done/archived rows are readOnly by design, but correcting the completion
+        // timestamp is exactly for those rows — only selection mode disables it.
+        if (!onEditCompletedAt || selectionMode) return badge;
+        const editCompletedAtLabel = tFallback(t, 'task.editCompletedAt', 'Edit completion time');
+        return (
+            <button
+                type="button"
+                onClick={(event) => {
+                    event.stopPropagation();
+                    onEditCompletedAt();
+                }}
+                title={editCompletedAtLabel}
+                aria-label={editCompletedAtLabel}
+                className="rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 hover:opacity-80 transition-opacity"
+            >
+                {badge}
+            </button>
         );
     };
     const renderProjectDeadlineMetadataBadge = () => {
@@ -401,11 +460,11 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                     label={task.location}
                 />
             )}
-            {recurrenceRule && (
+            {recurrencePreviewLabel && (
                 <MetadataBadge
                     variant="info"
                     icon={Repeat}
-                    label={recurrenceLabel}
+                    label={recurrencePreviewLabel}
                 />
             )}
             {prioritiesEnabled && task.priority && (
@@ -473,12 +532,55 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                     label={formatTimeEstimate(task.timeEstimate)}
                 />
             )}
+            {timeSpentEnabled && Boolean(task.timeSpentMinutes) && (
+                <MetadataBadge
+                    variant="estimate"
+                    icon={History}
+                    label={formatTimeSpent(task.timeSpentMinutes as number)}
+                    ariaLabel={`${t('taskEdit.timeSpentLabel')}: ${formatTimeSpent(task.timeSpentMinutes as number)}`}
+                />
+            )}
         </div>
     );
     const overlayDragHandle = actionsOverlay && !!dragHandle;
     const overlayQuickDone = actionsOverlay && showQuickDoneButton;
     const inlineLeftControls = !actionsOverlay && (showQuickDoneButton || dragHandle);
     const showActionTags = !actionsOverlay && !isViewOpen && task.tags.length > 0;
+
+    // Inbox items are unprocessed captures, not a done/not-done checklist, so the
+    // quick-complete check stays hidden at rest and only reveals on row hover (for the
+    // 2-minute rule). Actionable lists (next, projects, focus) show it at rest.
+    const isInboxItem = task.status === 'inbox';
+    // Waiting/Someday tasks promote to Next instead of completing — the natural
+    // transition when an item unblocks, matching the mobile swipe action.
+    const quickActionIsPromote = task.status === 'waiting' || task.status === 'someday';
+    const canBackdateComplete = !quickActionIsPromote && Boolean(onRequestBackdatedComplete);
+    const quickDoneButton = (
+        <button
+            type="button"
+            onClick={(event) => {
+                event.stopPropagation();
+                onStatusChange(quickActionIsPromote ? 'next' : 'done');
+            }}
+            onContextMenu={canBackdateComplete ? (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onRequestBackdatedComplete?.();
+            } : undefined}
+            title={canBackdateComplete
+                ? tFallback(t, 'task.completeBackdateHint', 'Right-click to complete with a different time')
+                : undefined}
+            aria-label={quickActionIsPromote ? t('status.next') : t('status.done')}
+            className={cn(
+                quickActionIsPromote
+                    ? "text-sky-400 hover:text-sky-300 p-1 rounded hover:bg-sky-500/20"
+                    : "text-emerald-400 hover:text-emerald-300 p-1 rounded hover:bg-emerald-500/20",
+                isInboxItem && "opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity",
+            )}
+        >
+            {quickActionIsPromote ? <ArrowRight className="w-4 h-4" /> : <Check className="w-4 h-4" />}
+        </button>
+    );
 
     return (
         <div className={cn("task-item-display flex-1 min-w-0 flex items-start gap-3", actionsOverlay && "relative")}>
@@ -495,17 +597,7 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                     className="absolute left-4 top-2 flex items-center z-10"
                     onPointerDown={(event) => event.stopPropagation()}
                 >
-                    <button
-                        type="button"
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            onStatusChange('done');
-                        }}
-                        aria-label={t('status.done')}
-                        className="text-emerald-400 hover:text-emerald-300 p-1 rounded hover:bg-emerald-500/20"
-                    >
-                        <Check className="w-4 h-4" />
-                    </button>
+                    {quickDoneButton}
                 </div>
             )}
             <div className={cn("task-item-display__main flex min-w-0 flex-1 items-start gap-2")}>
@@ -517,19 +609,7 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                         )}
                     >
                         {dragHandle}
-                        {showQuickDoneButton && (
-                            <button
-                                type="button"
-                                onClick={(event) => {
-                                    event.stopPropagation();
-                                    onStatusChange('done');
-                                }}
-                                aria-label={t('status.done')}
-                                className="text-emerald-400 hover:text-emerald-300 p-1 rounded hover:bg-emerald-500/20"
-                            >
-                                <Check className="w-4 h-4" />
-                            </button>
-                        )}
+                        {showQuickDoneButton && quickDoneButton}
                     </div>
                 )}
                 <div
@@ -546,6 +626,35 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                         aria-label={t('common.edit')}
                         tabIndex={-1}
                     />
+                    {renameDraft !== null ? (
+                        <input
+                            type="text"
+                            value={renameDraft}
+                            autoFocus
+                            onFocus={(event) => event.currentTarget.select()}
+                            onChange={(event) => setRenameDraft(event.target.value)}
+                            onClick={(event) => event.stopPropagation()}
+                            onDoubleClick={(event) => event.stopPropagation()}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Enter') {
+                                    event.preventDefault();
+                                    commitInlineRename();
+                                } else if (event.key === 'Escape') {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    cancelInlineRename();
+                                }
+                            }}
+                            onBlur={commitInlineRename}
+                            aria-label={tFallback(t, 'task.renameTitle', 'Rename task')}
+                            className={cn(
+                                "w-full rounded border border-border bg-background px-0.5 py-0.5 font-semibold text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40",
+                                dense ? "text-sm" : "text-base",
+                                isRtl && "text-right"
+                            )}
+                            dir={resolvedDirection}
+                        />
+                    ) : (
                     <button
                         type="button"
                         onClick={handleTitleClick}
@@ -572,6 +681,19 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                             {task.title}
                         </div>
                     </button>
+                    )}
+                    {showCompactMeta && descriptionPreview && (
+                        <div
+                            className={cn(
+                                "task-item-display__description-preview mt-0.5 truncate text-xs font-normal text-muted-foreground",
+                                (overlayDragHandle || overlayQuickDone) && "pl-12",
+                                isRtl && "text-right"
+                            )}
+                            dir={resolvedDirection}
+                        >
+                            <InlineMarkdown markdown={descriptionPreview} interactiveLinks={false} />
+                        </div>
+                    )}
                     {showCompactMeta && hasMetadata && renderMetadataRow(cn(
                         "gap-2 text-muted-foreground",
                         dense ? "mt-0.5" : "mt-1",
@@ -593,11 +715,12 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                             {task.description && (
                                 <div
                                     className={cn(
-                                        "font-normal text-muted-foreground mt-1 w-full break-words",
+                                        "font-normal text-muted-foreground mt-1 w-full break-words select-text cursor-text",
                                         dense ? "text-xs" : "text-sm",
                                         isRtl && "text-right"
                                     )}
                                     dir={resolvedDirection}
+                                    onMouseDown={(event) => event.stopPropagation()}
                                 >
                                     <RichMarkdown markdown={task.description} />
                                 </div>
@@ -646,9 +769,11 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                                     ) : null}
                                     {otherAttachments.map((attachment) => {
                                         const displayTitle = getAttachmentDisplayTitle(attachment);
-                                        const fullTitle = attachment.kind === 'link' ? attachment.uri : attachment.title;
+                                        const isPointer = attachment.kind === 'link' || isBareFileReference(attachment);
+                                        const fullTitle = isPointer ? attachment.uri : attachment.title;
                                         return (
                                             <div key={attachment.id} className="flex items-center gap-2">
+                                                {isPointer && <Link2 className="w-3 h-3 shrink-0" aria-hidden="true" />}
                                                 <button
                                                     type="button"
                                                     onClick={(e) => {
@@ -718,10 +843,11 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
             {!selectionMode && (
                 <div
                     className={cn(
-                        "task-item-display__actions relative flex items-center gap-2",
+                        "task-item-display__actions relative z-20 flex shrink-0 items-center gap-2",
                         actionsOverlay && "absolute top-1 right-1 z-10"
                     )}
                     onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
                 >
                     {showActionTags && (
                         <div className="flex items-center gap-1 max-w-[240px] overflow-hidden">
@@ -745,6 +871,25 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                             {renderProjectBadge()}
                         </div>
                     )}
+                    {pomodoroQuickStart && (
+                        <button
+                            type="button"
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                pomodoroQuickStart.onStart();
+                            }}
+                            title={pomodoroQuickStartTitle}
+                            aria-label={pomodoroQuickStartTitle}
+                            className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-primary p-1 rounded hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 inline-flex items-center gap-0.5"
+                        >
+                            <Play className="w-4 h-4" />
+                            {pomodoroQuickStart.sessionCount > 0 && (
+                                <span className="text-[10px] font-medium tabular-nums">
+                                    {pomodoroQuickStart.sessionCount}
+                                </span>
+                            )}
+                        </button>
+                    )}
                     {focusToggle && (
                         <button
                             type="button"
@@ -765,7 +910,7 @@ export const TaskItemDisplay = memo(function TaskItemDisplay({
                                         : "text-muted-foreground/30 cursor-not-allowed"
                             )}
                         >
-                            <Star className={cn("w-4 h-4", focusToggle.isFocused && "fill-current")} />
+                            <FocusStarIcon className="w-4 h-4" filled={focusToggle.isFocused} />
                         </button>
                     )}
                     {onOpenQuickActions && (

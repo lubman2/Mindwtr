@@ -1,10 +1,135 @@
 use crate::*;
 
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow},
+};
+
 const QUICK_ADD_WINDOW_WIDTH: f64 = 620.0;
 const QUICK_ADD_WINDOW_HEIGHT: f64 = 420.0;
 const GNOME_INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 const GNOME_COLOR_SCHEME_KEY: &str = "color-scheme";
 const GNOME_GTK_THEME_KEY: &str = "gtk-theme";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuickAddFocusPolicy {
+    RestoreMacosApplication,
+    RestoreWindowsForegroundWindow,
+    None,
+}
+
+fn quick_add_focus_policy_for_os(os: &str) -> QuickAddFocusPolicy {
+    match os {
+        "macos" => QuickAddFocusPolicy::RestoreMacosApplication,
+        "windows" => QuickAddFocusPolicy::RestoreWindowsForegroundWindow,
+        _ => QuickAddFocusPolicy::None,
+    }
+}
+
+fn current_quick_add_focus_policy() -> QuickAddFocusPolicy {
+    quick_add_focus_policy_for_os(std::env::consts::OS)
+}
+
+#[cfg(target_os = "macos")]
+fn capture_macos_previous_application_pid() -> Option<i32> {
+    let pid = unsafe { mindwtr_macos_frontmost_application_pid() };
+    (pid > 0).then_some(pid as i32)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_macos_previous_application_pid() -> Option<i32> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn webview_window_hwnd(window: &tauri::WebviewWindow) -> Option<isize> {
+    window.hwnd().ok().map(|hwnd| hwnd.0 as isize)
+}
+
+#[cfg(target_os = "windows")]
+fn capture_windows_previous_foreground_hwnd(window: &tauri::WebviewWindow) -> Option<isize> {
+    let foreground = unsafe { GetForegroundWindow() } as isize;
+    if foreground == 0 || Some(foreground) == webview_window_hwnd(window) {
+        return None;
+    }
+    Some(foreground)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn capture_windows_previous_foreground_hwnd(_window: &tauri::WebviewWindow) -> Option<isize> {
+    None
+}
+
+fn capture_quick_add_focus_snapshot(window: &tauri::WebviewWindow) -> QuickAddFocusSnapshot {
+    match current_quick_add_focus_policy() {
+        QuickAddFocusPolicy::RestoreMacosApplication => QuickAddFocusSnapshot {
+            macos_pid: capture_macos_previous_application_pid(),
+            windows_hwnd: None,
+        },
+        QuickAddFocusPolicy::RestoreWindowsForegroundWindow => QuickAddFocusSnapshot {
+            macos_pid: None,
+            windows_hwnd: capture_windows_previous_foreground_hwnd(window),
+        },
+        QuickAddFocusPolicy::None => QuickAddFocusSnapshot::default(),
+    }
+}
+
+fn remember_quick_add_focus(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let snapshot = capture_quick_add_focus_snapshot(window);
+    let state = app.state::<QuickAddFocusState>();
+    if let Ok(mut guard) = state.0.lock() {
+        *guard = snapshot;
+    };
+}
+
+fn take_quick_add_focus_snapshot(app: &tauri::AppHandle) -> QuickAddFocusSnapshot {
+    let state = app.state::<QuickAddFocusState>();
+    let Ok(mut guard) = state.0.lock() else {
+        return QuickAddFocusSnapshot::default();
+    };
+    let snapshot = *guard;
+    *guard = QuickAddFocusSnapshot::default();
+    snapshot
+}
+
+#[cfg(target_os = "macos")]
+fn restore_macos_application(pid: i32) {
+    if pid > 0 {
+        unsafe { mindwtr_macos_activate_application(pid as _) };
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restore_macos_application(_pid: i32) {}
+
+#[cfg(target_os = "windows")]
+fn restore_windows_foreground_window(hwnd: isize) {
+    if hwnd != 0 {
+        unsafe {
+            let _ = SetForegroundWindow(hwnd as HWND);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restore_windows_foreground_window(_hwnd: isize) {}
+
+fn restore_quick_add_focus(snapshot: QuickAddFocusSnapshot) {
+    match current_quick_add_focus_policy() {
+        QuickAddFocusPolicy::RestoreMacosApplication => {
+            if let Some(pid) = snapshot.macos_pid {
+                restore_macos_application(pid);
+            }
+        }
+        QuickAddFocusPolicy::RestoreWindowsForegroundWindow => {
+            if let Some(hwnd) = snapshot.windows_hwnd {
+                restore_windows_foreground_window(hwnd);
+            }
+        }
+        QuickAddFocusPolicy::None => {}
+    }
+}
 
 fn normalize_gsettings_output(value: &str) -> String {
     value
@@ -262,6 +387,7 @@ pub(crate) fn create_quick_add_window(app: &tauri::AppHandle) -> Result<(), Stri
     .shadow(false)
     .always_on_top(true)
     .skip_taskbar(true)
+    .focused(false)
     .visible(false)
     .build()
     .map(|_| ())
@@ -314,12 +440,29 @@ fn center_quick_add_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow
     }
 }
 
+pub(crate) fn hide_quick_add_window_for_app(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(QUICK_ADD_WINDOW_LABEL) {
+        window
+            .hide()
+            .map_err(|error| format!("Failed to hide quick add window: {error}"))?;
+    }
+    let snapshot = take_quick_add_focus_snapshot(app);
+    restore_quick_add_focus(snapshot);
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn hide_quick_add_window(app: tauri::AppHandle) -> Result<(), String> {
+    hide_quick_add_window_for_app(&app)
+}
+
 pub(crate) fn show_quick_add_window(app: &tauri::AppHandle) {
     if let Ok(mut pending_target) = app.state::<QuickAddPending>().0.lock() {
         *pending_target = Some(QUICK_ADD_TARGET_WINDOW.to_string());
     }
 
     if let Some(window) = app.get_webview_window(QUICK_ADD_WINDOW_LABEL) {
+        remember_quick_add_focus(app, &window);
         let _ = window.set_skip_taskbar(true);
         let _ = window.unminimize();
         center_quick_add_window(app, &window);
@@ -401,6 +544,26 @@ mod tests {
         assert_eq!(
             quick_add_window_physical_size(2.0),
             tauri::PhysicalSize::new(1240, 840)
+        );
+    }
+
+    #[test]
+    fn quick_add_focus_policy_is_platform_specific() {
+        assert_eq!(
+            quick_add_focus_policy_for_os("macos"),
+            QuickAddFocusPolicy::RestoreMacosApplication
+        );
+        assert_eq!(
+            quick_add_focus_policy_for_os("windows"),
+            QuickAddFocusPolicy::RestoreWindowsForegroundWindow
+        );
+        assert_eq!(
+            quick_add_focus_policy_for_os("linux"),
+            QuickAddFocusPolicy::None
+        );
+        assert_eq!(
+            quick_add_focus_policy_for_os("freebsd"),
+            QuickAddFocusPolicy::None
         );
     }
 }

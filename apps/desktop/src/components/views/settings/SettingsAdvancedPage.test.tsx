@@ -18,11 +18,16 @@ const baseProps: Parameters<typeof SettingsAdvancedPage>[0] = {
     localApiBusy: false,
     localApiPortError: '',
     networkProxyUrl: '',
+    desktopRenderingConfig: {
+        disableHardwareAcceleration: false,
+    },
+    desktopRenderingBusy: false,
     onLocalApiToggle: vi.fn(),
     onLocalApiPortInputChange: vi.fn(),
     onLocalApiPortCommit: vi.fn(),
     onNetworkProxyUrlChange: vi.fn(),
     onSaveNetworkProxy: vi.fn(),
+    onDesktopRenderingToggle: vi.fn(),
 };
 
 describe('SettingsAdvancedPage', () => {
@@ -57,6 +62,20 @@ describe('SettingsAdvancedPage', () => {
 
         expect(onLocalApiPortInputChange).toHaveBeenCalledWith('4567');
         expect(onLocalApiPortCommit).toHaveBeenCalled();
+    });
+
+    it('toggles software rendering fallback', () => {
+        const onDesktopRenderingToggle = vi.fn();
+        const { getByRole } = render(
+            <SettingsAdvancedPage
+                {...baseProps}
+                onDesktopRenderingToggle={onDesktopRenderingToggle}
+            />,
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Use software rendering' }));
+
+        expect(onDesktopRenderingToggle).toHaveBeenCalledWith(true);
     });
 
     it('keeps proxy settings folded until opened', () => {

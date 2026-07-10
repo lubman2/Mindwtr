@@ -3,6 +3,7 @@ import {
     Alert,
     Dimensions,
     findNodeHandle,
+    type FlatList,
     Keyboard,
     Modal,
     KeyboardAvoidingView,
@@ -10,7 +11,6 @@ import {
     type NativeSyntheticEvent,
     Platform,
     ScrollView,
-    type ScrollViewProps,
     Text,
     TextInput,
     TouchableOpacity,
@@ -19,8 +19,8 @@ import {
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
+import { GripVertical } from 'lucide-react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { NestableScrollContainer } from 'react-native-draggable-flatlist';
 import {
     type Attachment,
     getAttachmentDisplayTitle,
@@ -29,6 +29,7 @@ import {
     type MarkdownToolbarResult,
     type Project,
     type ProjectSequenceTaskCue,
+    type Section,
     type Task,
     type TaskSortBy,
     getSequentialProjectTaskCues,
@@ -37,17 +38,24 @@ import {
 } from '@mindwtr/core';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ThemeColors } from '@/hooks/use-theme-colors';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
 import { KeyboardAccessoryHost } from '../../components/keyboard-accessory-host';
 import { ExpandedMarkdownEditor } from '../../components/expanded-markdown-editor';
 import { MarkdownFormatToolbar } from '../../components/markdown-format-toolbar';
 import { MarkdownReferenceAutocomplete } from '../../components/markdown-reference-autocomplete';
 import { MarkdownText } from '../../components/markdown-text';
 import { TaskList } from '../../components/task-list';
+import { TaskListBulkBar, type TaskListBulkBarProps } from '../task-list/TaskListBulkBar';
+import { TaskListSortModal } from '../task-list/TaskListSortModal';
 import { AttachmentProgressIndicator } from '../../components/AttachmentProgressIndicator';
 import { projectsScreenStyles as styles } from './projects-screen.styles';
+import { getAndroidKeyboardFrame } from '../../lib/android-keyboard-frame';
+
+const PROJECT_TASK_SORT_OPTIONS: TaskSortBy[] = ['default', 'due', 'start', 'review', 'title', 'created', 'created-desc'];
 
 type ProjectDetailModalProps = {
     addProjectFileAttachment: () => void | Promise<void>;
+    addSection: (projectId: string, title: string) => Promise<Section | null> | Section | null;
     closeProjectDetail: () => void;
     commitSelectedProjectNotes: () => void;
     formatProjectDate: (value: string | undefined, fallback: string) => string;
@@ -67,6 +75,8 @@ type ProjectDetailModalProps = {
     onOpenAreaPicker: () => void;
     onOpenTagPicker: () => void;
     onRemoveProjectAttachment: (id: string) => void;
+    deleteSection: (id: string) => Promise<unknown> | unknown;
+    reorderSections: (projectId: string, orderedIds: string[]) => Promise<unknown> | unknown;
     onSetLinkInput: (value: string) => void;
     onSetLinkModalVisible: (visible: boolean) => void;
     onSetNotesExpanded: React.Dispatch<React.SetStateAction<boolean>>;
@@ -79,14 +89,16 @@ type ProjectDetailModalProps = {
     onSetShowReviewPicker: React.Dispatch<React.SetStateAction<boolean>>;
     onSetShowStatusMenu: React.Dispatch<React.SetStateAction<boolean>>;
     onToggleShowCompletedTasks: () => void;
-    onProjectTaskSortByChange: (sortBy: Extract<TaskSortBy, 'default' | 'due'>) => void;
+    onProjectTaskSortByChange: (sortBy: TaskSortBy) => void;
     onDownloadAttachment: (attachment: Attachment) => void | Promise<void>;
     onOpenAttachment: (attachment: Attachment) => void | Promise<void>;
+    onOpenProjectQuickAdd: (project: Project) => void;
     overlayVisible: boolean;
     presentationStyle: 'pageSheet' | 'fullScreen';
-    projectTaskSortBy: Extract<TaskSortBy, 'default' | 'due'>;
+    projectTaskSortBy: TaskSortBy;
     selectedProjectAreaName: string;
     selectedProject: Project | null;
+    selectedProjectSections?: Section[];
     selectedProjectTasks?: Task[];
     selectedProjectNotes: string;
     selectedProjectNotesDirection: 'ltr' | 'rtl';
@@ -104,91 +116,328 @@ type ProjectDetailModalProps = {
     t: (key: string) => string;
     tc: ThemeColors;
     updateProject: (id: string, updates: Partial<Project>) => void;
+    updateSection: (id: string, updates: Partial<Section>) => Promise<unknown> | unknown;
 };
 
-function getAndroidKeyboardFrame(event: { endCoordinates?: { screenY?: number; height?: number } }) {
-    const windowHeight = Dimensions.get('window').height;
-    const screenHeight = Dimensions.get('screen').height;
-    const endCoords = event.endCoordinates;
-    const eventScreenY = typeof endCoords?.screenY === 'number' ? endCoords.screenY : undefined;
-    const eventHeight = typeof endCoords?.height === 'number' ? endCoords.height : undefined;
-    const keyboardTop = eventScreenY ?? (typeof eventHeight === 'number' ? Math.max(0, screenHeight - eventHeight) : windowHeight);
-    const screenInset = typeof eventScreenY === 'number' ? Math.max(0, screenHeight - eventScreenY) : 0;
-    const windowInset = typeof eventScreenY === 'number' ? Math.max(0, windowHeight - eventScreenY) : 0;
-    const heightInset = typeof eventHeight === 'number' ? Math.max(0, eventHeight) : 0;
-    const inset = Math.max(screenInset, windowInset, heightInset);
+function ProjectSectionManagerModal({
+    addSection,
+    canManage,
+    deleteSection,
+    onClose,
+    projectId,
+    reorderSections,
+    sections,
+    t,
+    tc,
+    updateSection,
+    visible,
+}: {
+    addSection: (projectId: string, title: string) => Promise<Section | null> | Section | null;
+    canManage: boolean;
+    deleteSection: (id: string) => Promise<unknown> | unknown;
+    onClose: () => void;
+    projectId: string;
+    reorderSections: (projectId: string, orderedIds: string[]) => Promise<unknown> | unknown;
+    sections: Section[];
+    t: (key: string) => string;
+    tc: ThemeColors;
+    updateSection: (id: string, updates: Partial<Section>) => Promise<unknown> | unknown;
+    visible: boolean;
+}) {
+    const filledButton = useFilledButtonColors();
+    const [draft, setDraft] = React.useState('');
+    const [editingSectionId, setEditingSectionId] = React.useState<string | null>(null);
+    const [saving, setSaving] = React.useState(false);
+    const sectionTitle = tFallback(t, 'projects.sectionsLabel', 'Sections');
+    const addSectionLabel = tFallback(t, 'projects.addSection', 'Add Section');
+    const sectionPlaceholder = tFallback(t, 'projects.sectionPlaceholder', 'Section title');
+    const saveLabel = tFallback(t, 'common.save', 'Save');
+    const editLabel = tFallback(t, 'common.edit', 'Edit');
+    const cancelLabel = tFallback(t, 'common.cancel', 'Cancel');
+    const deleteLabel = tFallback(t, 'common.delete', 'Delete');
+    const moveUpLabel = tFallback(t, 'projects.moveUp', 'Move up');
+    const moveDownLabel = tFallback(t, 'projects.moveDown', 'Move down');
+    const noneLabel = tFallback(t, 'common.none', 'None');
+    const deleteConfirm = tFallback(
+        t,
+        'projects.deleteSectionConfirm',
+        'Are you sure you want to delete this section?'
+    );
+    const sectionReorderFailed = tFallback(t, 'projects.sectionReorderFailed', 'Failed to reorder sections.');
+    const editing = sections.find((section) => section.id === editingSectionId);
+    const showEditor = canManage && editingSectionId !== null;
 
-    return {
-        keyboardTop,
-        inset,
-        visible: inset > 0 || keyboardTop < windowHeight,
-    };
+    React.useEffect(() => {
+        if (visible) return;
+        setDraft('');
+        setEditingSectionId(null);
+        setSaving(false);
+    }, [visible]);
+
+    const openCreate = React.useCallback(() => {
+        setEditingSectionId('');
+        setDraft('');
+    }, []);
+
+    const openEdit = React.useCallback((section: Section) => {
+        setEditingSectionId(section.id);
+        setDraft(section.title);
+    }, []);
+
+    const closeEditor = React.useCallback(() => {
+        setEditingSectionId(null);
+        setDraft('');
+    }, []);
+
+    const saveSection = React.useCallback(async () => {
+        if (!canManage || saving) return;
+        const title = draft.trim();
+        if (!title) return;
+        setSaving(true);
+        try {
+            if (editingSectionId) {
+                await updateSection(editingSectionId, { title });
+            } else {
+                await addSection(projectId, title);
+            }
+            closeEditor();
+        } finally {
+            setSaving(false);
+        }
+    }, [addSection, canManage, closeEditor, draft, editingSectionId, projectId, saving, updateSection]);
+
+    const confirmDeleteSection = React.useCallback((section: Section) => {
+        if (!canManage) return;
+        Alert.alert(
+            sectionTitle,
+            deleteConfirm,
+            [
+                { text: cancelLabel, style: 'cancel' },
+                {
+                    text: deleteLabel,
+                    style: 'destructive',
+                    onPress: () => {
+                        void Promise.resolve(deleteSection(section.id));
+                        if (editingSectionId === section.id) closeEditor();
+                    },
+                },
+            ],
+        );
+    }, [canManage, cancelLabel, closeEditor, deleteConfirm, deleteLabel, deleteSection, editingSectionId, sectionTitle]);
+
+    const moveSection = React.useCallback((sectionId: string, offset: -1 | 1) => {
+        if (!canManage) return;
+        const currentIndex = sections.findIndex((section) => section.id === sectionId);
+        const nextIndex = currentIndex + offset;
+        if (currentIndex < 0 || nextIndex < 0 || nextIndex >= sections.length) return;
+
+        const nextIds = sections.map((section) => section.id);
+        const [moved] = nextIds.splice(currentIndex, 1);
+        if (!moved) return;
+        nextIds.splice(nextIndex, 0, moved);
+
+        void Promise.resolve(reorderSections(projectId, nextIds)).catch(() => {
+            Alert.alert(sectionTitle, sectionReorderFailed);
+        });
+    }, [canManage, projectId, reorderSections, sectionReorderFailed, sectionTitle, sections]);
+
+    return (
+        <Modal
+            visible={visible}
+            transparent
+            animationType="fade"
+            onRequestClose={onClose}
+            accessibilityViewIsModal
+        >
+            <View style={styles.overlay}>
+                <View style={[styles.sectionManagerCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
+                    <View style={styles.sectionManagerHeader}>
+                        <Text style={[styles.sectionManagerTitle, { color: tc.text }]} accessibilityRole="header">
+                            {sectionTitle}
+                        </Text>
+                        <TouchableOpacity
+                            accessibilityRole="button"
+                            accessibilityLabel={cancelLabel}
+                            onPress={onClose}
+                            style={styles.sectionManagerCloseButton}
+                        >
+                            <Ionicons name="close" size={20} color={tc.secondaryText} />
+                        </TouchableOpacity>
+                    </View>
+
+                    {canManage ? (
+                        <TouchableOpacity
+                            accessibilityRole="button"
+                            accessibilityLabel={addSectionLabel}
+                            onPress={openCreate}
+                            style={[styles.sectionManagerAddButton, { backgroundColor: filledButton.backgroundColor, borderColor: filledButton.backgroundColor }]}
+                            testID="project-section-add-button"
+                        >
+                            <Ionicons name="add" size={16} color={filledButton.textColor ?? tc.onTint} />
+                            <Text style={[styles.sectionManagerAddButtonText, { color: filledButton.textColor ?? tc.onTint }]} numberOfLines={1}>
+                                {addSectionLabel}
+                            </Text>
+                        </TouchableOpacity>
+                    ) : null}
+
+                    {showEditor ? (
+                        <View style={[styles.sectionEditor, { backgroundColor: tc.filterBg, borderColor: tc.border }]}>
+                            <Text style={[styles.sectionEditorLabel, { color: tc.secondaryText }]}>
+                                {editing ? sectionTitle : addSectionLabel}
+                            </Text>
+                            <TextInput
+                                value={draft}
+                                onChangeText={setDraft}
+                                placeholder={sectionPlaceholder}
+                                placeholderTextColor={tc.secondaryText}
+                                style={[styles.sectionEditorInput, { backgroundColor: tc.inputBg, borderColor: tc.border, color: tc.text }]}
+                                autoCapitalize="sentences"
+                                returnKeyType="done"
+                                onSubmitEditing={saveSection}
+                                testID="project-section-title-input"
+                            />
+                            <View style={styles.sectionEditorActions}>
+                                <TouchableOpacity
+                                    accessibilityRole="button"
+                                    accessibilityLabel={cancelLabel}
+                                    onPress={closeEditor}
+                                    style={[styles.smallButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
+                                >
+                                    <Text style={[styles.smallButtonText, { color: tc.secondaryText }]}>{cancelLabel}</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    accessibilityRole="button"
+                                    accessibilityLabel={saveLabel}
+                                    disabled={!draft.trim() || saving}
+                                    onPress={saveSection}
+                                    style={[
+                                        styles.linkModalButton,
+                                        { backgroundColor: filledButton.backgroundColor },
+                                        (!draft.trim() || saving) && styles.linkModalButtonDisabled,
+                                    ]}
+                                    testID="project-section-save-button"
+                                >
+                                    <Text style={[styles.linkModalButtonText, { color: filledButton.textColor ?? tc.onTint }]}>{saveLabel}</Text>
+                                </TouchableOpacity>
+                            </View>
+                        </View>
+                    ) : null}
+
+                    {sections.length === 0 ? (
+                        <View style={[styles.sectionManagerEmpty, { backgroundColor: tc.filterBg, borderColor: tc.border }]}>
+                            <Text style={[styles.helperText, { color: tc.secondaryText }]}>{noneLabel}</Text>
+                        </View>
+                    ) : (
+                        <ScrollView
+                            style={[styles.sectionManagerList, { borderColor: tc.border, backgroundColor: tc.inputBg }]}
+                            contentContainerStyle={styles.sectionManagerListContent}
+                        >
+                            {sections.map((section, index) => {
+                                const canMoveUp = index > 0;
+                                const canMoveDown = index < sections.length - 1;
+                                return (
+                                    <View
+                                        key={section.id}
+                                        style={[styles.sectionManagerRow, { borderBottomColor: tc.border }]}
+                                        testID={`project-section-row-${section.id}`}
+                                    >
+                                        <View style={styles.sectionManagerRowTitleWrap}>
+                                            <Text style={[styles.sectionManagerRowTitle, { color: tc.text }]} numberOfLines={1}>
+                                                {section.title}
+                                            </Text>
+                                        </View>
+                                        {canManage ? (
+                                            <View style={styles.sectionManagerRowActions}>
+                                                <View style={styles.sectionManagerOrderButtons}>
+                                                    <TouchableOpacity
+                                                        accessibilityRole="button"
+                                                        accessibilityLabel={`${moveUpLabel}: ${section.title}`}
+                                                        accessibilityState={{ disabled: !canMoveUp }}
+                                                        disabled={!canMoveUp}
+                                                        onPress={() => moveSection(section.id, -1)}
+                                                        style={[
+                                                            styles.sectionManagerIconButton,
+                                                            { borderColor: tc.border, backgroundColor: tc.cardBg },
+                                                            !canMoveUp && styles.sectionManagerIconButtonDisabled,
+                                                        ]}
+                                                        testID={`project-section-move-up-${section.id}`}
+                                                    >
+                                                        <Ionicons name="chevron-up" size={16} color={tc.secondaryText} />
+                                                    </TouchableOpacity>
+                                                    <TouchableOpacity
+                                                        accessibilityRole="button"
+                                                        accessibilityLabel={`${moveDownLabel}: ${section.title}`}
+                                                        accessibilityState={{ disabled: !canMoveDown }}
+                                                        disabled={!canMoveDown}
+                                                        onPress={() => moveSection(section.id, 1)}
+                                                        style={[
+                                                            styles.sectionManagerIconButton,
+                                                            { borderColor: tc.border, backgroundColor: tc.cardBg },
+                                                            !canMoveDown && styles.sectionManagerIconButtonDisabled,
+                                                        ]}
+                                                        testID={`project-section-move-down-${section.id}`}
+                                                    >
+                                                        <Ionicons name="chevron-down" size={16} color={tc.secondaryText} />
+                                                    </TouchableOpacity>
+                                                </View>
+                                                <TouchableOpacity
+                                                    accessibilityRole="button"
+                                                    accessibilityLabel={`${editLabel}: ${section.title}`}
+                                                    onPress={() => openEdit(section)}
+                                                    style={[styles.smallButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
+                                                    testID={`project-section-edit-${section.id}`}
+                                                >
+                                                    <Text style={[styles.smallButtonText, { color: tc.tint }]}>{editLabel}</Text>
+                                                </TouchableOpacity>
+                                                <TouchableOpacity
+                                                    accessibilityRole="button"
+                                                    accessibilityLabel={`${deleteLabel}: ${section.title}`}
+                                                    onPress={() => confirmDeleteSection(section)}
+                                                    style={[styles.smallButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
+                                                    testID={`project-section-delete-${section.id}`}
+                                                >
+                                                    <Text style={[styles.smallButtonText, { color: tc.danger }]}>{deleteLabel}</Text>
+                                                </TouchableOpacity>
+                                            </View>
+                                        ) : null}
+                                    </View>
+                                );
+                            })}
+                        </ScrollView>
+                    )}
+                </View>
+            </View>
+        </Modal>
+    );
 }
 
 function ProjectDetailScrollFrame({
     backgroundColor,
     children,
-    keyboardBottomInset,
-    onScroll,
-    reorderMode,
-    scrollRef,
 }: {
     backgroundColor: string;
     children: React.ReactNode;
-    keyboardBottomInset: number;
-    onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
-    reorderMode: boolean;
-    scrollRef: React.RefObject<ScrollView | null>;
 }) {
-    const androidScrollViewFocusProps: Partial<ScrollViewProps> & { scrollsChildToFocus?: boolean } = (
-        Platform.OS === 'android' ? { scrollsChildToFocus: false } : {}
-    );
-    const scrollProps = {
-        style: [{ flex: 1 }, { backgroundColor }],
-        contentContainerStyle: [
-            styles.projectDetailScroll,
-            { backgroundColor },
-            keyboardBottomInset > 0 ? { paddingBottom: 24 + keyboardBottomInset } : null,
-        ],
-        keyboardShouldPersistTaps: 'always' as const,
-    };
-
-    const scrollNode = reorderMode ? (
-        // Reorder mode needs the nested draggable wrapper required by the library:
-        // https://github.com/computerjazz/react-native-draggable-flatlist#nesting-draggableflatlists
-        <NestableScrollContainer {...scrollProps}>
-            {children}
-        </NestableScrollContainer>
-    ) : (
-        // Normal mode stays on a plain ScrollView so Swipeable rows keep horizontal gestures.
-        <ScrollView
-            {...scrollProps}
-            ref={scrollRef}
-            automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
-            keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-            directionalLockEnabled
-            nestedScrollEnabled
-            onScroll={onScroll}
-            scrollEventThrottle={16}
-            {...androidScrollViewFocusProps}
-        >
-            {children}
-        </ScrollView>
-    );
-
+    // The task list (normal mode) or the reorder DraggableFlatList owns the
+    // scroll, so the frame is a plain flex column. The previous ScrollView +
+    // manually windowed list positioned rows from height estimates, which made
+    // the list shift as scrolls settled (#831).
     return (
         <KeyboardAvoidingView
             behavior={Platform.OS === 'android' ? 'height' : undefined}
             keyboardVerticalOffset={0}
             style={[{ flex: 1 }, { backgroundColor }]}
         >
-            {scrollNode}
+            <View style={[{ flex: 1 }, { backgroundColor }]}>
+                {children}
+            </View>
         </KeyboardAvoidingView>
     );
 }
 
 export function ProjectDetailModal({
     addProjectFileAttachment,
+    addSection,
     closeProjectDetail,
     commitSelectedProjectNotes,
     formatProjectDate,
@@ -208,8 +457,11 @@ export function ProjectDetailModal({
     onDownloadAttachment,
     onOpenAreaPicker,
     onOpenAttachment,
+    onOpenProjectQuickAdd,
     onOpenTagPicker,
     onRemoveProjectAttachment,
+    deleteSection,
+    reorderSections,
     onSetLinkInput,
     onSetLinkModalVisible,
     onSetNotesExpanded,
@@ -228,6 +480,7 @@ export function ProjectDetailModal({
     projectTaskSortBy,
     selectedProjectAreaName,
     selectedProject,
+    selectedProjectSections = [],
     selectedProjectTasks,
     selectedProjectNotes,
     selectedProjectNotesDirection,
@@ -245,23 +498,29 @@ export function ProjectDetailModal({
     t,
     tc,
     updateProject,
+    updateSection,
 }: ProjectDetailModalProps) {
+    const filledButton = useFilledButtonColors();
     const [projectTaskReorderMode, setProjectTaskReorderMode] = React.useState(false);
     const [projectTaskFilterOpenSignal, setProjectTaskFilterOpenSignal] = React.useState(0);
-    const [projectQuickAddFocusSignal, setProjectQuickAddFocusSignal] = React.useState(0);
-    const [projectTaskListOffsetY, setProjectTaskListOffsetY] = React.useState(0);
-    const projectDetailScrollRef = React.useRef<ScrollView | null>(null);
+    const [projectTaskFilterActiveCount, setProjectTaskFilterActiveCount] = React.useState(0);
+    const [projectSortModalVisible, setProjectSortModalVisible] = React.useState(false);
+    const [projectTaskBulkBarProps, setProjectTaskBulkBarProps] = React.useState<TaskListBulkBarProps | null>(null);
+    const [sectionManagerVisible, setSectionManagerVisible] = React.useState(false);
+    const projectDetailListRef = React.useRef<FlatList | null>(null);
     const projectDetailScrollOffsetRef = React.useRef(0);
-    const [projectDetailScrollWindow, setProjectDetailScrollWindow] = React.useState({
-        offsetY: 0,
-        viewportHeight: 0,
-    });
+    const pendingProjectDetailScrollRestoreRef = React.useRef<number | null>(null);
+    const projectTaskBulkBarPropsRef = React.useRef<TaskListBulkBarProps | null>(null);
     const projectDetailKeyboardTopRef = React.useRef(Dimensions.get('window').height);
     const projectDetailKeyboardVisibleRef = React.useRef(false);
     const projectDetailFocusedInputHandleRef = React.useRef<number | null>(null);
     const [projectDetailKeyboardBottomInset, setProjectDetailKeyboardBottomInset] = React.useState(0);
     const safeAreaEdges = getProjectDetailModalSafeAreaEdges(presentationStyle);
     const taskListOptions = getProjectDetailTaskListOptions(selectedProject, showCompletedTasks);
+    const canManageProjectSections = selectedProject?.status !== 'archived';
+    // Reorder mode always renders one self-scrolling DraggableFlatList (section
+    // headers are fixed rows inside it), so it owns the scroll for every project.
+    const projectReorderOwnsScroll = projectTaskReorderMode;
     const showCompletedLabel = showCompletedTasks
         ? tFallback(t, 'common.hideCompleted', 'Hide completed')
         : tFallback(t, 'common.showCompleted', 'Show completed');
@@ -303,139 +562,306 @@ export function ProjectDetailModal({
         Alert.alert(sequentialScopeHelpLabel, sequentialScopeHelpText);
     }, [sequentialScopeHelpLabel, sequentialScopeHelpText]);
     const sortLabel = tFallback(t, 'sort.label', 'Sort');
-    const taskControlsLabel = tFallback(t, 'common.tasks', 'Tasks');
-    const projectTaskFilterActiveCount = (
-        (projectTaskSortBy !== 'default' ? 1 : 0)
-        + (selectedProject?.status !== 'archived' && showCompletedTasks ? 1 : 0)
+    const projectSectionsLabel = tFallback(t, 'projects.sectionsLabel', 'Sections');
+    const addProjectTaskLabel = tFallback(t, 'nav.addTask', 'Add task');
+    const projectOrderLabel = tFallback(t, 'projects.reorderTasks', 'Order');
+    const hasProjectTaskOrderTargets = Boolean(
+        selectedProjectSections.length > 1
+        || (selectedProjectTasks ?? []).some((task) => (
+            !task.deletedAt && (taskListOptions.includeDone || task.status !== 'done')
+        ))
     );
-    const clearProjectTaskFilters = React.useCallback(() => {
-        if (projectTaskSortBy !== 'default') {
-            onProjectTaskSortByChange('default');
+    const openProjectQuickAdd = React.useCallback(() => {
+        if (!selectedProject || !taskListOptions.allowAdd) return;
+        onOpenProjectQuickAdd(selectedProject);
+    }, [onOpenProjectQuickAdd, selectedProject, taskListOptions.allowAdd]);
+    const openProjectTaskFilters = React.useCallback(() => {
+        setProjectTaskFilterOpenSignal((value) => value + 1);
+    }, []);
+    const handleProjectFilterStateChange = React.useCallback(
+        ({ activeCount }: { activeCount: number; hasActive: boolean }) => {
+            setProjectTaskFilterActiveCount(activeCount);
+        },
+        []
+    );
+    const handleProjectBulkBarPropsChange = React.useCallback((props: TaskListBulkBarProps | null) => {
+        const hadBulkBar = projectTaskBulkBarPropsRef.current !== null;
+        const hasBulkBar = props !== null;
+        if (hadBulkBar !== hasBulkBar && projectDetailScrollOffsetRef.current > 0) {
+            pendingProjectDetailScrollRestoreRef.current = projectDetailScrollOffsetRef.current;
         }
-        if (selectedProject?.status !== 'archived' && showCompletedTasks) {
-            onToggleShowCompletedTasks();
-        }
-    }, [
-        onProjectTaskSortByChange,
-        onToggleShowCompletedTasks,
-        projectTaskSortBy,
-        selectedProject?.status,
-        showCompletedTasks,
-    ]);
+        projectTaskBulkBarPropsRef.current = props;
+        setProjectTaskBulkBarProps(props);
+    }, []);
+    const handleProjectListScroll = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        projectDetailScrollOffsetRef.current = event.nativeEvent.contentOffset.y;
+    }, []);
+    const openProjectTaskSort = React.useCallback(() => {
+        setProjectSortModalVisible(true);
+    }, []);
+    const handleProjectTaskSortSelect = React.useCallback((option: TaskSortBy) => {
+        setProjectSortModalVisible(false);
+        onProjectTaskSortByChange(option);
+    }, [onProjectTaskSortByChange]);
+    const toggleProjectTaskReorderMode = React.useCallback(() => {
+        setProjectTaskReorderMode((value) => !value);
+    }, []);
+    const filterButtonLabel = tFallback(t, 'filters.label', 'Filters');
+    const doneButtonLabel = tFallback(t, 'common.done', 'Done');
+    const projectTypeLabel = tFallback(t, 'projects.projectTypeLabel', 'Type');
+    const projectActionsLabel = tFallback(t, 'projects.actionsLabel', 'Actions');
+    const projectActionsHelpText = tFallback(
+        t,
+        'projects.archiveHelp',
+        'Completing a project files it in Archived — reactivate it anytime.'
+    );
+    const projectStatusLabel = selectedProject
+        ? (selectedProject.status === 'active'
+            ? t('status.active')
+            : selectedProject.status === 'waiting'
+                ? t('status.waiting')
+                : selectedProject.status === 'someday'
+                    ? t('status.someday')
+                    : tFallback(t, 'status.archived', 'Archived'))
+        : '';
+    const sortIsActive = projectTaskSortBy !== 'default';
+    const projectTaskPinnedToolbar = selectedProject ? (
+        <View style={[styles.projectTaskPinnedToolbar, { backgroundColor: tc.cardBg, borderBottomColor: tc.border }]}>
+            <TouchableOpacity
+                accessibilityLabel={projectTaskFilterActiveCount > 0 ? `${filterButtonLabel}: ${projectTaskFilterActiveCount}` : filterButtonLabel}
+                accessibilityRole="button"
+                onPress={openProjectTaskFilters}
+                hitSlop={8}
+                style={[
+                    styles.projectTaskPinnedControl,
+                    {
+                        backgroundColor: projectTaskFilterActiveCount > 0 ? `${tc.tint}20` : tc.filterBg,
+                        borderColor: projectTaskFilterActiveCount > 0 ? tc.tint : tc.border,
+                    },
+                ]}
+                testID="project-task-filter-button"
+            >
+                <View style={styles.projectTaskPinnedControlIcon}>
+                    <Ionicons
+                        name="options-outline"
+                        size={20}
+                        color={projectTaskFilterActiveCount > 0 ? tc.tint : tc.secondaryText}
+                    />
+                    {projectTaskFilterActiveCount > 0 ? (
+                        <View style={[styles.projectTaskPinnedBadge, { backgroundColor: tc.tint }]}>
+                            <Text style={[styles.projectTaskPinnedBadgeText, { color: tc.onTint }]}>
+                                {projectTaskFilterActiveCount}
+                            </Text>
+                        </View>
+                    ) : null}
+                </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+                accessibilityLabel={`${sortLabel}: ${t(`sort.${projectTaskSortBy}`)}`}
+                accessibilityRole="button"
+                accessibilityState={{ selected: sortIsActive }}
+                onPress={openProjectTaskSort}
+                hitSlop={8}
+                style={[
+                    styles.projectTaskPinnedControl,
+                    {
+                        backgroundColor: sortIsActive ? `${tc.tint}20` : tc.filterBg,
+                        borderColor: sortIsActive ? tc.tint : tc.border,
+                    },
+                ]}
+                testID="project-task-sort-toggle"
+            >
+                <View style={styles.projectTaskPinnedControlIcon}>
+                    <Ionicons
+                        name="swap-vertical-outline"
+                        size={20}
+                        color={sortIsActive ? tc.tint : tc.secondaryText}
+                    />
+                </View>
+            </TouchableOpacity>
+            {selectedProject.status !== 'archived' ? (
+                <TouchableOpacity
+                    accessibilityLabel={showCompletedLabel}
+                    accessibilityRole="switch"
+                    accessibilityState={{ checked: showCompletedTasks }}
+                    onPress={onToggleShowCompletedTasks}
+                    hitSlop={8}
+                    style={[
+                        styles.projectTaskPinnedControl,
+                        {
+                            backgroundColor: showCompletedTasks ? tc.tint : tc.filterBg,
+                            borderColor: showCompletedTasks ? tc.tint : tc.border,
+                        },
+                    ]}
+                    testID="project-pinned-show-completed-toggle"
+                >
+                    <View style={styles.projectTaskPinnedControlIcon}>
+                        <Ionicons
+                            name={showCompletedTasks ? 'eye-outline' : 'eye-off-outline'}
+                            size={20}
+                            color={showCompletedTasks ? tc.onTint : tc.secondaryText}
+                        />
+                    </View>
+                </TouchableOpacity>
+            ) : null}
+            {taskListOptions.enableProjectReorder && hasProjectTaskOrderTargets && !sortIsActive ? (
+                <TouchableOpacity
+                    accessibilityLabel={projectTaskReorderMode ? doneButtonLabel : projectOrderLabel}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: projectTaskReorderMode }}
+                    onPress={toggleProjectTaskReorderMode}
+                    hitSlop={8}
+                    style={[
+                        styles.projectTaskPinnedControl,
+                        {
+                            backgroundColor: projectTaskReorderMode ? tc.tint : tc.filterBg,
+                            borderColor: projectTaskReorderMode ? tc.tint : tc.border,
+                        },
+                    ]}
+                    testID="project-task-reorder-toggle"
+                >
+                    <View style={styles.projectTaskPinnedControlIcon}>
+                        {projectTaskReorderMode ? (
+                            <Ionicons name="checkmark" size={20} color={tc.onTint} />
+                        ) : (
+                            // Grip dots mirror the drag handles shown in reorder mode;
+                            // the hamburger-style reorder-three read as a menu, and the
+                            // up-down arrows belong to the Sort control (#784).
+                            <GripVertical size={20} color={tc.secondaryText} />
+                        )}
+                    </View>
+                </TouchableOpacity>
+            ) : null}
+            <View style={styles.projectTaskPinnedSpacer} />
+            {taskListOptions.allowAdd ? (
+                <TouchableOpacity
+                    accessibilityLabel={addProjectTaskLabel}
+                    accessibilityRole="button"
+                    onPress={openProjectQuickAdd}
+                    hitSlop={8}
+                    style={[
+                        styles.projectTaskPinnedAddButton,
+                        { backgroundColor: filledButton.backgroundColor, borderColor: filledButton.backgroundColor },
+                    ]}
+                    testID="project-add-task-button"
+                >
+                    <Ionicons name="add" size={24} color={filledButton.textColor ?? tc.onTint} />
+                </TouchableOpacity>
+            ) : null}
+        </View>
+    ) : null;
+    const projectTaskSelectionBulkBar = projectTaskBulkBarProps ? (
+        <View testID="project-task-selection-bulk-bar">
+            <TaskListBulkBar {...projectTaskBulkBarProps} />
+        </View>
+    ) : null;
     const setSelectedProjectSequentialScope = (sequentialScope: Project['sequentialScope']) => {
         if (!selectedProject) return;
         updateProject(selectedProject.id, { sequentialScope });
         onSetSelectedProject({ ...selectedProject, sequentialScope });
     };
-    const projectTaskFilterAccessory = selectedProject ? (
-        <View style={styles.projectTaskFilterSection}>
-            <View style={styles.projectTaskFilterGroup}>
-                <Text style={[styles.projectFilterSectionLabel, { color: tc.secondaryText }]}>
-                    {sortLabel}
-                </Text>
-                <View
-                    accessibilityLabel={sortLabel}
-                    accessibilityRole="radiogroup"
-                    style={styles.projectFilterChipRow}
-                >
-                    {(['default', 'due'] as const).map((option) => {
-                        const selected = projectTaskSortBy === option;
-                        const label = option === 'default'
-                            ? tFallback(t, 'sort.default', 'Default')
-                            : tFallback(t, 'sort.due', 'Due date');
-                        return (
-                            <TouchableOpacity
-                                key={option}
-                                accessibilityLabel={`${sortLabel}: ${label}`}
-                                accessibilityRole="radio"
-                                accessibilityState={{ checked: selected }}
-                                onPress={() => onProjectTaskSortByChange(option)}
-                                style={[
-                                    styles.projectFilterChip,
-                                    {
-                                        backgroundColor: selected ? tc.tint : tc.filterBg,
-                                        borderColor: selected ? tc.tint : tc.border,
-                                    },
-                                ]}
-                                testID={`project-task-sort-${option}`}
-                            >
-                                <Text
-                                    style={[
-                                        styles.projectFilterChipText,
-                                        { color: selected ? tc.onTint : tc.text },
-                                    ]}
-                                    numberOfLines={1}
-                                >
-                                    {label}
-                                </Text>
-                            </TouchableOpacity>
-                        );
-                    })}
-                </View>
-            </View>
 
-            {selectedProject.status !== 'archived' ? (
-                <View style={styles.projectTaskFilterGroup}>
-                    <Text style={[styles.projectFilterSectionLabel, { color: tc.secondaryText }]}>
-                        {taskControlsLabel}
-                    </Text>
-                    <TouchableOpacity
-                        accessibilityLabel={showCompletedLabel}
-                        accessibilityRole="switch"
-                        accessibilityState={{ checked: showCompletedTasks }}
-                        onPress={onToggleShowCompletedTasks}
-                        style={[
-                            styles.projectFilterSwitch,
-                            {
-                                backgroundColor: showCompletedTasks ? `${tc.tint}20` : tc.filterBg,
-                                borderColor: showCompletedTasks ? tc.tint : tc.border,
-                            },
-                        ]}
-                        testID="project-show-completed-toggle"
-                    >
-                        <Text
-                            style={[
-                                styles.projectFilterSwitchText,
-                                { color: showCompletedTasks ? tc.tint : tc.text },
-                            ]}
-                            numberOfLines={1}
-                        >
-                            {showCompletedLabel}
-                        </Text>
-                        <View
-                            style={[
-                                styles.projectFilterSwitchIndicator,
-                                {
-                                    backgroundColor: showCompletedTasks ? tc.tint : 'transparent',
-                                    borderColor: showCompletedTasks ? tc.tint : tc.border,
-                                },
-                            ]}
-                        >
-                            {showCompletedTasks ? (
-                                <Ionicons name="checkmark" size={15} color={tc.onTint} />
-                            ) : null}
-                        </View>
-                    </TouchableOpacity>
-                </View>
-            ) : null}
-        </View>
-    ) : null;
+    const restoreProjectDetailScrollOffset = React.useCallback((offsetY: number) => {
+        if (!Number.isFinite(offsetY) || offsetY <= 0) return;
+        const scrollToOffset = () => {
+            projectDetailListRef.current?.scrollToOffset({ offset: offsetY, animated: false });
+        };
+        scrollToOffset();
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(scrollToOffset);
+        }
+        // A freshly mounted list clamps the jump until enough rows render, and
+        // each clamped jump renders more — keep retrying briefly, stopping as
+        // soon as the list reaches (or the user scrolls past) the target.
+        let attempts = 0;
+        const retry = () => {
+            if (projectDetailScrollOffsetRef.current >= offsetY - 1) return;
+            scrollToOffset();
+            attempts += 1;
+            if (attempts < 5) setTimeout(retry, 250);
+        };
+        setTimeout(retry, 250);
+    }, []);
 
-    const handlePinnedProjectAddTask = React.useCallback(() => {
-        projectDetailScrollRef.current?.scrollTo({
-            y: Math.max(0, projectTaskListOffsetY - 8),
-            animated: true,
-        });
-        setProjectQuickAddFocusSignal((value) => value + 1);
-    }, [projectTaskListOffsetY]);
+    // Exiting reorder mode swaps the reorder list back to the task FlatList,
+    // which mounts at offset 0 (#784). Queue a restore so the list comes back
+    // at the position the user left it.
+    const prevProjectReorderOwnsScrollRef = React.useRef(projectReorderOwnsScroll);
+    React.useLayoutEffect(() => {
+        const wasReordering = prevProjectReorderOwnsScrollRef.current;
+        prevProjectReorderOwnsScrollRef.current = projectReorderOwnsScroll;
+        if (wasReordering && !projectReorderOwnsScroll && projectDetailScrollOffsetRef.current > 0) {
+            pendingProjectDetailScrollRestoreRef.current = projectDetailScrollOffsetRef.current;
+        }
+    }, [projectReorderOwnsScroll]);
 
-    const handlePinnedProjectFilters = React.useCallback(() => {
-        setProjectTaskFilterOpenSignal((value) => value + 1);
+    React.useLayoutEffect(() => {
+        const offsetY = pendingProjectDetailScrollRestoreRef.current;
+        if (offsetY === null) return;
+        pendingProjectDetailScrollRestoreRef.current = null;
+        if (projectReorderOwnsScroll) return;
+        restoreProjectDetailScrollOffset(offsetY);
+    }, [projectReorderOwnsScroll, projectTaskBulkBarProps, restoreProjectDetailScrollOffset]);
+
+    const resetProjectDetailScroll = React.useCallback(() => {
+        projectDetailScrollOffsetRef.current = 0;
+        pendingProjectDetailScrollRestoreRef.current = null;
+        projectDetailListRef.current?.scrollToOffset({ offset: 0, animated: false });
     }, []);
 
     React.useEffect(() => {
+        resetProjectDetailScroll();
+    }, [resetProjectDetailScroll, selectedProject?.id]);
+
+    React.useEffect(() => {
         setProjectTaskReorderMode(false);
+        setSectionManagerVisible(false);
     }, [overlayVisible, selectedProject?.id]);
+
+    const scrollProjectInputIntoView = React.useCallback((targetInput?: number | string) => {
+        if (Platform.OS !== 'android') return;
+        const targetHandle = typeof targetInput === 'number'
+            ? targetInput
+            : typeof targetInput === 'string'
+                ? Number(targetInput)
+                : NaN;
+        if (!Number.isFinite(targetHandle) || targetHandle <= 0) return;
+        projectDetailFocusedInputHandleRef.current = targetHandle;
+        if (!projectDetailKeyboardVisibleRef.current) return;
+        const listView = projectDetailListRef.current;
+        if (!listView) return;
+        const scrollHandle = findNodeHandle(listView);
+        if (!scrollHandle) return;
+
+        const measureAndScroll = () => {
+            UIManager.measureInWindow(targetHandle, (_x, targetY, _w, targetH) => {
+                if (!Number.isFinite(targetY) || !Number.isFinite(targetH)) return;
+                UIManager.measureInWindow(scrollHandle, (_sx, scrollY, _sw, scrollH) => {
+                    if (!Number.isFinite(scrollY) || !Number.isFinite(scrollH)) return;
+                    const visibleTop = scrollY;
+                    const keyboardTop = projectDetailKeyboardTopRef.current;
+                    const visibleBottom = Math.min(scrollY + scrollH, keyboardTop);
+                    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+                    const bottomClearance = visibleHeight * 0.18;
+                    const effectiveVisibleBottom = visibleBottom - bottomClearance;
+                    const targetBottom = targetY + targetH;
+                    if (targetBottom <= effectiveVisibleBottom) return;
+                    const delta = targetBottom - effectiveVisibleBottom;
+                    const nextOffset = Math.max(0, projectDetailScrollOffsetRef.current + delta);
+                    projectDetailListRef.current?.scrollToOffset({ offset: nextOffset, animated: true });
+                });
+            });
+        };
+
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => {
+                measureAndScroll();
+                requestAnimationFrame(measureAndScroll);
+            });
+        } else {
+            setTimeout(measureAndScroll, 0);
+        }
+    }, []);
 
     React.useEffect(() => {
         if (Platform.OS !== 'android') return;
@@ -467,52 +893,7 @@ export function ProjectDetailModal({
             changeListener.remove();
             hideListener.remove();
         };
-    }, []);
-
-    const scrollProjectInputIntoView = React.useCallback((targetInput?: number | string) => {
-        if (Platform.OS !== 'android') return;
-        const targetHandle = typeof targetInput === 'number'
-            ? targetInput
-            : typeof targetInput === 'string'
-                ? Number(targetInput)
-                : NaN;
-        if (!Number.isFinite(targetHandle) || targetHandle <= 0) return;
-        projectDetailFocusedInputHandleRef.current = targetHandle;
-        if (!projectDetailKeyboardVisibleRef.current) return;
-        const scrollView = projectDetailScrollRef.current;
-        if (!scrollView) return;
-        const scrollHandle = findNodeHandle(scrollView);
-        if (!scrollHandle) return;
-
-        const measureAndScroll = () => {
-            UIManager.measureInWindow(targetHandle, (_x, targetY, _w, targetH) => {
-                if (!Number.isFinite(targetY) || !Number.isFinite(targetH)) return;
-                UIManager.measureInWindow(scrollHandle, (_sx, scrollY, _sw, scrollH) => {
-                    if (!Number.isFinite(scrollY) || !Number.isFinite(scrollH)) return;
-                    const visibleTop = scrollY;
-                    const keyboardTop = projectDetailKeyboardTopRef.current;
-                    const visibleBottom = Math.min(scrollY + scrollH, keyboardTop);
-                    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
-                    const bottomClearance = visibleHeight * 0.18;
-                    const effectiveVisibleBottom = visibleBottom - bottomClearance;
-                    const targetBottom = targetY + targetH;
-                    if (targetBottom <= effectiveVisibleBottom) return;
-                    const delta = targetBottom - effectiveVisibleBottom;
-                    const nextOffset = Math.max(0, projectDetailScrollOffsetRef.current + delta);
-                    projectDetailScrollRef.current?.scrollTo({ y: nextOffset, animated: true });
-                });
-            });
-        };
-
-        if (typeof requestAnimationFrame === 'function') {
-            requestAnimationFrame(() => {
-                measureAndScroll();
-                requestAnimationFrame(measureAndScroll);
-            });
-        } else {
-            setTimeout(measureAndScroll, 0);
-        }
-    }, []);
+    }, [scrollProjectInputIntoView]);
 
     React.useEffect(() => {
         if (Platform.OS !== 'android' || projectDetailKeyboardBottomInset <= 0) return;
@@ -525,299 +906,183 @@ export function ProjectDetailModal({
         }
     }, [projectDetailKeyboardBottomInset, scrollProjectInputIntoView]);
 
-    return (
-        <Modal
-            visible={overlayVisible}
-            animationType="slide"
-            presentationStyle={presentationStyle}
-            transparent={false}
-            allowSwipeDismissal
-            onRequestClose={closeProjectDetail}
-        >
-            {/* Android Modal content needs its own gesture root; the screen root does not cover Modal.
-                https://docs.swmansion.com/react-native-gesture-handler/docs/fundamentals/installation/#android */}
-            <GestureHandlerRootView style={{ flex: 1 }}>
-                <KeyboardAccessoryHost backgroundColor={tc.bg}>
-                    <SafeAreaView style={[styles.projectDetailRoot, { backgroundColor: tc.bg }]} edges={safeAreaEdges}>
-                        {selectedProject ? (
-                            <>
-                                <View style={modalHeaderStyle}>
-                                    <TouchableOpacity
-                                        onPress={closeProjectDetail}
-                                        style={styles.backButton}
-                                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                    >
-                                        <Text style={[styles.backButtonText, { color: tc.tint }]}>{t('common.back') || 'Back'}</Text>
-                                    </TouchableOpacity>
-                                    <TextInput
-                                        style={[styles.modalTitle, { color: tc.text, marginLeft: 8, flex: 1 }]}
-                                        value={selectedProject.title}
-                                        onChangeText={(text) => onSetSelectedProject({ ...selectedProject, title: text })}
-                                        onSubmitEditing={() => {
-                                            const title = selectedProject.title.trim();
-                                            if (!title) return;
-                                            updateProject(selectedProject.id, { title });
-                                            onSetSelectedProject({ ...selectedProject, title });
-                                        }}
-                                        onEndEditing={() => {
-                                            const title = selectedProject.title.trim();
-                                            if (!title) return;
-                                            updateProject(selectedProject.id, { title });
-                                            onSetSelectedProject({ ...selectedProject, title });
-                                        }}
-                                        returnKeyType="done"
-                                    />
-                                </View>
-                                <View style={[styles.projectTaskPinnedToolbar, { backgroundColor: tc.cardBg, borderBottomColor: tc.border }]}>
-                                    <View style={styles.projectTaskPinnedToolbarContent}>
-                                        {taskListOptions.allowAdd ? (
-                                            <TouchableOpacity
-                                                accessibilityRole="button"
-                                                accessibilityLabel={t('projects.addTask')}
-                                                onPress={handlePinnedProjectAddTask}
-                                                style={[styles.projectTaskPinnedButton, { backgroundColor: tc.tint, borderColor: tc.tint }]}
-                                            >
-                                                <Ionicons name="add" size={16} color={tc.onTint} />
-                                                <Text style={[styles.projectTaskPinnedButtonText, { color: tc.onTint }]} numberOfLines={1}>
-                                                    {t('projects.addTask')}
-                                                </Text>
-                                            </TouchableOpacity>
-                                        ) : null}
-                                        <TouchableOpacity
-                                            accessibilityRole="button"
-                                            accessibilityLabel={tFallback(t, 'filters.label', 'Filters')}
-                                            onPress={handlePinnedProjectFilters}
-                                            style={[styles.projectTaskPinnedButton, { backgroundColor: tc.filterBg, borderColor: projectTaskFilterActiveCount > 0 ? tc.tint : tc.border }]}
-                                        >
-                                            <Ionicons name="options-outline" size={16} color={projectTaskFilterActiveCount > 0 ? tc.tint : tc.secondaryText} />
-                                            <Text style={[styles.projectTaskPinnedButtonText, { color: projectTaskFilterActiveCount > 0 ? tc.tint : tc.text }]} numberOfLines={1}>
-                                                {tFallback(t, 'filters.label', 'Filters')}
-                                            </Text>
-                                            {projectTaskFilterActiveCount > 0 ? (
-                                                <View style={[styles.projectTaskPinnedBadge, { backgroundColor: tc.tint }]}>
-                                                    <Text style={[styles.projectTaskPinnedBadgeText, { color: tc.onTint }]}>
-                                                        {projectTaskFilterActiveCount}
-                                                    </Text>
-                                                </View>
-                                            ) : null}
-                                        </TouchableOpacity>
-                                        {(['default', 'due'] as const).map((option) => {
-                                            const selected = projectTaskSortBy === option;
-                                            const label = option === 'default'
-                                                ? tFallback(t, 'sort.default', 'Default')
-                                                : tFallback(t, 'sort.due', 'Due date');
-                                            return (
-                                                <TouchableOpacity
-                                                    key={option}
-                                                    accessibilityRole="button"
-                                                    accessibilityState={{ selected }}
-                                                    onPress={() => onProjectTaskSortByChange(option)}
-                                                    style={[
-                                                        styles.projectTaskPinnedButton,
-                                                        {
-                                                            backgroundColor: selected ? tc.tint : tc.filterBg,
-                                                            borderColor: selected ? tc.tint : tc.border,
-                                                        },
-                                                    ]}
-                                                >
-                                                    <Text style={[styles.projectTaskPinnedButtonText, { color: selected ? tc.onTint : tc.text }]} numberOfLines={1}>
-                                                        {label}
-                                                    </Text>
-                                                </TouchableOpacity>
-                                            );
-                                        })}
-                                        {selectedProject.status !== 'archived' ? (
-                                            <TouchableOpacity
-                                                accessibilityRole="switch"
-                                                accessibilityState={{ checked: showCompletedTasks }}
-                                                accessibilityLabel={showCompletedLabel}
-                                                onPress={onToggleShowCompletedTasks}
-                                                style={[
-                                                    styles.projectTaskPinnedButton,
-                                                    {
-                                                        backgroundColor: showCompletedTasks ? `${tc.tint}20` : tc.filterBg,
-                                                        borderColor: showCompletedTasks ? tc.tint : tc.border,
-                                                    },
-                                                ]}
-                                            >
-                                                <Ionicons name={showCompletedTasks ? 'checkmark-circle' : 'checkmark-circle-outline'} size={16} color={showCompletedTasks ? tc.tint : tc.secondaryText} />
-                                                <Text style={[styles.projectTaskPinnedButtonText, { color: showCompletedTasks ? tc.tint : tc.text }]} numberOfLines={1}>
-                                                    {showCompletedLabel}
-                                                </Text>
-                                            </TouchableOpacity>
-                                        ) : null}
-                                        {taskListOptions.enableProjectReorder ? (
-                                            <TouchableOpacity
-                                                accessibilityRole="button"
-                                                accessibilityState={{ selected: projectTaskReorderMode }}
-                                                accessibilityLabel={projectTaskReorderMode
-                                                    ? t('common.done')
-                                                    : tFallback(t, 'projects.reorderTasks', 'Order')}
-                                                onPress={() => setProjectTaskReorderMode((value) => !value)}
-                                                style={[
-                                                    styles.projectTaskPinnedButton,
-                                                    {
-                                                        backgroundColor: projectTaskReorderMode ? tc.tint : tc.filterBg,
-                                                        borderColor: projectTaskReorderMode ? tc.tint : tc.border,
-                                                    },
-                                                ]}
-                                            >
-                                                <Ionicons name="reorder-three-outline" size={18} color={projectTaskReorderMode ? tc.onTint : tc.secondaryText} />
-                                                <Text style={[styles.projectTaskPinnedButtonText, { color: projectTaskReorderMode ? tc.onTint : tc.text }]} numberOfLines={1}>
-                                                    {projectTaskReorderMode ? t('common.done') : tFallback(t, 'projects.reorderTasks', 'Order')}
-                                                </Text>
-                                            </TouchableOpacity>
-                                        ) : null}
-                                    </View>
-                                </View>
-                                <ProjectDetailScrollFrame
-                                    backgroundColor={tc.bg}
-                                    keyboardBottomInset={projectDetailKeyboardBottomInset}
-                                onScroll={(event) => {
-                                    const offsetY = event.nativeEvent.contentOffset.y;
-                                    const viewportHeight = event.nativeEvent.layoutMeasurement?.height
-                                        ?? projectDetailScrollWindow.viewportHeight;
-                                    projectDetailScrollOffsetRef.current = offsetY;
-                                    setProjectDetailScrollWindow((current) => {
-                                        if (
-                                            Math.abs(current.offsetY - offsetY) < 32
-                                            && Math.abs(current.viewportHeight - viewportHeight) < 1
-                                        ) {
-                                            return current;
-                                        }
-                                        return { offsetY, viewportHeight };
-                                    });
-                                }}
-                                    reorderMode={projectTaskReorderMode}
-                                    scrollRef={projectDetailScrollRef}
-                                >
-                                <View style={[styles.statusBlock, { backgroundColor: tc.cardBg, borderBottomColor: tc.border }]}>
-                                    <View style={styles.statusActionsRow}>
-                                        <Text style={[styles.statusLabel, { color: tc.secondaryText }]}>{t('projects.statusLabel')}</Text>
-                                        <TouchableOpacity
-                                            onPress={() => onSetShowStatusMenu((prev) => !prev)}
-                                            style={[
-                                                styles.statusPicker,
-                                                {
-                                                    backgroundColor: statusPalette[selectedProject.status]?.bg ?? tc.filterBg,
-                                                    borderColor: statusPalette[selectedProject.status]?.border ?? tc.border,
-                                                },
-                                            ]}
-                                        >
-                                            <Text style={[styles.statusPickerText, { color: statusPalette[selectedProject.status]?.text ?? tc.text }]}>
-                                                {selectedProject.status === 'active'
-                                                    ? t('status.active')
-                                                    : selectedProject.status === 'waiting'
-                                                        ? t('status.waiting')
-                                                        : t('status.someday')}
-                                            </Text>
-                                            <Text style={[styles.statusPickerText, { color: statusPalette[selectedProject.status]?.text ?? tc.text }]}>▾</Text>
-                                        </TouchableOpacity>
-                                        <View style={{ flex: 1 }} />
-                                        <TouchableOpacity
-                                            onPress={() => onDuplicateProject(selectedProject.id)}
-                                            style={[styles.statusButton, { backgroundColor: tc.filterBg }]}
-                                        >
-                                            <Text style={[styles.statusButtonText, { color: tc.tint }]}>
-                                                {t('projects.duplicate')}
-                                            </Text>
-                                        </TouchableOpacity>
-                                        {selectedProject.status === 'archived' ? (
-                                            <TouchableOpacity
-                                                onPress={() => handleSetProjectStatus('active')}
-                                                style={[styles.statusButton, styles.reactivateButton]}
-                                            >
-                                                <Text style={[styles.statusButtonText, styles.reactivateText]}>
-                                                    {t('projects.reactivate')}
-                                                </Text>
-                                            </TouchableOpacity>
-                                        ) : (
-                                            <TouchableOpacity
-                                                onPress={handleArchiveSelectedProject}
-                                                style={[styles.statusButton, styles.archiveButton]}
-                                            >
-                                                <Text style={[styles.statusButtonText, styles.archiveText]}>
-                                                    {t('projects.archive')}
-                                                </Text>
-                                            </TouchableOpacity>
-                                        )}
-                                    </View>
-                                    {showStatusMenu && (
-                                        <View style={[styles.statusMenu, { backgroundColor: tc.inputBg, borderColor: tc.border }]}>
-                                            {(['active', 'waiting', 'someday'] as const).map((status) => {
-                                                const isActive = selectedProject.status === status;
-                                                const palette = statusPalette[status];
-                                                return (
-                                                    <TouchableOpacity
-                                                        key={status}
-                                                        onPress={() => handleSetProjectStatus(status)}
-                                                        style={[styles.statusMenuItem, isActive && { backgroundColor: tc.filterBg }]}
-                                                    >
-                                                        <View style={[styles.statusDot, { backgroundColor: palette?.border ?? tc.border }]} />
-                                                        <Text style={[styles.statusMenuText, { color: palette?.text ?? tc.text }]}>
-                                                            {status === 'active'
-                                                                ? t('status.active')
-                                                                : status === 'waiting'
-                                                                    ? t('status.waiting')
-                                                                    : t('status.someday')}
-                                                        </Text>
-                                                    </TouchableOpacity>
-                                                );
-                                            })}
-                                        </View>
-                                    )}
-                                </View>
-
+    // Scrolls away with the task rows as the list's ListHeaderComponent in
+    // normal mode; stays pinned above the self-scrolling reorder list in reorder mode.
+    const projectDetailListHeader = selectedProject ? (
+        <>
                                 <View style={[styles.detailsToggle, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
                                     <TouchableOpacity
                                         style={styles.detailsToggleButton}
                                         onPress={() => onSetShowProjectMeta((prev) => !prev)}
+                                        accessibilityRole="button"
+                                        accessibilityState={{ expanded: showProjectMeta }}
+                                        testID="project-details-toggle"
                                     >
                                         <Text style={[styles.detailsToggleText, { color: tc.text }]}>
                                             {showProjectMeta ? '▾' : '▸'} {t('taskEdit.details')}
                                         </Text>
                                     </TouchableOpacity>
-                                    <View style={styles.projectTypeControls}>
-                                        <TouchableOpacity
-                                            accessibilityRole="button"
-                                            onPress={() => {
-                                                updateProject(selectedProject.id, { isSequential: !selectedProject.isSequential });
-                                                onSetSelectedProject({ ...selectedProject, isSequential: !selectedProject.isSequential });
-                                            }}
-                                            style={[
-                                                styles.sequentialToggle,
-                                                {
-                                                    backgroundColor: selectedProject.isSequential ? tc.tint : tc.filterBg,
-                                                    borderColor: selectedProject.isSequential ? tc.tint : tc.border,
-                                                },
-                                            ]}
+                                    <View
+                                        style={[
+                                            styles.statusPicker,
+                                            {
+                                                backgroundColor: statusPalette[selectedProject.status]?.bg ?? tc.filterBg,
+                                                borderColor: statusPalette[selectedProject.status]?.border ?? tc.border,
+                                            },
+                                        ]}
+                                    >
+                                        <Text
+                                            style={[styles.statusPickerText, { color: statusPalette[selectedProject.status]?.text ?? tc.text }]}
+                                            numberOfLines={1}
                                         >
-                                            <Text
-                                                style={[
-                                                    styles.sequentialToggleText,
-                                                    { color: selectedProject.isSequential ? tc.onTint : tc.secondaryText },
-                                                ]}
-                                            >
-                                                {selectedProject.isSequential ? 'Seq' : 'Par'}
-                                            </Text>
-                                        </TouchableOpacity>
-                                        <TouchableOpacity
-                                            accessibilityLabel={projectTypeHelpLabel}
-                                            accessibilityRole="button"
-                                            onPress={showProjectTypeHelp}
-                                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                            style={[
-                                                styles.projectTypeHelpButton,
-                                                { backgroundColor: tc.filterBg, borderColor: tc.border },
-                                            ]}
-                                        >
-                                            <Ionicons name="help-circle-outline" size={17} color={tc.secondaryText} />
-                                        </TouchableOpacity>
+                                            {projectStatusLabel}
+                                        </Text>
                                     </View>
                                 </View>
 
                                 {showProjectMeta && (
                                     <>
+                                        <View style={[styles.reviewContainer, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
+                                            <View style={styles.reviewLabelRow}>
+                                                <Text style={[styles.reviewLabel, { color: tc.text }]}>{t('projects.statusLabel')}</Text>
+                                                <TouchableOpacity
+                                                    onPress={() => onSetShowStatusMenu((prev) => !prev)}
+                                                    style={[
+                                                        styles.statusPicker,
+                                                        {
+                                                            backgroundColor: statusPalette[selectedProject.status]?.bg ?? tc.filterBg,
+                                                            borderColor: statusPalette[selectedProject.status]?.border ?? tc.border,
+                                                        },
+                                                    ]}
+                                                    testID="project-status-picker"
+                                                >
+                                                    <Text style={[styles.statusPickerText, { color: statusPalette[selectedProject.status]?.text ?? tc.text }]}>
+                                                        {projectStatusLabel}
+                                                    </Text>
+                                                    <Text style={[styles.statusPickerText, { color: statusPalette[selectedProject.status]?.text ?? tc.text }]}>▾</Text>
+                                                </TouchableOpacity>
+                                            </View>
+                                            {showStatusMenu && (
+                                                <View style={[styles.statusMenu, { backgroundColor: tc.inputBg, borderColor: tc.border, marginHorizontal: 0, marginTop: 8, marginBottom: 0 }]}>
+                                                    {(['active', 'waiting', 'someday'] as const).map((status) => {
+                                                        const isActive = selectedProject.status === status;
+                                                        const palette = statusPalette[status];
+                                                        return (
+                                                            <TouchableOpacity
+                                                                key={status}
+                                                                onPress={() => handleSetProjectStatus(status)}
+                                                                style={[styles.statusMenuItem, isActive && { backgroundColor: tc.filterBg }]}
+                                                            >
+                                                                <View style={[styles.statusDot, { backgroundColor: palette?.border ?? tc.border }]} />
+                                                                <Text style={[styles.statusMenuText, { color: palette?.text ?? tc.text }]}>
+                                                                    {status === 'active'
+                                                                        ? t('status.active')
+                                                                        : status === 'waiting'
+                                                                            ? t('status.waiting')
+                                                                            : t('status.someday')}
+                                                                </Text>
+                                                            </TouchableOpacity>
+                                                        );
+                                                    })}
+                                                </View>
+                                            )}
+
+                                            <View style={[styles.reviewLabelRow, styles.projectSettingsRowSpacing]}>
+                                                <Text style={[styles.reviewLabel, { color: tc.text }]}>{projectTypeLabel}</Text>
+                                                <View style={styles.projectTypeControls}>
+                                                    <TouchableOpacity
+                                                        accessibilityRole="button"
+                                                        onPress={() => {
+                                                            updateProject(selectedProject.id, { isSequential: !selectedProject.isSequential });
+                                                            onSetSelectedProject({ ...selectedProject, isSequential: !selectedProject.isSequential });
+                                                        }}
+                                                        style={[
+                                                            styles.sequentialToggle,
+                                                            {
+                                                                backgroundColor: selectedProject.isSequential ? tc.tint : tc.filterBg,
+                                                                borderColor: selectedProject.isSequential ? tc.tint : tc.border,
+                                                            },
+                                                        ]}
+                                                        testID="project-type-toggle"
+                                                    >
+                                                        <Text
+                                                            style={[
+                                                                styles.sequentialToggleText,
+                                                                { color: selectedProject.isSequential ? tc.onTint : tc.secondaryText },
+                                                            ]}
+                                                        >
+                                                            {selectedProject.isSequential
+                                                                ? tFallback(t, 'projects.sequential', 'Sequential')
+                                                                : tFallback(t, 'projects.parallel', 'Parallel')}
+                                                        </Text>
+                                                    </TouchableOpacity>
+                                                    <TouchableOpacity
+                                                        accessibilityLabel={projectTypeHelpLabel}
+                                                        accessibilityRole="button"
+                                                        onPress={showProjectTypeHelp}
+                                                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                                                        style={[
+                                                            styles.projectTypeHelpButton,
+                                                            { backgroundColor: tc.filterBg, borderColor: tc.border },
+                                                        ]}
+                                                    >
+                                                        <Ionicons name="help-circle-outline" size={17} color={tc.secondaryText} />
+                                                    </TouchableOpacity>
+                                                </View>
+                                            </View>
+                                        </View>
+
+                                        <View style={[styles.reviewContainer, { backgroundColor: tc.cardBg, borderColor: tc.border }]} testID="project-actions-section">
+                                            <Text style={[styles.reviewLabel, { color: tc.text }]}>{projectActionsLabel}</Text>
+                                            <Text
+                                                style={[styles.projectActionsHelper, { color: tc.secondaryText }]}
+                                                testID="project-actions-helper"
+                                            >
+                                                {projectActionsHelpText}
+                                            </Text>
+                                            <View style={styles.projectManageActions}>
+                                                <TouchableOpacity
+                                                    onPress={() => onDuplicateProject(selectedProject.id)}
+                                                    style={[styles.projectManageButton, { backgroundColor: tc.filterBg, borderColor: tc.border }]}
+                                                    accessibilityRole="button"
+                                                    accessibilityLabel={t('projects.duplicate')}
+                                                    testID="project-duplicate-button"
+                                                >
+                                                    <Ionicons name="copy-outline" size={16} color={tc.tint} />
+                                                    <Text style={[styles.statusButtonText, { color: tc.tint }]}>
+                                                        {t('projects.duplicate')}
+                                                    </Text>
+                                                </TouchableOpacity>
+                                                {selectedProject.status === 'archived' ? (
+                                                    <TouchableOpacity
+                                                        onPress={() => handleSetProjectStatus('active')}
+                                                        style={[styles.projectManageButton, styles.reactivateButton, { borderColor: tc.border }]}
+                                                        accessibilityRole="button"
+                                                        accessibilityLabel={t('projects.reactivate')}
+                                                        testID="project-reactivate-button"
+                                                    >
+                                                        <Ionicons name="refresh-outline" size={16} color="#3B82F6" />
+                                                        <Text style={[styles.statusButtonText, styles.reactivateText]}>
+                                                            {t('projects.reactivate')}
+                                                        </Text>
+                                                    </TouchableOpacity>
+                                                ) : (
+                                                    <TouchableOpacity
+                                                        onPress={handleArchiveSelectedProject}
+                                                        style={[styles.projectManageButton, styles.archiveButton, { borderColor: tc.border }]}
+                                                        accessibilityRole="button"
+                                                        accessibilityLabel={t('projects.archive')}
+                                                        testID="project-archive-button"
+                                                    >
+                                                        <Ionicons name="archive-outline" size={16} color="#6B7280" />
+                                                        <Text style={[styles.statusButtonText, styles.archiveText]}>
+                                                            {t('projects.archive')}
+                                                        </Text>
+                                                    </TouchableOpacity>
+                                                )}
+                                            </View>
+                                        </View>
+
                                         {selectedProject.isSequential && (
                                             <View style={[styles.reviewContainer, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
                                                 <View style={styles.reviewLabelRow}>
@@ -868,6 +1133,47 @@ export function ProjectDetailModal({
                                                 </View>
                                             </View>
                                         )}
+
+                                        <View style={[styles.reviewContainer, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
+                                            <View style={styles.reviewLabelRow}>
+                                                <Text style={[styles.reviewLabel, { color: tc.text }]}>{projectSectionsLabel}</Text>
+                                                {(canManageProjectSections || selectedProjectSections.length > 0) ? (
+                                                    <TouchableOpacity
+                                                        accessibilityRole="button"
+                                                        accessibilityLabel={selectedProjectSections.length > 0
+                                                            ? tFallback(t, 'settings.manage', 'Manage')
+                                                            : tFallback(t, 'projects.addSection', 'Add Section')}
+                                                        onPress={() => setSectionManagerVisible(true)}
+                                                        style={[styles.smallButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
+                                                        testID="project-sections-button"
+                                                    >
+                                                        <Text style={[styles.smallButtonText, { color: tc.tint }]}>
+                                                            {selectedProjectSections.length > 0
+                                                                ? tFallback(t, 'settings.manage', 'Manage')
+                                                                : tFallback(t, 'projects.addSection', 'Add Section')}
+                                                        </Text>
+                                                    </TouchableOpacity>
+                                                ) : null}
+                                            </View>
+                                            {selectedProjectSections.length === 0 ? (
+                                                <Text style={[styles.helperText, { color: tc.secondaryText }]}>
+                                                    {tFallback(t, 'common.none', 'None')}
+                                                </Text>
+                                            ) : (
+                                                <View style={styles.projectSectionPillRow}>
+                                                    {selectedProjectSections.map((section) => (
+                                                        <View
+                                                            key={section.id}
+                                                            style={[styles.projectSectionPill, { backgroundColor: tc.inputBg, borderColor: tc.border }]}
+                                                        >
+                                                            <Text style={[styles.projectSectionPillText, { color: tc.text }]} numberOfLines={1}>
+                                                                {section.title}
+                                                            </Text>
+                                                        </View>
+                                                    ))}
+                                                </View>
+                                            )}
+                                        </View>
 
                                         <View style={[styles.reviewContainer, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
                                             <Text style={[styles.reviewLabel, { color: tc.text }]}>{t('projects.areaLabel')}</Text>
@@ -1128,31 +1434,79 @@ export function ProjectDetailModal({
                                         </View>
                                     </>
                                 )}
+        </>
+    ) : null;
 
-                                <View
-                                    onLayout={(event) => {
-                                        setProjectTaskListOffsetY(event.nativeEvent.layout.y);
-                                    }}
-                                >
+    return (
+        <Modal
+            visible={overlayVisible}
+            animationType="slide"
+            presentationStyle={presentationStyle}
+            transparent={false}
+            allowSwipeDismissal
+            onRequestClose={closeProjectDetail}
+        >
+            {/* Android Modal content needs its own gesture root; the screen root does not cover Modal.
+                https://docs.swmansion.com/react-native-gesture-handler/docs/fundamentals/installation/#android */}
+            <GestureHandlerRootView style={{ flex: 1 }}>
+                <KeyboardAccessoryHost backgroundColor={tc.bg}>
+                    <SafeAreaView style={[styles.projectDetailRoot, { backgroundColor: tc.bg }]} edges={safeAreaEdges}>
+                        {selectedProject ? (
+                            <>
+                                <View style={modalHeaderStyle}>
+                                    <TouchableOpacity
+                                        onPress={closeProjectDetail}
+                                        style={styles.backButton}
+                                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                                        accessibilityRole="button"
+                                        accessibilityLabel={t('common.back') || 'Back'}
+                                    >
+                                        <Ionicons name="chevron-back" size={24} color={tc.tint} />
+                                    </TouchableOpacity>
+                                    <TextInput
+                                        style={[styles.modalTitle, { color: tc.text, marginLeft: 8, flex: 1 }]}
+                                        value={selectedProject.title}
+                                        onChangeText={(text) => onSetSelectedProject({ ...selectedProject, title: text })}
+                                        onSubmitEditing={() => {
+                                            const title = selectedProject.title.trim();
+                                            if (!title) return;
+                                            updateProject(selectedProject.id, { title });
+                                            onSetSelectedProject({ ...selectedProject, title });
+                                        }}
+                                        onEndEditing={() => {
+                                            const title = selectedProject.title.trim();
+                                            if (!title) return;
+                                            updateProject(selectedProject.id, { title });
+                                            onSetSelectedProject({ ...selectedProject, title });
+                                        }}
+                                        returnKeyType="done"
+                                    />
+                                </View>
+                                {projectTaskPinnedToolbar}
+                                {projectTaskSelectionBulkBar}
+                                <ProjectDetailScrollFrame backgroundColor={tc.bg}>
+                                {projectTaskReorderMode ? projectDetailListHeader : null}
+
+                                <View style={styles.projectReorderListFill}>
                                     <TaskList
                                         statusFilter="all"
                                         title={selectedProject.title}
-                                        filterSheetAccessory={projectTaskFilterAccessory}
-                                        extraFilterActiveCount={projectTaskFilterActiveCount}
-                                        onClearExtraFilters={clearProjectTaskFilters}
                                         showHeader={false}
+                                        showFilterButton={false}
+                                        onFilterStateChange={handleProjectFilterStateChange}
                                         showTimeEstimateFilters={false}
                                         projectId={selectedProject.id}
                                         taskSource={selectedProjectTasks}
-                                        allowAdd={taskListOptions.allowAdd}
-                                        staticList
-                                        staticListVirtualization={{
-                                            scrollOffsetY: projectDetailScrollWindow.offsetY,
-                                            viewportHeight: projectDetailScrollWindow.viewportHeight,
-                                        }}
+                                        allowAdd={false}
+                                        bulkBarPlacement="external"
+                                        listHeaderComponent={projectTaskReorderMode ? null : projectDetailListHeader}
+                                        listRef={projectDetailListRef}
+                                        onListScroll={handleProjectListScroll}
+                                        contentPaddingBottom={projectDetailKeyboardBottomInset > 0 ? projectDetailKeyboardBottomInset + 12 : 12}
                                         enableBulkActions
+                                        enableProjectBulkOrganize={taskListOptions.allowAdd}
+                                        onBulkBarPropsChange={handleProjectBulkBarPropsChange}
                                         externalFilterOpenSignal={projectTaskFilterOpenSignal}
-                                        externalQuickAddFocusSignal={projectQuickAddFocusSignal}
                                         showSort={false}
                                         enableProjectReorder={taskListOptions.enableProjectReorder}
                                         projectSortBy={projectTaskSortBy}
@@ -1167,6 +1521,28 @@ export function ProjectDetailModal({
                                     />
                                 </View>
                                 </ProjectDetailScrollFrame>
+                                <TaskListSortModal
+                                    onClose={() => setProjectSortModalVisible(false)}
+                                    onSelect={handleProjectTaskSortSelect}
+                                    sortBy={projectTaskSortBy}
+                                    sortOptions={PROJECT_TASK_SORT_OPTIONS}
+                                    t={t}
+                                    themeColors={tc}
+                                    visible={projectSortModalVisible}
+                                />
+                                <ProjectSectionManagerModal
+                                    addSection={addSection}
+                                    canManage={canManageProjectSections}
+                                    deleteSection={deleteSection}
+                                    onClose={() => setSectionManagerVisible(false)}
+                                    projectId={selectedProject.id}
+                                    reorderSections={reorderSections}
+                                    sections={selectedProjectSections}
+                                    t={t}
+                                    tc={tc}
+                                    updateSection={updateSection}
+                                    visible={sectionManagerVisible}
+                                />
                                 <ExpandedMarkdownEditor
                                     isOpen={notesFullscreen}
                                     onClose={onCloseNotesFullscreen}

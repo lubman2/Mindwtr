@@ -88,13 +88,15 @@ const normalizeEventPaths = (paths: string[], config: ObsidianConfig): string[] 
 const scanConfigChanged = (left: ObsidianConfig, right: ObsidianConfig): boolean => {
     return left.vaultPath !== right.vaultPath
         || left.scanFolders.join('\n') !== right.scanFolders.join('\n')
-        || left.taskNotesIncludeArchived !== right.taskNotesIncludeArchived;
+        || left.taskNotesIncludeArchived !== right.taskNotesIncludeArchived
+        || left.dataviewMetadataEnabled !== right.dataviewMetadataEnabled;
 };
 
 const buildScanKey = (config: ObsidianConfig): string => JSON.stringify({
     enabled: config.enabled,
     scanFolders: config.scanFolders,
     taskNotesIncludeArchived: config.taskNotesIncludeArchived,
+    dataviewMetadataEnabled: config.dataviewMetadataEnabled,
     vaultPath: config.vaultPath,
 });
 

@@ -1,5 +1,8 @@
 import type { Task, TaskStatus } from './types';
 import { normalizeRecurrenceForLoad } from './recurrence';
+import { normalizeRepeatReminderMinutes } from './schedule-utils';
+import { normalizeTimeSpentMinutes } from './time-spent';
+import { normalizeRelativeStartOffset } from './task-relative-start';
 import { safeParseDate } from './date';
 
 export const TASK_STATUS_VALUES: TaskStatus[] = ['inbox', 'next', 'waiting', 'someday', 'reference', 'done', 'archived'];
@@ -90,6 +93,9 @@ export function normalizeTaskForLoad(task: Task, nowIso: string = new Date().toI
         : Number.isFinite((task as Task & { orderNum?: unknown }).orderNum)
             ? ((task as Task & { orderNum?: number }).orderNum as number)
             : undefined;
+    const relativeStartOffset = task.dueDate
+        ? normalizeRelativeStartOffset(task.relativeStartOffset)
+        : undefined;
     const next: Task = {
         ...rest,
         createdAt: createdAtIso,
@@ -100,6 +106,9 @@ export function normalizeTaskForLoad(task: Task, nowIso: string = new Date().toI
         order: normalizedOrder,
         orderNum: normalizedOrder,
         recurrence: normalizeRecurrenceForLoad(task.recurrence),
+        repeatReminderMinutes: normalizeRepeatReminderMinutes(task.repeatReminderMinutes),
+        timeSpentMinutes: normalizeTimeSpentMinutes(task.timeSpentMinutes),
+        relativeStartOffset,
         rev,
         ...(revBy ? { revBy } : {}),
         ...(textDirection ? { textDirection } : {}),

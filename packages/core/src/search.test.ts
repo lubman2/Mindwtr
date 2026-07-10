@@ -240,6 +240,35 @@ describe('search', () => {
         expect(results.map((task) => task.id)).toEqual(['t1']);
     });
 
+    it('matches assigned people in unfielded task searches', () => {
+        const nowIso = new Date('2025-01-01T00:00:00Z').toISOString();
+        const tasks: Task[] = [
+            {
+                id: 't1',
+                title: 'Follow up on invoice',
+                status: 'waiting',
+                assignedTo: 'John Smith',
+                tags: [],
+                contexts: [],
+                createdAt: nowIso,
+                updatedAt: nowIso,
+            },
+            {
+                id: 't2',
+                title: 'Review contract',
+                status: 'waiting',
+                assignedTo: 'Sarah',
+                tags: [],
+                contexts: [],
+                createdAt: nowIso,
+                updatedAt: nowIso,
+            },
+        ];
+
+        const results = filterTasksBySearch(tasks, [], 'john');
+        expect(results.map((task) => task.id)).toEqual(['t1']);
+    });
+
     it('matches location text and location field filters', () => {
         const nowIso = new Date('2025-01-01T00:00:00Z').toISOString();
         const tasks: Task[] = [

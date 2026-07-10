@@ -99,7 +99,7 @@ describe('area actions', () => {
         expect(saved.tasks.find((item) => item.title === 'Project task')?.deletedAt).toBeUndefined();
     });
 
-    it('restores only children deleted by the area cascade', async () => {
+    it('restores the area without resurrecting independently deleted children', async () => {
         const { addArea, addProject, addSection, addTask, deleteArea, deleteProject, deleteTask, restoreArea } = useTaskStore.getState();
         const area = await addArea('Work');
         expect(area).not.toBeNull();
@@ -156,7 +156,8 @@ describe('area actions', () => {
 
         const merged = mergeAppData(
             { tasks: [], projects: [], sections: [], areas: [deletedArea], settings: {} },
-            { tasks: [], projects: [], sections: [], areas: [olderLiveArea], settings: {} }
+            { tasks: [], projects: [], sections: [], areas: [olderLiveArea], settings: {} },
+            { nowIso: deletedAt }
         );
 
         expect(merged.areas).toHaveLength(1);

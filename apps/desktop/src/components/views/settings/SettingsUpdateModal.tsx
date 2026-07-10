@@ -34,6 +34,9 @@ export function SettingsUpdateModal({
     onDownload,
 }: SettingsUpdateModalProps) {
     if (!isOpen || !updateInfo) return null;
+    const primaryActionLabel = updateInfo.installSource === 'microsoft-store'
+        ? t.checkStoreUpdates
+        : t.download;
     return (
         <ModalPortal>
         <div
@@ -93,7 +96,7 @@ export function SettingsUpdateModal({
                         )}
                     >
                         <ExternalLink className="w-4 h-4" />
-                        {isDownloading ? t.downloadStarting : t.download}
+                        {isDownloading ? t.downloadStarting : primaryActionLabel}
                     </button>
                 </div>
             </div>

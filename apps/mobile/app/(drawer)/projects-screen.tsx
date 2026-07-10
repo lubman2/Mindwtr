@@ -1,13 +1,23 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { View, Text, TextInput, TouchableOpacity, Alert, FlatList, Dimensions, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { AREA_PRESET_COLORS, Attachment, DEFAULT_PROJECT_COLOR, Project, shallow, Task, type TaskSortBy, useTaskStore } from '@mindwtr/core';
+import { AREA_PRESET_COLORS, Attachment, DEFAULT_PROJECT_COLOR, Project, shallow, Task, type Section, type TaskSortBy, useTaskStore } from '@mindwtr/core';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ChevronDown, ChevronRight, Plus } from 'lucide-react-native';
 
+import {
+  DEFAULT_PROJECT_LIST_VIEW_STATE,
+  PROJECT_LIST_VIEW_STATE_STORAGE_KEY,
+  type ProjectListViewState,
+  compactCollapsedAreas,
+  readProjectListViewState,
+  serializeProjectListViewState,
+} from '@/lib/view-state/project-list-view-state';
 import { projectsScreenStyles as styles } from '@/components/projects-screen/projects-screen.styles';
 import {
+  buildProjectQuickCaptureReturnTo,
   formatProjectDate,
   normalizeProjectTag,
   resolveAttachmentValidationMessage,
@@ -27,18 +37,19 @@ import { TaskEditModal } from '@/components/task-edit-modal';
 import type { TaskEditTab } from '@/components/task-edit/use-task-edit-state';
 import { useProjectFiltering } from '@/hooks/use-project-filtering';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
+import { useQuickCapture } from '../../contexts/quick-capture-context';
 import { useLanguage } from '../../contexts/language-context';
 import { useToast } from '../../contexts/toast-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
 import { ListSectionHeader, defaultListContentStyle } from '@/components/list-layout';
 import { logError, logWarn } from '../../lib/app-log';
-import { AREA_FILTER_ALL, AREA_FILTER_NONE } from '@/lib/area-filter';
+import { AREA_FILTER_ALL, AREA_FILTER_NONE } from '@mindwtr/core';
 import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigation';
+import { CompactText, CompactTextInput } from '@/components/compact-text';
 
-type ProjectTaskSortBy = Extract<TaskSortBy, 'default' | 'due'>;
+type ProjectTaskSortBy = TaskSortBy;
 const EMPTY_PROJECT_TASKS: Task[] = [];
-const COMPACT_PROJECT_TEXT_MAX_SCALE = 1.2;
-
 function resolveTaskRouteTab(value?: string | string[]): TaskEditTab {
   const routeValue = Array.isArray(value) ? value[0] : value;
   return routeValue === 'task' ? 'task' : 'view';
@@ -48,11 +59,16 @@ export default function ProjectsScreen() {
   const {
     projects,
     tasks,
+    sections,
     addProject,
     updateProject,
     deleteProject,
     restoreProject,
     duplicateProject,
+    addSection,
+    updateSection,
+    deleteSection,
+    reorderSections,
     toggleProjectFocus,
     addArea,
     updateArea,
@@ -65,11 +81,16 @@ export default function ProjectsScreen() {
   } = useTaskStore((state) => ({
     projects: state.projects,
     tasks: state.tasks,
+    sections: state.sections,
     addProject: state.addProject,
     updateProject: state.updateProject,
     deleteProject: state.deleteProject,
     restoreProject: state.restoreProject,
     duplicateProject: state.duplicateProject,
+    addSection: state.addSection,
+    updateSection: state.updateSection,
+    deleteSection: state.deleteSection,
+    reorderSections: state.reorderSections,
     toggleProjectFocus: state.toggleProjectFocus,
     addArea: state.addArea,
     updateArea: state.updateArea,
@@ -82,7 +103,9 @@ export default function ProjectsScreen() {
   }), shallow);
   const { t, language } = useLanguage();
   const { showToast } = useToast();
+  const { openQuickCapture } = useQuickCapture();
   const tc = useThemeColors();
+  const filledButton = useFilledButtonColors();
   const {
     focusedProjectCount,
     projectTaskSummaryById,
@@ -97,6 +120,7 @@ export default function ProjectsScreen() {
     archived: { text: tc.secondaryText, bg: tc.filterBg, border: tc.border },
   };
   const [newProjectTitle, setNewProjectTitle] = useState('');
+  const [newProjectAreaId, setNewProjectAreaId] = useState('');
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [projectTaskSortBy, setProjectTaskSortBy] = useState<ProjectTaskSortBy>('default');
   const [showProjectMeta, setShowProjectMeta] = useState(false);
@@ -120,24 +144,51 @@ export default function ProjectsScreen() {
   const [selectedTagFilter, setSelectedTagFilter] = useState(ALL_TAGS);
   const [showTagPicker, setShowTagPicker] = useState(false);
   const [collapsedAreas, setCollapsedAreas] = useState<Record<string, boolean>>({});
+  const [projectListViewStateHydrated, setProjectListViewStateHydrated] = useState(false);
   const [showDeferredProjects, setShowDeferredProjects] = useState(false);
   const [showArchivedProjects, setShowArchivedProjects] = useState(false);
   const [showCompletedProjectTasks, setShowCompletedProjectTasks] = useState(false);
+  const projectListViewStateRef = useRef<ProjectListViewState>(DEFAULT_PROJECT_LIST_VIEW_STATE);
+  const projectListViewStateTouchedRef = useRef(false);
   const {
     areaById,
     resolvedAreaFilter: selectedAreaFilter,
     sortedAreas,
   } = useMobileAreaFilter();
 
+  useEffect(() => {
+    setNewProjectAreaId(
+      selectedAreaFilter !== ALL_AREAS && selectedAreaFilter !== NO_AREA ? selectedAreaFilter : ''
+    );
+  }, [selectedAreaFilter, ALL_AREAS, NO_AREA]);
+
   const logProjectError = useCallback((message: string, error?: unknown) => {
     if (!error) return;
     void logError(error, { scope: 'project', extra: { message } });
+  }, []);
+  const applyProjectListViewState = useCallback((nextState: ProjectListViewState) => {
+    const compactState = {
+      ...nextState,
+      collapsedAreas: compactCollapsedAreas(nextState.collapsedAreas),
+    };
+    projectListViewStateRef.current = compactState;
+    setCollapsedAreas(compactState.collapsedAreas);
+    setShowArchivedProjects(compactState.showArchivedProjects);
+    setShowDeferredProjects(compactState.showDeferredProjects);
+  }, []);
+  const persistProjectListViewState = useCallback((nextState: ProjectListViewState) => {
+    const compactState = {
+      ...nextState,
+      collapsedAreas: compactCollapsedAreas(nextState.collapsedAreas),
+    };
+    projectListViewStateRef.current = compactState;
+    AsyncStorage.setItem(PROJECT_LIST_VIEW_STATE_STORAGE_KEY, serializeProjectListViewState(compactState))
+      .catch(() => undefined);
   }, []);
   const resolveText = useCallback((key: string, fallback: string) => {
     const value = t(key);
     return value && value !== key ? value : fallback;
   }, [t]);
-  const undoNotificationsEnabled = settings?.undoNotificationsEnabled !== false;
   const [showTagFilter, setShowTagFilter] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
   const windowHeight = Dimensions.get('window').height;
@@ -203,6 +254,29 @@ export default function ProjectsScreen() {
     updateProject,
     language,
   });
+
+  useEffect(() => {
+    let active = true;
+    AsyncStorage.getItem(PROJECT_LIST_VIEW_STATE_STORAGE_KEY)
+      .then((raw) => {
+        if (!active) return;
+        if (!projectListViewStateTouchedRef.current) {
+          const persisted = readProjectListViewState(raw);
+          if (persisted) {
+            applyProjectListViewState(persisted);
+          }
+        }
+        setProjectListViewStateHydrated(true);
+      })
+      .catch(() => {
+        if (active) {
+          setProjectListViewStateHydrated(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [applyProjectListViewState]);
   const {
     linkModalVisible,
     setLinkModalVisible,
@@ -224,29 +298,50 @@ export default function ProjectsScreen() {
     logProjectError,
   });
 
-  const projectListRows = useMemo(() => buildProjectListRows({
+  const projectListRows = useMemo(() => {
+    if (!projectListViewStateHydrated) return [];
+    return buildProjectListRows({
+      areaById,
+      collapsedAreas,
+      groupedActiveProjects,
+      groupedArchivedProjects,
+      groupedDeferredProjects,
+      showArchivedProjects,
+      showDeferredProjects,
+      t,
+    });
+  }, [
     areaById,
     collapsedAreas,
     groupedActiveProjects,
     groupedArchivedProjects,
     groupedDeferredProjects,
-    showArchivedProjects,
-    showDeferredProjects,
-    t,
-  }), [
-    areaById,
-    collapsedAreas,
-    groupedActiveProjects,
-    groupedArchivedProjects,
-    groupedDeferredProjects,
+    projectListViewStateHydrated,
     showArchivedProjects,
     showDeferredProjects,
     t,
   ]);
+  const projectListEmptyLabel = projectListViewStateHydrated
+    ? t('projects.empty')
+    : resolveText('common.loading', 'Loading...');
+
+  // Memos key off the id so a project object refresh with the same id reuses results.
+  const selectedProjectIdForLists = selectedProject?.id ?? null;
   const selectedProjectTasks = useMemo(
-    () => (selectedProject ? tasksByProjectId.get(selectedProject.id) ?? EMPTY_PROJECT_TASKS : EMPTY_PROJECT_TASKS),
-    [tasksByProjectId, selectedProject?.id]
+    () => (selectedProjectIdForLists ? tasksByProjectId.get(selectedProjectIdForLists) ?? EMPTY_PROJECT_TASKS : EMPTY_PROJECT_TASKS),
+    [tasksByProjectId, selectedProjectIdForLists]
   );
+  const selectedProjectSections = useMemo<Section[]>(() => {
+    if (!selectedProjectIdForLists) return [];
+    return sections
+      .filter((section) => section.projectId === selectedProjectIdForLists && !section.deletedAt)
+      .sort((a, b) => {
+        const aOrder = Number.isFinite(a.order) ? a.order : 0;
+        const bOrder = Number.isFinite(b.order) ? b.order : 0;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+        return a.title.localeCompare(b.title);
+      });
+  }, [sections, selectedProjectIdForLists]);
 
   const openProject = useCallback((project: Project) => {
     setSelectedProject(project);
@@ -258,6 +353,16 @@ export default function ProjectsScreen() {
     setShowStatusMenu(false);
     resetProjectAttachmentUi();
   }, [resetProjectAttachmentUi, resetProjectNotesUi]);
+
+  const openProjectQuickAdd = useCallback((projectToAddTo: Project) => {
+    openQuickCapture({
+      initialProps: {
+        projectId: projectToAddTo.id,
+        status: 'next',
+      },
+      returnTo: buildProjectQuickCaptureReturnTo(projectToAddTo.id),
+    });
+  }, [openQuickCapture]);
 
   useEffect(() => {
     if (!projectId || typeof projectId !== 'string') return;
@@ -320,7 +425,6 @@ export default function ProjectsScreen() {
         if (selectedProject?.id === projectIdToDelete) {
           setSelectedProject(null);
         }
-        if (!undoNotificationsEnabled) return;
         showToast({
           title: resolveText('common.notice', 'Notice'),
           message: resolveText('projects.deleted', 'Project moved to Trash'),
@@ -355,7 +459,6 @@ export default function ProjectsScreen() {
     restoreProject,
     selectedProject?.id,
     showToast,
-    undoNotificationsEnabled,
   ]);
 
   const handleDuplicateProject = useCallback((projectIdToDuplicate: string) => {
@@ -404,11 +507,41 @@ export default function ProjectsScreen() {
   };
 
   const toggleAreaCollapse = useCallback((areaId: string) => {
-    setCollapsedAreas((current) => ({
+    projectListViewStateTouchedRef.current = true;
+    const current = projectListViewStateRef.current;
+    const collapsedAreas = { ...current.collapsedAreas };
+    if (collapsedAreas[areaId]) {
+      delete collapsedAreas[areaId];
+    } else {
+      collapsedAreas[areaId] = true;
+    }
+    const nextState = {
       ...current,
-      [areaId]: !(current[areaId] ?? false),
-    }));
-  }, []);
+      collapsedAreas,
+    };
+    setCollapsedAreas(compactCollapsedAreas(collapsedAreas));
+    persistProjectListViewState(nextState);
+  }, [persistProjectListViewState]);
+
+  const toggleProjectSection = useCallback((sectionKind: Extract<ProjectListRow, { type: 'section-toggle' }>['sectionKind']) => {
+    projectListViewStateTouchedRef.current = true;
+    const current = projectListViewStateRef.current;
+    if (sectionKind === 'deferred') {
+      const nextState = {
+        ...current,
+        showDeferredProjects: !current.showDeferredProjects,
+      };
+      setShowDeferredProjects(nextState.showDeferredProjects);
+      persistProjectListViewState(nextState);
+      return;
+    }
+    const nextState = {
+      ...current,
+      showArchivedProjects: !current.showArchivedProjects,
+    };
+    setShowArchivedProjects(nextState.showArchivedProjects);
+    persistProjectListViewState(nextState);
+  }, [persistProjectListViewState]);
 
   const renderProjectListRow = ({ item, index }: { item: ProjectListRow; index: number }) => {
     if (item.type === 'section-label') {
@@ -420,11 +553,7 @@ export default function ProjectsScreen() {
       return (
         <TouchableOpacity
           onPress={() => {
-            if (item.sectionKind === 'deferred') {
-              setShowDeferredProjects((current) => !current);
-              return;
-            }
-            setShowArchivedProjects((current) => !current);
+            toggleProjectSection(item.sectionKind);
           }}
           style={[
             styles.collapsibleSectionToggle,
@@ -479,15 +608,16 @@ export default function ProjectsScreen() {
 
   const handleAddProject = () => {
     if (newProjectTitle.trim()) {
-      const inferredAreaId =
-        selectedAreaFilter !== ALL_AREAS && selectedAreaFilter !== NO_AREA && areaById.has(selectedAreaFilter)
-          ? selectedAreaFilter
-          : undefined;
-      const areaColor = inferredAreaId ? areaById.get(inferredAreaId)?.color : undefined;
+      const resolvedAreaId =
+        newProjectAreaId && areaById.has(newProjectAreaId) ? newProjectAreaId : undefined;
+      const areaColor = resolvedAreaId ? areaById.get(resolvedAreaId)?.color : undefined;
       addProject(newProjectTitle, areaColor || DEFAULT_PROJECT_COLOR, {
-        areaId: inferredAreaId,
+        areaId: resolvedAreaId,
       });
       setNewProjectTitle('');
+      setNewProjectAreaId(
+        selectedAreaFilter !== ALL_AREAS && selectedAreaFilter !== NO_AREA ? selectedAreaFilter : ''
+      );
     }
   };
 
@@ -617,7 +747,7 @@ export default function ProjectsScreen() {
       <View style={[styles.container, { backgroundColor: tc.bg }]}>
       <View style={[styles.inputContainer, { borderBottomColor: tc.border }]}>
         <View style={styles.addProjectRow}>
-          <TextInput
+          <CompactTextInput
             style={[styles.input, styles.addProjectInput, { borderColor: tc.border, backgroundColor: tc.inputBg, color: tc.text }]}
             placeholder={t('projects.addPlaceholder')}
             placeholderTextColor={tc.secondaryText}
@@ -625,7 +755,7 @@ export default function ProjectsScreen() {
             onChangeText={setNewProjectTitle}
             onSubmitEditing={handleAddProject}
             returnKeyType="done"
-            maxFontSizeMultiplier={COMPACT_PROJECT_TEXT_MAX_SCALE}
+            accessibilityLabel={t('projects.addPlaceholder')}
           />
           <TouchableOpacity
             accessibilityRole="button"
@@ -633,35 +763,85 @@ export default function ProjectsScreen() {
             onPress={handleAddProject}
             style={[
               styles.addIconButton,
-              { backgroundColor: tc.tint },
+              { backgroundColor: filledButton.backgroundColor },
               !newProjectTitle.trim() && styles.addButtonDisabled,
             ]}
             disabled={!newProjectTitle.trim()}
           >
-            <Plus size={22} color={tc.onTint} strokeWidth={2.4} />
+            <Plus size={22} color={filledButton.textColor ?? tc.onTint} strokeWidth={2.4} />
           </TouchableOpacity>
         </View>
+        {newProjectTitle.trim().length > 0 && sortedAreas.length > 0 && (
+          <View style={styles.tagFilterChips}>
+            <TouchableOpacity
+              style={[
+                styles.tagFilterChip,
+                newProjectAreaId === ''
+                  ? { borderColor: tc.tint, backgroundColor: tc.tint }
+                  : { borderColor: tc.border, backgroundColor: tc.cardBg },
+              ]}
+              onPress={() => setNewProjectAreaId('')}
+              accessibilityRole="button"
+              accessibilityLabel={t('projects.noArea')}
+              accessibilityState={{ selected: newProjectAreaId === '' }}
+            >
+              <Text
+                style={[
+                  styles.tagFilterText,
+                  { color: newProjectAreaId === '' ? tc.onTint : tc.text },
+                ]}
+              >
+                {t('projects.noArea')}
+              </Text>
+            </TouchableOpacity>
+            {sortedAreas.map((area) => (
+              <TouchableOpacity
+                key={area.id}
+                style={[
+                  styles.tagFilterChip,
+                  newProjectAreaId === area.id
+                    ? { borderColor: tc.tint, backgroundColor: tc.tint }
+                    : { borderColor: tc.border, backgroundColor: tc.cardBg },
+                ]}
+                onPress={() => setNewProjectAreaId(area.id)}
+                accessibilityRole="button"
+                accessibilityLabel={area.name}
+                accessibilityState={{ selected: newProjectAreaId === area.id }}
+              >
+                <Text
+                  style={[
+                    styles.tagFilterText,
+                    { color: newProjectAreaId === area.id ? tc.onTint : tc.text },
+                  ]}
+                >
+                  {area.name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
         <View style={styles.filterSection}>
           <TouchableOpacity
             style={styles.filterHeader}
             onPress={() => setShowTagFilter((prev) => !prev)}
+            accessibilityRole="button"
+            accessibilityLabel={`${t('projects.tagFilter')}: ${showTagFilter ? t('filters.hide') : t('filters.show')}`}
+            accessibilityState={{ expanded: showTagFilter }}
           >
-            <Text
+            <CompactText
               style={[styles.tagFilterLabel, { color: tc.text }]}
               numberOfLines={1}
-              maxFontSizeMultiplier={COMPACT_PROJECT_TEXT_MAX_SCALE}
             >
               {t('projects.tagFilter')}
-            </Text>
-            <Text
+            </CompactText>
+            <CompactText
               style={[styles.filterToggleText, { color: tc.secondaryText }]}
               numberOfLines={1}
               adjustsFontSizeToFit
               minimumFontScale={0.78}
-              maxFontSizeMultiplier={COMPACT_PROJECT_TEXT_MAX_SCALE}
             >
               {showTagFilter ? t('filters.hide') : t('filters.show')}
-            </Text>
+            </CompactText>
           </TouchableOpacity>
           {showTagFilter && (
             <View style={styles.tagFilterChips}>
@@ -673,6 +853,9 @@ export default function ProjectsScreen() {
                     : { borderColor: tc.border, backgroundColor: tc.cardBg },
                 ]}
                 onPress={() => setSelectedTagFilter(ALL_TAGS)}
+                accessibilityRole="button"
+                accessibilityLabel={t('projects.allTags')}
+                accessibilityState={{ selected: selectedTagFilter === ALL_TAGS }}
               >
                 <Text
                   style={[
@@ -693,6 +876,9 @@ export default function ProjectsScreen() {
                       : { borderColor: tc.border, backgroundColor: tc.cardBg },
                   ]}
                   onPress={() => setSelectedTagFilter(tag)}
+                  accessibilityRole="button"
+                  accessibilityLabel={tag}
+                  accessibilityState={{ selected: selectedTagFilter === tag }}
                 >
                   <Text
                     style={[
@@ -713,6 +899,9 @@ export default function ProjectsScreen() {
                       : { borderColor: tc.border, backgroundColor: tc.cardBg },
                   ]}
                   onPress={() => setSelectedTagFilter(NO_TAGS)}
+                  accessibilityRole="button"
+                  accessibilityLabel={t('projects.noTags')}
+                  accessibilityState={{ selected: selectedTagFilter === NO_TAGS }}
                 >
                   <Text
                     style={[
@@ -736,14 +925,16 @@ export default function ProjectsScreen() {
         style={{ flex: 1 }}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
-            <Text style={[styles.emptyText, { color: tc.secondaryText }]}>{t('projects.empty')}</Text>
+            <Text style={[styles.emptyText, { color: tc.secondaryText }]}>{projectListEmptyLabel}</Text>
           </View>
         }
         renderItem={renderProjectListRow}
+        removeClippedSubviews={false}
       />
 
       <ProjectDetailModal
         addProjectFileAttachment={addProjectFileAttachment}
+        addSection={addSection}
         closeProjectDetail={closeProjectDetail}
         commitSelectedProjectNotes={commitSelectedProjectNotes}
         formatProjectDate={formatProjectDate}
@@ -763,8 +954,11 @@ export default function ProjectsScreen() {
         onDownloadAttachment={downloadAttachment}
         onOpenAreaPicker={openAreaPicker}
         onOpenAttachment={openAttachment}
+        onOpenProjectQuickAdd={openProjectQuickAdd}
         onOpenTagPicker={openTagPicker}
         onRemoveProjectAttachment={removeProjectAttachment}
+        deleteSection={deleteSection}
+        reorderSections={reorderSections}
         onSetLinkInput={setLinkInput}
         onSetLinkModalVisible={setLinkModalVisible}
         onSetNotesExpanded={setNotesExpanded}
@@ -782,6 +976,7 @@ export default function ProjectsScreen() {
         presentationStyle={Platform.OS === 'ios' ? 'pageSheet' : 'fullScreen'}
         projectTaskSortBy={projectTaskSortBy}
         selectedProject={selectedProject}
+        selectedProjectSections={selectedProjectSections}
         selectedProjectTasks={selectedProjectTasks}
         selectedProjectAreaName={selectedProjectAreaName}
         selectedProjectNotes={selectedProjectNotes}
@@ -800,6 +995,7 @@ export default function ProjectsScreen() {
         t={t}
         tc={tc}
         updateProject={updateProject}
+        updateSection={updateSection}
       />
 
       <TaskEditModal

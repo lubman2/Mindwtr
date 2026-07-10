@@ -6,8 +6,8 @@ if [ -z "${FASTLANE_METADATA_DIR:-}" ]; then
   exit 1
 fi
 
-APP_SUPPORT_URL="${APP_SUPPORT_URL:-https://github.com/dongdongbh/Mindwtr/issues}"
-APP_MARKETING_URL="${APP_MARKETING_URL:-https://github.com/dongdongbh/Mindwtr}"
+APP_SUPPORT_URL="${APP_SUPPORT_URL:-https://mindwtr.app/support}"
+APP_MARKETING_URL="${APP_MARKETING_URL:-https://mindwtr.app/}"
 
 rm -rf "${FASTLANE_METADATA_DIR}"
 mkdir -p "${FASTLANE_METADATA_DIR}"

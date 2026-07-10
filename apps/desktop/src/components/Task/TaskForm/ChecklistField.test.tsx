@@ -12,11 +12,9 @@ const initialChecklist: NonNullable<Task['checklist']> = [
 
 function ChecklistHarness({
     initial = initialChecklist,
-    description,
     onUpdateTask,
 }: {
     initial?: Task['checklist'];
-    description?: string;
     onUpdateTask?: (updates: Partial<Task>) => void;
 }) {
     const [checklist, setChecklist] = useState<Task['checklist']>(initial);
@@ -25,7 +23,6 @@ function ChecklistHarness({
             t={(key) => key}
             taskId="task-1"
             checklist={checklist}
-            description={description}
             updateTask={(_taskId, updates) => {
                 onUpdateTask?.(updates);
                 setChecklist(updates.checklist ?? []);
@@ -51,13 +48,10 @@ describe('ChecklistField', () => {
         expect(reordered?.map((item) => item.isCompleted)).toEqual([false, false, true]);
     });
 
-    it('syncs existing markdown task-list lines when checklist completion changes', () => {
+    it('never touches the description when checklist completion changes', () => {
         const updates: Partial<Task>[] = [];
         const { getByRole } = render(
-            <ChecklistHarness
-                description={'Intro\n- [ ] Item 1\n- [ ] Item 2\n- [ ] Item 3\nOutro'}
-                onUpdateTask={(next) => updates.push(next)}
-            />
+            <ChecklistHarness onUpdateTask={(next) => updates.push(next)} />
         );
 
         fireEvent.click(getByRole('button', { name: 'taskEdit.checklist 1' }));
@@ -68,7 +62,6 @@ describe('ChecklistField', () => {
                 { id: '2', title: 'Item 2', isCompleted: false },
                 { id: '3', title: 'Item 3', isCompleted: false },
             ],
-            description: 'Intro\n- [x] Item 1\n- [ ] Item 2\n- [ ] Item 3\nOutro',
         });
     });
 
@@ -199,6 +192,95 @@ describe('ChecklistField', () => {
         } finally {
             focusSpy.mockRestore();
         }
+    });
+
+    it('splits multi-line pasted text into separate checklist items', () => {
+        const updates: Partial<Task>[] = [];
+        const { getAllByRole } = render(<ChecklistHarness onUpdateTask={(next) => updates.push(next)} />);
+
+        const input = getAllByRole('textbox')[0] as HTMLInputElement;
+        input.setSelectionRange(0, input.value.length);
+        fireEvent.paste(input, {
+            clipboardData: { getData: () => 'buy milk\nbuy bread\n- [x] call mom' },
+        });
+
+        const titles = (getAllByRole('textbox') as HTMLInputElement[]).map((node) => node.value);
+        expect(titles).toEqual(['buy milk', 'buy bread', 'call mom', 'Item 2', 'Item 3']);
+
+        const committed = updates[updates.length - 1]?.checklist;
+        expect(committed?.map((item) => item.title)).toEqual(['buy milk', 'buy bread', 'call mom', 'Item 2', 'Item 3']);
+        expect(committed?.[0]?.id).toBe('1');
+        expect(committed?.[2]?.isCompleted).toBe(true);
+    });
+
+    it('inserts pasted lines at the cursor position within the current item title', () => {
+        const { getAllByRole } = render(<ChecklistHarness />);
+
+        const input = getAllByRole('textbox')[0] as HTMLInputElement;
+        input.setSelectionRange(input.value.length, input.value.length);
+        fireEvent.paste(input, {
+            clipboardData: { getData: () => ' extended\nsecond line' },
+        });
+
+        const titles = (getAllByRole('textbox') as HTMLInputElement[]).map((node) => node.value);
+        expect(titles).toEqual(['Item 1 extended', 'second line', 'Item 2', 'Item 3']);
+    });
+
+    it('leaves single-line pastes to the native input behavior', () => {
+        const updates: Partial<Task>[] = [];
+        const { getAllByRole } = render(<ChecklistHarness onUpdateTask={(next) => updates.push(next)} />);
+
+        const input = getAllByRole('textbox')[0] as HTMLInputElement;
+        fireEvent.paste(input, {
+            clipboardData: { getData: () => 'just one line' },
+        });
+
+        expect(updates).toHaveLength(0);
+        expect(getAllByRole('textbox')).toHaveLength(3);
+    });
+
+    it('keeps in-progress checklist typing when the checklist prop refreshes with a new identity', () => {
+        const props = {
+            t: (key: string) => key,
+            taskId: 'task-1',
+            checklist: initialChecklist,
+            updateTask: () => {},
+            resetTaskChecklist: () => {},
+        };
+        const { getAllByRole, rerender } = render(<ChecklistField {...props} />);
+
+        const input = getAllByRole('textbox')[0] as HTMLInputElement;
+        fireEvent.change(input, { target: { value: 'Item 1 edited' } });
+        expect((getAllByRole('textbox')[0] as HTMLInputElement).value).toBe('Item 1 edited');
+
+        // Simulate a background store refresh (e.g. after sync) delivering an
+        // equal checklist with fresh object identity while the user is typing.
+        rerender(<ChecklistField {...props} checklist={initialChecklist.map((item) => ({ ...item }))} />);
+
+        expect((getAllByRole('textbox')[0] as HTMLInputElement).value).toBe('Item 1 edited');
+    });
+
+    it('resets the checklist draft when switching to another task', () => {
+        const props = {
+            t: (key: string) => key,
+            taskId: 'task-1',
+            checklist: initialChecklist,
+            updateTask: () => {},
+            resetTaskChecklist: () => {},
+        };
+        const { getAllByRole, rerender } = render(<ChecklistField {...props} />);
+
+        fireEvent.change(getAllByRole('textbox')[0], { target: { value: 'Item 1 edited' } });
+
+        rerender(
+            <ChecklistField
+                {...props}
+                taskId="task-2"
+                checklist={[{ id: '9', title: 'Other task item', isCompleted: false }]}
+            />
+        );
+
+        expect((getAllByRole('textbox')[0] as HTMLInputElement).value).toBe('Other task item');
     });
 
     it('keeps the add-item click from blurring the current editor control first', () => {

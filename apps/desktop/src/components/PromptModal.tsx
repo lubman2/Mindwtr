@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useState, type MouseEvent } from 'react';
 import { useLanguage } from '../contexts/language-context';
 import { ModalPortal } from './ModalPortal';
 import { Button } from './ui/Button';
@@ -11,6 +11,8 @@ interface PromptModalProps {
     defaultValue?: string;
     inputType?: 'text' | 'date' | 'datetime-local';
     allowEmptyConfirm?: boolean;
+    browseLabel?: string;
+    onBrowse?: () => Promise<string | null>;
     secondaryLabel?: string;
     onSecondary?: () => void;
     confirmLabel: string;
@@ -27,6 +29,8 @@ export function PromptModal({
     defaultValue,
     inputType = 'text',
     allowEmptyConfirm = false,
+    browseLabel,
+    onBrowse,
     secondaryLabel,
     onSecondary,
     confirmLabel,
@@ -51,6 +55,11 @@ export function PromptModal({
     const showValidation = !allowEmptyConfirm && hasInteracted && !canConfirm;
 
     if (!isOpen) return null;
+
+    // Keep the input focused while clicking footer buttons: the blur would
+    // reveal the validation line and shift the buttons mid-click, so the
+    // mouseup lands elsewhere and the first click gets swallowed.
+    const keepInputFocus = (event: MouseEvent<HTMLButtonElement>) => event.preventDefault();
 
     return (
         <ModalPortal>
@@ -111,15 +120,33 @@ export function PromptModal({
                         </p>
                     )}
                     <div className="flex justify-end gap-2">
+                        {browseLabel && onBrowse && (
+                            <Button
+                                variant="secondary"
+                                className="mr-auto"
+                                onMouseDown={keepInputFocus}
+                                onClick={() => {
+                                    void onBrowse().then((picked) => {
+                                        if (typeof picked === 'string' && picked) {
+                                            setValue(picked);
+                                            setHasInteracted(true);
+                                        }
+                                    });
+                                }}
+                            >
+                                {browseLabel}
+                            </Button>
+                        )}
                         {secondaryLabel && onSecondary && (
-                            <Button variant="secondary" onClick={onSecondary}>
+                            <Button variant="secondary" onMouseDown={keepInputFocus} onClick={onSecondary}>
                                 {secondaryLabel}
                             </Button>
                         )}
-                        <Button variant="secondary" onClick={onCancel}>
+                        <Button variant="secondary" onMouseDown={keepInputFocus} onClick={onCancel}>
                             {cancelLabel}
                         </Button>
                         <Button
+                            onMouseDown={keepInputFocus}
                             onClick={() => {
                                 if (canConfirm) {
                                     onConfirm(value);

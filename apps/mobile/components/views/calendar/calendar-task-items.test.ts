@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Task } from '@mindwtr/core';
 
 import {
+  buildTimedCalendarLayouts,
   buildScheduledTasksByDate,
   calendarDateKey,
   isAllDayScheduledTask,
@@ -33,5 +34,54 @@ describe('calendar task item grouping', () => {
     expect(isAllDayScheduledTask(dateOnly)).toBe(true);
     expect(isTimedScheduledTask(dateOnly)).toBe(false);
     expect(isTimedScheduledTask(timed)).toBe(true);
+  });
+
+  it('places same-slot timed items in separate columns', () => {
+    const layouts = buildTimedCalendarLayouts([
+      { id: 'long-event', startMinutes: 9 * 60, endMinutes: 10 * 60 },
+      { id: 'short-event', startMinutes: 9 * 60, endMinutes: 9 * 60 + 15 },
+    ]);
+
+    const longEvent = layouts.get('long-event');
+    const shortEvent = layouts.get('short-event');
+
+    expect(longEvent?.columnCount).toBe(2);
+    expect(shortEvent?.columnCount).toBe(2);
+    expect(longEvent?.widthPercent).toBeCloseTo(50);
+    expect(shortEvent?.widthPercent).toBeCloseTo(50);
+    expect(longEvent?.columnIndex).not.toBe(shortEvent?.columnIndex);
+    expect(new Set([longEvent?.leftPercent, shortEvent?.leftPercent])).toEqual(new Set([0, 50]));
+  });
+
+  it('keeps back-to-back timed items full width', () => {
+    const layouts = buildTimedCalendarLayouts([
+      { id: 'morning', startMinutes: 9 * 60, endMinutes: 10 * 60 },
+      { id: 'next', startMinutes: 10 * 60, endMinutes: 11 * 60 },
+    ]);
+
+    expect(layouts.get('morning')).toMatchObject({
+      columnCount: 1,
+      columnIndex: 0,
+      leftPercent: 0,
+      widthPercent: 100,
+    });
+    expect(layouts.get('next')).toMatchObject({
+      columnCount: 1,
+      columnIndex: 0,
+      leftPercent: 0,
+      widthPercent: 100,
+    });
+  });
+
+  it('reuses a column inside a chained overlap group', () => {
+    const layouts = buildTimedCalendarLayouts([
+      { id: 'a', startMinutes: 9 * 60, endMinutes: 10 * 60 },
+      { id: 'b', startMinutes: 9 * 60 + 30, endMinutes: 10 * 60 + 30 },
+      { id: 'c', startMinutes: 10 * 60, endMinutes: 11 * 60 },
+    ]);
+
+    expect(layouts.get('a')).toMatchObject({ columnCount: 2, columnIndex: 0 });
+    expect(layouts.get('b')).toMatchObject({ columnCount: 2, columnIndex: 1 });
+    expect(layouts.get('c')).toMatchObject({ columnCount: 2, columnIndex: 0 });
   });
 });

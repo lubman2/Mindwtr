@@ -21,6 +21,8 @@ import {
     applyMarkdownKeyboardShortcut,
     applyMarkdownToolbarAction,
     continueMarkdownOnTextChange,
+    isMarkdownEditorAssistEnabled,
+    useTaskStore,
     type MarkdownSelection,
     type MarkdownToolbarActionId,
     type MarkdownToolbarResult,
@@ -33,10 +35,9 @@ import { KeyboardAccessoryHost } from './keyboard-accessory-host';
 import { MarkdownFormatToolbar } from './markdown-format-toolbar';
 import { MarkdownReferenceAutocomplete } from './markdown-reference-autocomplete';
 import {
-    applyMarkdownPairKeyPressWithSelectionFallback,
     applyMarkdownPairInsertionWithSelectionFallback,
     applyMarkdownUrlPasteWithSelectionFallback,
-    createIgnoredNativePairChange,
+    createIgnoredNativePairChangeFromTextChange,
     shouldIgnoreNativePairChange,
     type IgnoredNativePairChange,
     isRangeSelection,
@@ -312,21 +313,23 @@ export function ExpandedMarkdownEditor({
     const handleChangeText = React.useCallback((nextValue: string) => {
         const ignoredNativeChange = ignoredNativePairChangeRef.current;
         if (ignoredNativeChange) {
-            ignoredNativePairChangeRef.current = null;
             if (shouldIgnoreNativePairChange(nextValue, valueRef.current, ignoredNativeChange)) {
                 restoreEditorFocus(ignoredNativeChange.selection);
                 return;
             }
+            ignoredNativePairChangeRef.current = null;
         }
 
         const currentSelection = selectionRef.current;
         const previousValue = valueRef.current;
         const fallbackSelection = lastRangeSelectionRef.current;
+        const assistEnabled = isMarkdownEditorAssistEnabled(useTaskStore.getState().settings);
         const pastedUrl = applyMarkdownUrlPasteWithSelectionFallback(
             previousValue,
             nextValue,
             currentSelection,
             fallbackSelection,
+            { assist: assistEnabled },
         );
         if (pastedUrl) {
             valueRef.current = pastedUrl.result.value;
@@ -345,8 +348,15 @@ export function ExpandedMarkdownEditor({
             nextValue,
             selectionRef.current,
             fallbackSelection,
+            { assist: assistEnabled },
         );
         if (pairedInsertion) {
+            ignoredNativePairChangeRef.current = createIgnoredNativePairChangeFromTextChange(
+                valueRef.current,
+                nextValue,
+                pairedInsertion.baseSelection,
+                pairedInsertion.result,
+            );
             valueRef.current = pairedInsertion.result.value;
             selectionRef.current = pairedInsertion.result.selection;
             lastRangeSelectionRef.current = isRangeSelection(pairedInsertion.result.selection) ? pairedInsertion.result.selection : null;
@@ -362,6 +372,7 @@ export function ExpandedMarkdownEditor({
             valueRef.current,
             nextValue,
             selectionRef.current,
+            { assist: assistEnabled },
         );
         if (continued) {
             lastRangeSelectionRef.current = null;
@@ -380,32 +391,11 @@ export function ExpandedMarkdownEditor({
         setEditorValue(nextValue);
         onChange(nextValue);
     }, [onChange, onSelectionChange, restoreEditorFocus]);
+    // Auto-pairing intentionally lives only in the text-change handler. On Android the
+    // keyPress event is synthesized from the same native edit as the text change (and
+    // preventDefault cannot cancel it), so pairing here too processes one keystroke
+    // twice — IME-specific echo orders then double the pair (#565).
     const handleKeyPress = React.useCallback((event: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
-        const pairedInsertion = applyMarkdownPairKeyPressWithSelectionFallback(
-            valueRef.current,
-            event.nativeEvent.key,
-            selectionRef.current,
-            lastRangeSelectionRef.current,
-        );
-        if (pairedInsertion) {
-            event.preventDefault?.();
-            ignoredNativePairChangeRef.current = createIgnoredNativePairChange(
-                valueRef.current,
-                event.nativeEvent.key,
-                pairedInsertion.baseSelection,
-                pairedInsertion.result,
-            );
-            valueRef.current = pairedInsertion.result.value;
-            selectionRef.current = pairedInsertion.result.selection;
-            lastRangeSelectionRef.current = isRangeSelection(pairedInsertion.result.selection) ? pairedInsertion.result.selection : null;
-            setEditorValue(pairedInsertion.result.value);
-            setEditorSelection(pairedInsertion.result.selection);
-            onChange(pairedInsertion.result.value);
-            onSelectionChange(pairedInsertion.result.selection);
-            restoreEditorFocus(pairedInsertion.result.selection);
-            return;
-        }
-
         const next = applyMarkdownKeyboardShortcut(
             valueRef.current,
             selectionRef.current,

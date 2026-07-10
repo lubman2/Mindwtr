@@ -1,6 +1,7 @@
 import { Profiler } from 'react';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { act, render, fireEvent, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { TaskItem } from '../components/TaskItem';
 import { Area, Project, Task, configureDateFormatting, safeFormatDate, useTaskStore } from '@mindwtr/core';
 import { LanguageProvider } from '../contexts/language-context';
@@ -38,6 +39,49 @@ describe('TaskItem', () => {
             </LanguageProvider>
         );
         expect(getByText('Test Task')).toBeInTheDocument();
+    });
+
+    it('opens the quick action menu after the task details are expanded', async () => {
+        const user = userEvent.setup();
+        const taskWithDescription: Task = {
+            ...mockTask,
+            description: 'Expanded task note',
+        };
+        const { findByRole, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={taskWithDescription} />
+            </LanguageProvider>
+        );
+
+        await user.click(getByRole('button', { name: /toggle task details/i }));
+        expect(await findByRole('button', { name: /more options/i })).toBeInTheDocument();
+        await waitFor(() => expect(document.body).toHaveTextContent('Expanded task note'));
+
+        await user.click(getByRole('button', { name: /more options/i }));
+
+        expect(await findByRole('menu', { name: /more options/i })).toBeInTheDocument();
+    });
+
+    it('stops being a calendar drag source while details are expanded so text stays selectable', async () => {
+        const user = userEvent.setup();
+        const taskWithDescription: Task = {
+            ...mockTask,
+            description: 'Copy me',
+        };
+        const { container, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={taskWithDescription} />
+            </LanguageProvider>
+        );
+
+        const root = container.querySelector('[data-task-id="1"]') as HTMLElement;
+        expect(root.getAttribute('draggable')).toBe('true');
+
+        await user.click(getByRole('button', { name: /toggle task details/i }));
+        await waitFor(() => expect(root.getAttribute('draggable')).toBe('false'));
+
+        await user.click(getByRole('button', { name: /toggle task details/i }));
+        await waitFor(() => expect(root.getAttribute('draggable')).toBe('true'));
     });
 
     it('hides the default status selector when the task editor layout hides status', () => {
@@ -103,8 +147,43 @@ describe('TaskItem', () => {
         expect(getByDisplayValue('Test Task')).toBeInTheDocument();
     });
 
+    it('focuses the title input when the pop-up editor opens from an external edit request', async () => {
+        act(() => {
+            useTaskStore.setState({
+                settings: {
+                    gtd: {
+                        taskEditor: {
+                            presentation: 'modal',
+                        },
+                    },
+                },
+            });
+        });
+
+        const { getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={mockTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            useUiStore.getState().setEditingTaskId(mockTask.id);
+            await new Promise((resolve) => window.setTimeout(resolve, 0));
+        });
+
+        const dialog = getByRole('dialog', { name: /edit task/i });
+        expect(dialog).toBeInTheDocument();
+        expect(getByDisplayValue('Test Task')).toHaveFocus();
+    });
+
     it('shows a delete action while editing inbox tasks', async () => {
-        const { getAllByRole, getByRole, findByRole } = render(
+        act(() => {
+            useTaskStore.setState({
+                tasks: [mockTask],
+                _allTasks: [mockTask],
+            } as never);
+        });
+        const { getAllByRole, queryByRole, findByRole } = render(
             <LanguageProvider>
                 <TaskItem task={mockTask} />
             </LanguageProvider>
@@ -118,7 +197,13 @@ describe('TaskItem', () => {
             fireEvent.click(deleteButton);
         });
 
-        expect(getByRole('dialog', { name: /^delete$/i })).toBeInTheDocument();
+        // Deleting is immediate (soft delete to Trash with an undo toast);
+        // no confirmation dialog appears.
+        expect(queryByRole('dialog', { name: /^delete$/i })).not.toBeInTheDocument();
+        await waitFor(() => {
+            const stored = useTaskStore.getState()._allTasks.find((candidate) => candidate.id === mockTask.id);
+            expect(stored?.deletedAt).toBeTruthy();
+        });
     });
 
     it('does not show the edit-mode delete action for non-inbox tasks', async () => {
@@ -182,6 +267,304 @@ describe('TaskItem', () => {
             const updatedTask = useTaskStore.getState()._tasksById.get('editor-done-task');
             expect(updatedTask?.status).toBe('done');
             expect(updatedTask?.completedAt).toBeTruthy();
+        });
+    });
+
+    it("stars even an unclarified inbox task for Today's Focus from the editor header", async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-star-task',
+            status: 'inbox',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask],
+                _allTasks: [editableTask],
+                _tasksById: new Map([[editableTask.id, editableTask]]),
+                projects: [],
+                _allProjects: [],
+                _projectsById: new Map(),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+        const { getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        await waitFor(() => expect(getByDisplayValue('Test Task')).toBeInTheDocument());
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: "Add to today's focus" }));
+        });
+
+        // The star is a draft field: nothing is committed until Save, so the
+        // row cannot vanish from the list mid-edit.
+        expect(useTaskStore.getState()._tasksById.get('editor-star-task')?.isFocusedToday).not.toBe(true);
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: 'Save' })[0]);
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._tasksById.get('editor-star-task');
+            expect(updatedTask?.isFocusedToday).toBe(true);
+            expect(updatedTask?.status).toBe('next');
+        });
+    });
+
+    it('applies accepted title suggestions as metadata without keeping the token in the title', async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-title-token-task',
+            title: 'Email',
+            status: 'next',
+        };
+        const contextSourceTask: Task = {
+            ...mockTask,
+            id: 'editor-title-context-source',
+            title: 'Context source',
+            contexts: ['@work'],
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask, contextSourceTask],
+                _allTasks: [editableTask, contextSourceTask],
+                _tasksById: new Map([
+                    [editableTask.id, editableTask],
+                    [contextSourceTask.id, contextSourceTask],
+                ]),
+                projects: [],
+                _allProjects: [],
+                _projectsById: new Map(),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+
+        const { findByRole, getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        const titleInput = getByDisplayValue('Email') as HTMLInputElement;
+        fireEvent.change(titleInput, { target: { value: 'Email @wo today' } });
+        titleInput.setSelectionRange('Email @wo'.length, 'Email @wo'.length);
+        fireEvent.click(titleInput);
+
+        expect(await findByRole('option', { name: '@work' })).toBeInTheDocument();
+        await act(async () => {
+            fireEvent.keyDown(titleInput, { key: 'Enter' });
+        });
+
+        await waitFor(() => expect(titleInput.value).toBe('Email today'));
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: 'Save' }));
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'editor-title-token-task');
+            expect(updatedTask?.title).toBe('Email today');
+            expect(updatedTask?.contexts).toEqual(['@work']);
+        });
+    });
+
+    it('applies accepted slash date commands as metadata without keeping the command in the title', async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-title-slash-date-task',
+            title: 'Email',
+            status: 'next',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask],
+                _allTasks: [editableTask],
+                _tasksById: new Map([[editableTask.id, editableTask]]),
+                projects: [],
+                _allProjects: [],
+                _projectsById: new Map(),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+
+        const { findByRole, getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        const titleInput = getByDisplayValue('Email') as HTMLInputElement;
+        fireEvent.change(titleInput, { target: { value: 'Email /due:2026-05-01 today' } });
+        titleInput.setSelectionRange('Email /due:2026-05-01'.length, 'Email /due:2026-05-01'.length);
+        fireEvent.click(titleInput);
+
+        expect(await findByRole('option', { name: '/due:2026-05-01' })).toBeInTheDocument();
+        await act(async () => {
+            fireEvent.keyDown(titleInput, { key: 'Enter' });
+        });
+
+        await waitFor(() => expect(titleInput.value).toBe('Email today'));
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: 'Save' }));
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'editor-title-slash-date-task');
+            expect(updatedTask?.title).toBe('Email today');
+            expect(updatedTask?.dueDate).toBe('2026-05-01');
+        });
+    });
+
+    it('appends accepted slash notes instead of overwriting an existing description', async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-title-slash-note-task',
+            title: 'Email',
+            status: 'next',
+            description: 'Existing note',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask],
+                _allTasks: [editableTask],
+                _tasksById: new Map([[editableTask.id, editableTask]]),
+                projects: [],
+                _allProjects: [],
+                _projectsById: new Map(),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+
+        const { findByRole, getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        const titleInput = getByDisplayValue('Email') as HTMLInputElement;
+        fireEvent.change(titleInput, { target: { value: 'Email /note:Follow up today' } });
+        titleInput.setSelectionRange('Email /note:Follow up'.length, 'Email /note:Follow up'.length);
+        fireEvent.click(titleInput);
+
+        expect(await findByRole('option', { name: '/note:Follow up' })).toBeInTheDocument();
+        await act(async () => {
+            fireEvent.keyDown(titleInput, { key: 'Enter' });
+        });
+
+        await waitFor(() => expect(titleInput.value).toBe('Email today'));
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: 'Save' }));
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'editor-title-slash-note-task');
+            expect(updatedTask?.title).toBe('Email today');
+            expect(updatedTask?.description).toBe('Existing note\n\nFollow up');
+        });
+    });
+
+    it('keeps unaccepted quick-add-looking text literal in existing title edits', async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-title-literal-task',
+            title: 'Email',
+            status: 'next',
+            contexts: [],
+            tags: [],
+        };
+        const project: Project = {
+            id: 'project-home',
+            title: 'Home',
+            status: 'active',
+            color: '#000000',
+            order: 0,
+            tagIds: [],
+            createdAt: editableTask.createdAt,
+            updatedAt: editableTask.updatedAt,
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask],
+                _allTasks: [editableTask],
+                _tasksById: new Map([[editableTask.id, editableTask]]),
+                projects: [project],
+                _allProjects: [project],
+                _projectsById: new Map([[project.id, project]]),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+
+        const { getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        const titleInput = getByDisplayValue('Email') as HTMLInputElement;
+        const literalTitle = 'Email @home #note +Home /due:tomorrow';
+        fireEvent.change(titleInput, { target: { value: literalTitle } });
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: 'Save' }));
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'editor-title-literal-task');
+            expect(updatedTask?.title).toBe(literalTitle);
+            expect(updatedTask?.contexts).toEqual([]);
+            expect(updatedTask?.tags).toEqual([]);
+            expect(updatedTask?.projectId).toBeUndefined();
+            expect(updatedTask?.dueDate).toBeUndefined();
         });
     });
 
@@ -284,6 +667,40 @@ describe('TaskItem', () => {
 
         expect(getByRole('menu', { name: /more options/i })).toBeInTheDocument();
         expect(getByRole('menuitem', { name: /duplicate/i })).toBeInTheDocument();
+    });
+
+    it('opens duplicated tasks from the quick actions menu', async () => {
+        const menuTask: Task = {
+            ...mockTask,
+            id: 'quick-actions-duplicate-task',
+            status: 'waiting',
+        };
+        act(() => {
+            useTaskStore.setState({
+                tasks: [menuTask],
+                _allTasks: [menuTask],
+                _tasksById: new Map([[menuTask.id, menuTask]]),
+            });
+        });
+        const { findByRole, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={menuTask} />
+            </LanguageProvider>
+        );
+
+        fireEvent.click(getByRole('button', { name: /more options/i }));
+        const duplicateItem = await findByRole('menuitem', { name: /duplicate/i });
+        await act(async () => {
+            fireEvent.click(duplicateItem);
+        });
+
+        const duplicatedTask = useTaskStore.getState()._allTasks.find((task) => task.id !== menuTask.id);
+        expect(duplicatedTask).toMatchObject({
+            title: 'Test Task',
+            status: 'waiting',
+        });
+        expect(useUiStore.getState().editingTaskId).toBe(duplicatedTask?.id);
+        expect(useTaskStore.getState().highlightTaskId).toBe(duplicatedTask?.id);
     });
 
     it('adds an eligible next action to today focus from the task quick actions menu', async () => {
@@ -493,7 +910,8 @@ describe('TaskItem', () => {
         fireEvent.click(getByRole('menuitem', { name: /area/i }));
         const areaDialog = getByRole('dialog', { name: 'Area' });
         fireEvent.click(within(areaDialog).getByRole('button', { name: 'No Area' }));
-        fireEvent.click(within(areaDialog).getByRole('option', { name: 'Work' }));
+        const areaListbox = getByRole('listbox', { name: 'No Area' });
+        fireEvent.click(within(areaListbox).getByRole('option', { name: 'Work' }));
         fireEvent.click(within(areaDialog).getByRole('button', { name: 'Save' }));
 
         await waitFor(() => {
@@ -902,11 +1320,10 @@ describe('TaskItem', () => {
         act(() => {
             useTaskStore.setState((state) => ({
                 ...state,
-                tasks: [task],
                 _allTasks: [task],
-                projects: [project, otherProject],
-                sections: [],
-                areas: [],
+                _allProjects: [project, otherProject],
+                _allSections: [],
+                _allAreas: [],
             }));
         });
 
@@ -923,7 +1340,7 @@ describe('TaskItem', () => {
         act(() => {
             useTaskStore.setState((state) => ({
                 ...state,
-                projects: [
+                _allProjects: [
                     project,
                     {
                         ...otherProject,
@@ -958,11 +1375,10 @@ describe('TaskItem', () => {
         act(() => {
             useTaskStore.setState((state) => ({
                 ...state,
-                tasks: [task],
                 _allTasks: [task],
-                projects: [project],
-                sections: [],
-                areas: [],
+                _allProjects: [project],
+                _allSections: [],
+                _allAreas: [],
             }));
         });
 
@@ -979,7 +1395,7 @@ describe('TaskItem', () => {
         act(() => {
             useTaskStore.setState((state) => ({
                 ...state,
-                projects: [{
+                _allProjects: [{
                     ...project,
                     title: 'Renamed primary project',
                     updatedAt: new Date(Date.parse(project.updatedAt) + 1_000).toISOString(),

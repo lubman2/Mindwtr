@@ -1,16 +1,17 @@
 import { useMemo, useCallback, useEffect, useState, useRef, type UIEvent } from 'react';
 import { ErrorBoundary } from '../ErrorBoundary';
-import { shallow, useTaskStore, filterTasksBySearch, sortTasksBy, TaskStatus, updateRangeSelection } from '@mindwtr/core';
-import type { RangeSelectionOptions, TaskSortBy } from '@mindwtr/core';
+import { buildBulkOrganizeTaskUpdates, shallow, useTaskStore, filterTasksBySearch, sortTasksBy, TaskStatus, updateRangeSelection } from '@mindwtr/core';
+import type { BulkOrganizeTaskUpdateInput, RangeSelectionOptions, TaskSortBy } from '@mindwtr/core';
 import { useLanguage } from '../../contexts/language-context';
 import { Trash2 } from 'lucide-react';
 import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
 import { ListBulkActions } from './list/ListBulkActions';
 import { BulkSelectionToolbar } from './list/BulkSelectionToolbar';
+import { TaskBulkOrganizeModal } from './list/TaskBulkOrganizeModal';
 import { PromptModal } from '../PromptModal';
 import { cn } from '../../lib/utils';
-import { resolveAreaFilter, taskMatchesAreaFilter } from '../../lib/area-filter';
+import { resolveAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
 import { useConfirmDialog } from '../../hooks/useConfirmDialog';
 import { VirtualTaskRow } from './list/VirtualTaskRow';
 import {
@@ -51,6 +52,8 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
     const [contextPromptOpen, setContextPromptOpen] = useState(false);
     const [contextPromptMode, setContextPromptMode] = useState<'add' | 'remove'>('add');
     const [contextPromptIds, setContextPromptIds] = useState<string[]>([]);
+    const [bulkOrganizeOpen, setBulkOrganizeOpen] = useState(false);
+    const [isBulkOrganizing, setIsBulkOrganizing] = useState(false);
     const listScrollRef = useRef<HTMLDivElement>(null);
     const multiSelectAnchorIdRef = useRef<string | null>(null);
     const rowHeightsRef = useRef<Map<string, number>>(new Map());
@@ -91,6 +94,13 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
 
     const projectMapById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
     const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
+    const bulkAreaOptions = useMemo(
+        () => [...areas]
+            .filter((area) => !area.deletedAt)
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map((area) => ({ id: area.id, name: area.name })),
+        [areas],
+    );
     const resolvedAreaFilter = useMemo(
         () => resolveAreaFilter(settings?.filters?.areaId, areas),
         [settings?.filters?.areaId, areas],
@@ -181,6 +191,29 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
         await batchMoveTasks(selectedIdsArray, newStatus);
         exitSelectionMode();
     }, [batchMoveTasks, selectedIdsArray, exitSelectionMode]);
+
+    const handleBatchAssignArea = useCallback(async (areaId: string | null) => {
+        if (selectedIdsArray.length === 0) return;
+        await batchUpdateTasks(selectedIdsArray.map((id) => ({
+            id,
+            updates: { areaId: areaId ?? undefined },
+        })));
+        exitSelectionMode();
+    }, [batchUpdateTasks, exitSelectionMode, selectedIdsArray]);
+
+    const handleApplyTaskBulkOrganize = useCallback(async (input: BulkOrganizeTaskUpdateInput) => {
+        if (selectedIdsArray.length === 0 || isBulkOrganizing) return;
+        const updates = buildBulkOrganizeTaskUpdates(selectedIdsArray, tasksById, input);
+        if (updates.length === 0) return;
+        setIsBulkOrganizing(true);
+        try {
+            await batchUpdateTasks(updates);
+            setBulkOrganizeOpen(false);
+            exitSelectionMode();
+        } finally {
+            setIsBulkOrganizing(false);
+        }
+    }, [batchUpdateTasks, exitSelectionMode, isBulkOrganizing, selectedIdsArray, tasksById]);
 
     const handleBatchDelete = useCallback(async () => {
         if (selectedIdsArray.length === 0) return;
@@ -285,6 +318,9 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
                         <ListBulkActions
                             selectionCount={selectedIdsArray.length}
                             onMoveToStatus={handleBatchMove}
+                            onAssignArea={handleBatchAssignArea}
+                            areaOptions={bulkAreaOptions}
+                            onBulkOrganize={() => setBulkOrganizeOpen(true)}
                             onAddTag={handleBatchAddTag}
                             onAddContext={handleBatchAddContext}
                             onRemoveContext={handleBatchRemoveContext}
@@ -386,6 +422,16 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
                     setContextPromptOpen(false);
                     exitSelectionMode();
                 }}
+            />
+            <TaskBulkOrganizeModal
+                isOpen={bulkOrganizeOpen}
+                selectedCount={selectedIdsArray.length}
+                projects={projects}
+                areas={areas}
+                isApplying={isBulkOrganizing}
+                t={t}
+                onCancel={() => setBulkOrganizeOpen(false)}
+                onApply={handleApplyTaskBulkOrganize}
             />
             {confirmModal}
         </ErrorBoundary>

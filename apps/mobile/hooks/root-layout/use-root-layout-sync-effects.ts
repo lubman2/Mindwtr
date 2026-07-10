@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState, type AppStateStatus, Platform } from 'react-native';
 
-import { computeSyncPayloadFingerprint, flushPendingSave, getInMemoryAppDataSnapshot, useTaskStore } from '@mindwtr/core';
+import { computeSyncPayloadFingerprint, flushPendingSave, getInMemoryAppDataSnapshot, useTaskStore, type AppData } from '@mindwtr/core';
 
 import type { ToastOptions } from '@/contexts/toast-context';
 import { getNotificationPermissionStatus, startMobileNotifications, stopMobileNotifications } from '@/lib/notification-service';
@@ -46,6 +46,7 @@ type SyncUiCopy = {
 };
 
 const AUTO_SYNC_BACKEND_CACHE_TTL_MS = 5_000;
+const APP_STATE_TRIGGER_DEDUPE_MS = 1_000;
 const AUTO_SYNC_CADENCE_FILE: AutoSyncCadence = {
     minIntervalMs: 30_000,
     debounceFirstChangeMs: 8_000,
@@ -91,6 +92,36 @@ const logAppError = (error: unknown) => {
     void logError(error, { scope: 'app' });
 };
 
+const stripAutoSyncFingerprintBookkeeping = (data: AppData): AppData => {
+    const {
+        network,
+        lastSyncAt,
+        lastSyncStatus,
+        lastSyncError,
+        pendingRemoteWriteAt,
+        pendingRemoteWriteRetryAt,
+        pendingRemoteWriteAttempts,
+        lastSyncStats,
+        lastSyncHistory,
+        ...settings
+    } = data.settings ?? {};
+
+    void network;
+    void lastSyncAt;
+    void lastSyncStatus;
+    void lastSyncError;
+    void pendingRemoteWriteAt;
+    void pendingRemoteWriteRetryAt;
+    void pendingRemoteWriteAttempts;
+    void lastSyncStats;
+    void lastSyncHistory;
+
+    return {
+        ...data,
+        settings,
+    };
+};
+
 const reconcileBackgroundSyncTask = () => {
     void syncMobileBackgroundSyncRegistration().catch(logAppError);
 };
@@ -119,6 +150,7 @@ export function useRootLayoutSyncEffects({
         readAt: 0,
     });
     const lastAutoSyncPayloadFingerprint = useRef<string | null>(null);
+    const lastAppStateSyncTriggerAt = useRef(-APP_STATE_TRIGGER_DEDUPE_MS);
     const showToastRef = useRef(showToast);
     const openSyncSettingsRef = useRef(openSyncSettings);
     const openNotificationsSettingsRef = useRef(openNotificationsSettings);
@@ -156,11 +188,27 @@ export function useRootLayoutSyncEffects({
 
     const readCurrentSyncPayloadFingerprint = useCallback((): string | null => {
         try {
-            return computeSyncPayloadFingerprint(getInMemoryAppDataSnapshot());
+            return computeSyncPayloadFingerprint(stripAutoSyncFingerprintBookkeeping(getInMemoryAppDataSnapshot()));
         } catch (error) {
             logAppError(error);
             return null;
         }
+    }, []);
+
+    const shouldDedupeAppStateSyncTrigger = useCallback((now: number): boolean => {
+        const currentFingerprint = readCurrentSyncPayloadFingerprint();
+        const previousFingerprint = lastAutoSyncPayloadFingerprint.current;
+        if (currentFingerprint) {
+            lastAutoSyncPayloadFingerprint.current = currentFingerprint;
+        }
+        if (!currentFingerprint || !previousFingerprint || currentFingerprint !== previousFingerprint) {
+            return false;
+        }
+        return now - lastAppStateSyncTriggerAt.current < APP_STATE_TRIGGER_DEDUPE_MS;
+    }, [readCurrentSyncPayloadFingerprint]);
+
+    const markAppStateSyncTrigger = useCallback((now: number) => {
+        lastAppStateSyncTriggerAt.current = now;
     }, []);
 
     const runSync = useCallback((minIntervalMs?: number) => {
@@ -312,6 +360,8 @@ export function useRootLayoutSyncEffects({
                         .then((cadence) => {
                             const now = Date.now();
                             if (now - lastAutoSyncAt.current > cadence.foregroundMinIntervalMs) {
+                                if (shouldDedupeAppStateSyncTrigger(now)) return;
+                                markAppStateSyncTrigger(now);
                                 requestSync(0);
                             }
                         })
@@ -364,7 +414,11 @@ export function useRootLayoutSyncEffects({
                     syncThrottleTimer.current = null;
                 }
                 abortMobileSync();
-                requestSync(0);
+                const now = Date.now();
+                if (!shouldDedupeAppStateSyncTrigger(now)) {
+                    markAppStateSyncTrigger(now);
+                    requestSync(0);
+                }
             }
             appState.current = nextAppState;
         };
@@ -390,7 +444,7 @@ export function useRootLayoutSyncEffects({
             syncInFlight.current = null;
             flushPendingSave().catch(logAppError);
         };
-    }, [refreshSyncCadence, requestSync]);
+    }, [markAppStateSyncTrigger, refreshSyncCadence, requestSync, shouldDedupeAppStateSyncTrigger]);
 
     useEffect(() => {
         let previousEnabled = hasActiveMobileNotificationFeature(useTaskStore.getState().settings);

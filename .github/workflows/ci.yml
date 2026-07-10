@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: |
           set -e
-          bun install || (echo "bun install failed, clearing cache and retrying..." && (bun pm cache rm || bun pm cache clean || true) && bun install)
+          bun install --frozen-lockfile || (echo "bun install failed, clearing cache and retrying..." && (bun pm cache rm || bun pm cache clean || true) && bun install --frozen-lockfile)
 
       - name: TypeScript check
         run: cd packages/core && bun run tsc --noEmit
@@ -49,8 +49,17 @@ jobs:
       - name: Locale parity check
         run: bun run i18n:check
 
+      - name: Synced field parity check
+        run: bun run schema:check
+
+      - name: README heading parity check
+        run: bun run docs:check-readme
+
       - name: Store image asset check
         run: bash scripts/ci/validate-store-image-assets.sh
+
+      - name: Workflow JSON newline check
+        run: node scripts/ci/validate-workflow-json-newlines.js
 
       - name: Google Play listing metadata check
         run: |
@@ -96,16 +105,47 @@ jobs:
           set -euo pipefail
 
           # GitHub-hosted Ubuntu runners sometimes point apt at a flaky Azure
-          # mirror. Prefer the canonical Ubuntu archive when that mirror list
-          # is present, then retry the whole apt transaction for transient
-          # DNS/connection failures.
+          # mirror, but the canonical Ubuntu archive can also stall. Try the
+          # runner's default mirror first, then alternate with the archive
+          # fallback on retry.
+          APT_MIRROR_BACKUP=""
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
+            APT_MIRROR_BACKUP="$(mktemp)"
+            sudo cp /etc/apt/apt-mirrors.txt "$APT_MIRROR_BACKUP"
           fi
 
+          # The runner image also carries optional Microsoft apt feeds that are
+          # unrelated to Tauri. If those feeds return 403, apt-get update fails
+          # before the Ubuntu packages below can install.
+          mapfile -t MICROSOFT_APT_SOURCES < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true)
+          for source_file in "${MICROSOFT_APT_SOURCES[@]}"; do
+            sudo mv "$source_file" "$source_file.disabled"
+          done
+
+          APT_OPTIONS=(
+            -o Acquire::Retries=3
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
+          APT_PACKAGES=(
+            libwebkit2gtk-4.1-dev
+            libappindicator3-dev
+            librsvg2-dev
+            patchelf
+            libasound2-dev
+            libssl-dev
+          )
+
           for attempt in 1 2 3; do
-            if sudo apt-get -o Acquire::Retries=3 update && \
-              sudo apt-get -o Acquire::Retries=3 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev; then
+            if [ -n "$APT_MIRROR_BACKUP" ]; then
+              sudo cp "$APT_MIRROR_BACKUP" /etc/apt/apt-mirrors.txt
+              if [ "$attempt" -eq 2 ]; then
+                sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
+              fi
+            fi
+
+            if timeout 8m sudo apt-get "${APT_OPTIONS[@]}" update && \
+              timeout 8m sudo apt-get "${APT_OPTIONS[@]}" install -y "${APT_PACKAGES[@]}"; then
               exit 0
             fi
 
@@ -143,8 +183,6 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -160,7 +198,7 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: TypeScript check
         run: cd apps/desktop && bun run tsc --noEmit
@@ -180,12 +218,9 @@ jobs:
           path: apps/desktop/coverage
           if-no-files-found: ignore
 
-      - name: Build Vite frontend
-        run: cd apps/desktop && bun run build:vite
-
       - name: Build Tauri app (debug, no bundle)
         timeout-minutes: 20
-        run: cd apps/desktop && cargo tauri build --debug --no-bundle
+        run: cd apps/desktop && bunx tauri build --debug --no-bundle
 
   # Mobile app validation
   mobile:
@@ -210,7 +245,7 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: TypeScript check
         run: cd apps/mobile && bunx tsc --noEmit
@@ -219,7 +254,7 @@ jobs:
         run: cd apps/mobile && bunx expo-doctor
 
       - name: Mobile tests
-        run: bun run --filter mobile test -- --coverage --coverage.thresholds.lines=38 --coverage.thresholds.statements=38 --coverage.thresholds.functions=50 --coverage.thresholds.branches=50
+        run: bun run --filter mobile test:coverage
 
       - name: Mobile coverage summary
         if: always()
@@ -255,13 +290,51 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Cloud TypeScript check
         run: bun run --filter mindwtr-cloud typecheck
 
+      - name: MCP version metadata check
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('fs');
+          const packageJson = JSON.parse(fs.readFileSync('apps/mcp-server/package.json', 'utf8'));
+          const serverJson = JSON.parse(fs.readFileSync('apps/mcp-server/server.json', 'utf8'));
+          const version = packageJson.version;
+          const failures = [];
+
+          if (!version) {
+            failures.push('apps/mcp-server/package.json: missing version');
+          }
+
+          if (serverJson.version !== version) {
+            failures.push(`apps/mcp-server/server.json: expected ${version}, got ${serverJson.version || '<missing>'}`);
+          }
+
+          if (!Array.isArray(serverJson.packages)) {
+            failures.push('apps/mcp-server/server.json: missing packages array');
+          } else {
+            for (const entry of serverJson.packages) {
+              if (entry.version !== version) {
+                failures.push(
+                  `apps/mcp-server/server.json package ${entry.identifier || entry.name || '<unknown>'}: expected ${version}, got ${entry.version || '<missing>'}`
+                );
+              }
+            }
+          }
+
+          if (failures.length) {
+            console.error('MCP npm package and registry metadata versions must match.');
+            console.error(failures.join('\n'));
+            process.exit(1);
+          }
+          console.log(`Verified MCP package and registry metadata use ${version}.`);
+          NODE
+
       - name: MCP TypeScript check
-        run: bun run --filter mindwtr-mcp-server typecheck
+        run: bun run --filter mindwtr-mcp typecheck
 
       - name: Cloud tests
         run: bun run --filter mindwtr-cloud test:coverage
@@ -281,7 +354,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: MCP tests
-        run: bun run --filter mindwtr-mcp-server test:coverage
+        run: bun run --filter mindwtr-mcp test:coverage
 
       - name: MCP coverage summary
         if: always()
@@ -327,7 +400,18 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Drop unused Microsoft apt repos
+        # packages.microsoft.com intermittently serves invalid clearsigned
+        # indexes, which fails the apt update inside `playwright install
+        # --with-deps`. The E2E job never installs from these repos; same
+        # workaround as the desktop build job.
+        run: |
+          mapfile -t MICROSOFT_APT_SOURCES < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true)
+          for source_file in "${MICROSOFT_APT_SOURCES[@]}"; do
+            sudo mv "$source_file" "$source_file.disabled"
+          done
 
       - name: Install Playwright browsers
         run: bunx playwright install --with-deps chromium
@@ -374,7 +458,7 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Performance audit
         run: bun run scripts/audit-performance.ts --fail-under 60
@@ -392,4 +476,4 @@ jobs:
         run: bun run --filter mindwtr-cloud lint
 
       - name: Check for lint errors (mcp)
-        run: bun run --filter mindwtr-mcp-server lint
+        run: bun run --filter mindwtr-mcp lint

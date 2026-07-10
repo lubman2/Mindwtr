@@ -12,6 +12,7 @@ type TextSizeValue = NonNullable<AppearanceSettings['textSize']>;
 type MobileQuickAccessViewValue = NonNullable<AppearanceSettings['mobileQuickAccessView']>;
 type FocusGroupByValue = NonNullable<GtdSettings['focusGroupBy']>;
 type DefaultProjectFlowModeValue = NonNullable<GtdSettings['defaultProjectFlowMode']>;
+type DefaultTaskAreaModeValue = NonNullable<GtdSettings['defaultAreaMode']>;
 type SpeechToTextSettings = NonNullable<AiSettings['speechToText']>;
 type SpeechToTextProviderValue = NonNullable<SpeechToTextSettings['provider']>;
 type SpeechToTextModeValue = NonNullable<SpeechToTextSettings['mode']>;
@@ -30,6 +31,7 @@ const THEME_VALUE_FLAGS: Record<ThemeValue, true> = {
 };
 
 const WEEK_START_VALUE_FLAGS: Record<WeekStartValue, true> = {
+    system: true,
     monday: true,
     saturday: true,
     sunday: true,
@@ -72,11 +74,19 @@ const FOCUS_GROUP_BY_VALUE_FLAGS: Record<FocusGroupByValue, true> = {
     area: true,
     energy: true,
     priority: true,
+    person: true,
+    tag: true,
 };
 
 const DEFAULT_PROJECT_FLOW_MODE_VALUE_FLAGS: Record<DefaultProjectFlowModeValue, true> = {
     parallel: true,
     sequential: true,
+};
+
+const DEFAULT_TASK_AREA_MODE_VALUE_FLAGS: Record<DefaultTaskAreaModeValue, true> = {
+    none: true,
+    fixed: true,
+    active: true,
 };
 
 const AI_PROVIDER_VALUE_FLAGS: Record<AIProviderId, true> = {
@@ -86,6 +96,7 @@ const AI_PROVIDER_VALUE_FLAGS: Record<AIProviderId, true> = {
 };
 
 const AI_REASONING_EFFORT_VALUE_FLAGS: Record<AIReasoningEffort, true> = {
+    minimal: true,
     low: true,
     medium: true,
     high: true,
@@ -95,6 +106,7 @@ const STT_PROVIDER_VALUE_FLAGS: Record<SpeechToTextProviderValue, true> = {
     openai: true,
     gemini: true,
     whisper: true,
+    parakeet: true,
 };
 
 const STT_MODE_VALUE_FLAGS: Record<SpeechToTextModeValue, true> = {
@@ -137,6 +149,9 @@ export const SETTINGS_FOCUS_GROUP_BY_VALUE_SET = new Set<FocusGroupByValue>(SETT
 
 export const SETTINGS_DEFAULT_PROJECT_FLOW_MODE_VALUES = Object.keys(DEFAULT_PROJECT_FLOW_MODE_VALUE_FLAGS) as DefaultProjectFlowModeValue[];
 export const SETTINGS_DEFAULT_PROJECT_FLOW_MODE_VALUE_SET = new Set<DefaultProjectFlowModeValue>(SETTINGS_DEFAULT_PROJECT_FLOW_MODE_VALUES);
+
+export const SETTINGS_DEFAULT_TASK_AREA_MODE_VALUES = Object.keys(DEFAULT_TASK_AREA_MODE_VALUE_FLAGS) as DefaultTaskAreaModeValue[];
+export const SETTINGS_DEFAULT_TASK_AREA_MODE_VALUE_SET = new Set<DefaultTaskAreaModeValue>(SETTINGS_DEFAULT_TASK_AREA_MODE_VALUES);
 
 export const AI_PROVIDER_VALUES = Object.keys(AI_PROVIDER_VALUE_FLAGS) as AIProviderId[];
 export const AI_PROVIDER_VALUE_SET = new Set<AIProviderId>(AI_PROVIDER_VALUES);

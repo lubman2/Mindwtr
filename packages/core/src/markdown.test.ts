@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import {
-    extractChecklistFromMarkdown,
     getActiveMarkdownReferenceQuery,
     insertMarkdownReferenceAtQuery,
     normalizeMarkdownInternalLinks,
@@ -8,8 +7,7 @@ import {
     parseMarkdownReferenceHref,
     searchMarkdownReferences,
     stripMarkdown,
-    syncMarkdownChecklistCompletion,
-    syncMarkdownChecklistWithCanonical,
+    parsePastedChecklistItems,
 } from './markdown';
 import type { Project, Task } from './types';
 
@@ -75,75 +73,37 @@ describe('parseInlineMarkdown', () => {
     });
 });
 
-describe('extractChecklistFromMarkdown', () => {
-    it('extracts markdown task list items', () => {
-        const input = '- [x] Done item\n[ ] Todo item\n+ [X] Another done\n- plain bullet';
-        expect(extractChecklistFromMarkdown(input)).toEqual([
-            { title: 'Done item', isCompleted: true },
-            { title: 'Todo item', isCompleted: false },
-            { title: 'Another done', isCompleted: true },
+describe('parsePastedChecklistItems', () => {
+    it('splits plain multi-line text into checklist items', () => {
+        expect(parsePastedChecklistItems('buy milk\nbuy bread\ncall mom')).toEqual([
+            { title: 'buy milk', isCompleted: false },
+            { title: 'buy bread', isCompleted: false },
+            { title: 'call mom', isCompleted: false },
         ]);
     });
-});
 
-describe('syncMarkdownChecklistCompletion', () => {
-    it('updates matching markdown task list markers from canonical checklist state', () => {
-        const input = '- [ ] **Draft** spec\n- [x] Review [notes](https://example.com)';
-
-        expect(syncMarkdownChecklistCompletion(input, [
-            { title: '**Draft** spec', isCompleted: true },
-            { title: 'Review [notes](https://example.com)', isCompleted: false },
-        ])).toBe('- [x] **Draft** spec\n- [ ] Review [notes](https://example.com)');
+    it('strips bullet, numbered, and checkbox markers and keeps completion state', () => {
+        expect(parsePastedChecklistItems('- [x] done item\n* [ ] open item\n+ plain bullet\n1. numbered\n[X] bare checkbox')).toEqual([
+            { title: 'done item', isCompleted: true },
+            { title: 'open item', isCompleted: false },
+            { title: 'plain bullet', isCompleted: false },
+            { title: 'numbered', isCompleted: false },
+            { title: 'bare checkbox', isCompleted: true },
+        ]);
     });
 
-    it('leaves unrelated markdown task list items unchanged', () => {
-        const input = '- [ ] Draft spec\n- [x] Keep independent';
-
-        expect(syncMarkdownChecklistCompletion(input, [
-            { title: 'Draft spec', isCompleted: true },
-        ])).toBe('- [x] Draft spec\n- [x] Keep independent');
-    });
-});
-
-describe('syncMarkdownChecklistWithCanonical', () => {
-    it('reorders matching markdown task-list lines to follow the canonical checklist', () => {
-        const input = [
-            'Intro',
-            '- [ ] Desktop layout',
-            '- [x] Tablet layout',
-            '- [ ] Mobile layout',
-            'Outro',
-        ].join('\n');
-
-        expect(syncMarkdownChecklistWithCanonical(input, [
-            { title: 'Tablet layout', isCompleted: true },
-            { title: 'Desktop layout', isCompleted: false },
-            { title: 'Mobile layout', isCompleted: false },
-        ])).toBe([
-            'Intro',
-            '- [x] Tablet layout',
-            '- [ ] Desktop layout',
-            '- [ ] Mobile layout',
-            'Outro',
-        ].join('\n'));
+    it('drops empty lines and marker-only lines, and handles CRLF', () => {
+        expect(parsePastedChecklistItems('first\r\n\r\n- [ ]\n   \nsecond')).toEqual([
+            { title: 'first', isCompleted: false },
+            { title: 'second', isCompleted: false },
+        ]);
     });
 
-    it('removes stale markdown task-list lines missing from the canonical checklist', () => {
-        const input = '- [ ] Desktop layout\n- [ ] Tablet layout\n- [ ] Mobile layout';
-
-        expect(syncMarkdownChecklistWithCanonical(input, [
-            { title: 'Desktop layout', isCompleted: false },
-            { title: 'Mobile layout', isCompleted: false },
-        ])).toBe('- [ ] Desktop layout\n- [ ] Mobile layout');
-    });
-
-    it('adds new canonical checklist items after the existing markdown task-list block', () => {
-        const input = 'Intro\n- [ ] Desktop layout\nOutro';
-
-        expect(syncMarkdownChecklistWithCanonical(input, [
-            { title: 'Desktop layout', isCompleted: false },
-            { title: 'Tablet layout', isCompleted: true },
-        ])).toBe('Intro\n- [ ] Desktop layout\n- [x] Tablet layout\nOutro');
+    it('does not treat hyphenated words as bullets', () => {
+        expect(parsePastedChecklistItems('-nospace\nreal item')).toEqual([
+            { title: '-nospace', isCompleted: false },
+            { title: 'real item', isCompleted: false },
+        ]);
     });
 });
 
@@ -190,6 +150,13 @@ describe('markdown references', () => {
             end: value.length,
             query: 'la',
         });
+    });
+
+    it('does not detect the active [[ query when editor assist is disabled', () => {
+        const value = 'Link to [[la';
+        expect(
+            getActiveMarkdownReferenceQuery(value, { start: value.length, end: value.length }, { assist: false }),
+        ).toBeNull();
     });
 
     it('inserts a stable markdown reference token', () => {

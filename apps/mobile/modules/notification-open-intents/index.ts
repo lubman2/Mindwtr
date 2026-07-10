@@ -13,6 +13,8 @@ type NotificationOpenPayload = {
 type NotificationOpenIntentsModule = {
   consumePendingOpenPayload(): Record<string, string> | null;
   ensureReminderChannel?: (channelId: string, channelName: string) => void;
+  showPersistentCaptureNotification?: (title: string, text: string, channelName: string) => void;
+  hidePersistentCaptureNotification?: () => void;
 };
 
 type AlarmNotificationModule = {
@@ -83,4 +85,16 @@ export async function consumePendingNotificationOpenPayload(): Promise<Notificat
 export async function ensureReminderNotificationChannel(channelId: string, channelName: string): Promise<void> {
   if (Platform.OS !== 'android') return;
   nativeModule?.ensureReminderChannel?.(channelId, channelName);
+}
+
+// Persistent "quick add" capture notification (#819). Android-only: iOS has no
+// ongoing notifications; iOS users capture via the widget or Shortcuts instead.
+export function showPersistentCaptureNotification(title: string, text: string, channelName: string): void {
+  if (Platform.OS !== 'android') return;
+  nativeModule?.showPersistentCaptureNotification?.(title, text, channelName);
+}
+
+export function hidePersistentCaptureNotification(): void {
+  if (Platform.OS !== 'android') return;
+  nativeModule?.hidePersistentCaptureNotification?.();
 }

@@ -30,12 +30,12 @@ const baseProps = {
 };
 
 describe('SettingsCalendarPage', () => {
-    it('links to the calendar integration guide on the wiki', () => {
+    it('links to the calendar integration guide in the docs site', () => {
         const { getByRole } = render(<SettingsCalendarPage {...baseProps} />);
 
         expect(getByRole('link', { name: /Calendar integration guide/ })).toHaveAttribute(
             'href',
-            'https://github.com/dongdongbh/Mindwtr/wiki/Calendar-Integration',
+            'https://docs.mindwtr.app/use/calendar-integration',
         );
     });
 

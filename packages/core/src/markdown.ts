@@ -13,8 +13,6 @@ const LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/g;
 const INLINE_TOKEN_RE = /(\*\*([^*]+)\*\*|__([^_]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)|((?:https?:\/\/|mailto:|tel:|mid:)[^\s<>\]]+))/gi;
 const INTERNAL_LINK_RE = /\[\[(task|project):([^\]|]+)\|([^\]]+)\]\]/g;
 const INTERNAL_LINK_TOKEN_RE = /^\[\[(task|project):([^\]|]+)\|([^\]]+)\]\]$/;
-const TASK_LIST_RE = /^\s{0,3}(?:[-*+]\s+)?\[( |x|X)\]\s+(.+)$/;
-const TASK_LIST_LINE_RE = /^(\s{0,3}(?:[-*+]\s+)?)\[( |x|X)\](\s+)(.+)$/;
 const MARKDOWN_LIST_ITEM_RE = /^(\s*)(?:(?:[-+*])\s+(?:\[(?: |x|X)\]\s*)?|\d+[.)]\s+)(?:\S|$)/;
 const MARKDOWN_PREVIEW_PREFIX_RE = /^\s{0,3}(?:(?:[-*+]\s+)?\[(?: |x|X)\]\s+|>\s?|#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/;
 const MARKDOWN_PREVIEW_SKIP_LINE_RE = /^\s*(?:```.*|[-*_]{3,})\s*$/;
@@ -236,10 +234,30 @@ export function normalizeMarkdownInternalLinks(markdown: string): string {
     ));
 }
 
+// Typing helpers that fire automatically as the user edits (auto-pairing,
+// url-to-link paste, list continuation, reference autocomplete). They are
+// gated by a single setting so the description can act as a plain-text field
+// with nothing injected (discussion #742). Explicit actions (toolbar buttons,
+// keyboard shortcuts) are deliberate and stay enabled regardless.
+export type MarkdownAssistOptions = {
+    assist?: boolean;
+};
+
+// Single source of truth for the default-on semantics. Only an explicit
+// `false` turns the helpers off; unset keeps them on (the maintainer's #742
+// commitment that pairing stays on by default).
+export function isMarkdownEditorAssistEnabled(
+    settings?: { markdownEditorAssist?: boolean } | null,
+): boolean {
+    return settings?.markdownEditorAssist !== false;
+}
+
 export function getActiveMarkdownReferenceQuery(
     value: string,
     selection: MarkdownSelection,
+    options?: MarkdownAssistOptions,
 ): ActiveMarkdownReferenceQuery | null {
+    if (options?.assist === false) return null;
     const normalizedSelection = normalizeSelection(value, selection);
     if (normalizedSelection.start !== normalizedSelection.end) return null;
 
@@ -457,147 +475,23 @@ export function stripMarkdown(markdown: string): string {
     return text.trim();
 }
 
-export function extractChecklistFromMarkdown(markdown: string): MarkdownChecklistItem[] {
-    if (!markdown) return [];
-    const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+const PASTED_CHECKLIST_LINE_RE = /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\[( |x|X)\]\s*)?/;
+
+/**
+ * Split pasted multi-line plain text into checklist items. Bullet, numbered,
+ * and checkbox markers are stripped; `[x]` marks an item completed. Empty and
+ * marker-only lines are dropped.
+ */
+export function parsePastedChecklistItems(text: string): MarkdownChecklistItem[] {
+    if (!text) return [];
     const items: MarkdownChecklistItem[] = [];
-    for (const line of lines) {
-        const match = TASK_LIST_RE.exec(line);
-        if (!match) continue;
-        const title = match[2]?.trim();
+    for (const line of text.replace(/\r\n/g, '\n').split('\n')) {
+        const match = PASTED_CHECKLIST_LINE_RE.exec(line);
+        const title = line.slice(match?.[0].length ?? 0).trim();
         if (!title) continue;
-        items.push({
-            title,
-            isCompleted: match[1].toLowerCase() === 'x',
-        });
+        items.push({ title, isCompleted: match?.[1]?.toLowerCase() === 'x' });
     }
     return items;
-}
-
-const normalizeChecklistTitle = (value: string): string => value.trim().toLowerCase();
-
-export function syncMarkdownChecklistCompletion(
-    markdown: string | undefined,
-    checklist: MarkdownChecklistItem[] | undefined,
-): string | undefined {
-    if (!markdown || !checklist?.length) return markdown;
-
-    const remainingByTitle = new Map<string, MarkdownChecklistItem[]>();
-    for (const item of checklist) {
-        if (!item?.title) continue;
-        const key = normalizeChecklistTitle(item.title);
-        const bucket = remainingByTitle.get(key);
-        if (bucket) {
-            bucket.push(item);
-        } else {
-            remainingByTitle.set(key, [item]);
-        }
-    }
-
-    let changed = false;
-    const lines = markdown.replace(/\r\n/g, '\n').split('\n');
-    const nextLines = lines.map((line) => {
-        const match = TASK_LIST_LINE_RE.exec(line);
-        if (!match) return line;
-
-        const title = match[4] ?? '';
-        const bucket = remainingByTitle.get(normalizeChecklistTitle(title));
-        const checklistItem = bucket?.shift();
-        if (!checklistItem) return line;
-
-        const nextMarker = checklistItem.isCompleted ? 'x' : ' ';
-        if (match[2] === nextMarker) return line;
-
-        changed = true;
-        return `${match[1]}[${nextMarker}]${match[3]}${title}`;
-    });
-
-    return changed ? nextLines.join('\n') : markdown;
-}
-
-export function syncMarkdownChecklistWithCanonical(
-    markdown: string | undefined,
-    checklist: MarkdownChecklistItem[] | undefined,
-): string | undefined {
-    if (!markdown || !checklist) return markdown;
-
-    const lines = markdown.replace(/\r\n/g, '\n').split('\n');
-    const taskLineIndexes: number[] = [];
-    const taskLineBuckets = new Map<string, Array<{
-        index: number;
-        prefix: string;
-        marker: string;
-        spacing: string;
-        title: string;
-    }>>();
-
-    lines.forEach((line, index) => {
-        const match = TASK_LIST_LINE_RE.exec(line);
-        if (!match) return;
-        const taskLine = {
-            index,
-            prefix: match[1] ?? '',
-            marker: match[2] ?? ' ',
-            spacing: match[3] ?? ' ',
-            title: match[4] ?? '',
-        };
-        taskLineIndexes.push(index);
-        const key = normalizeChecklistTitle(taskLine.title);
-        const bucket = taskLineBuckets.get(key);
-        if (bucket) {
-            bucket.push(taskLine);
-        } else {
-            taskLineBuckets.set(key, [taskLine]);
-        }
-    });
-
-    if (taskLineIndexes.length === 0) return markdown;
-
-    const firstTaskLineBucket = taskLineBuckets.values().next().value as Array<{
-        index: number;
-        prefix: string;
-        marker: string;
-        spacing: string;
-        title: string;
-    }> | undefined;
-    const firstTaskLine = firstTaskLineBucket?.[0];
-    const fallbackPrefix = firstTaskLine?.prefix ?? '- ';
-    const fallbackSpacing = firstTaskLine?.spacing ?? ' ';
-    const canonicalLines = (checklist || [])
-        .filter((item) => item?.title?.trim())
-        .map((item) => {
-            const key = normalizeChecklistTitle(item.title);
-            const matchedLine = taskLineBuckets.get(key)?.shift();
-            const prefix = matchedLine?.prefix ?? fallbackPrefix;
-            const spacing = matchedLine?.spacing ?? fallbackSpacing;
-            const title = matchedLine?.title ?? item.title;
-            return `${prefix}[${item.isCompleted ? 'x' : ' '}]${spacing}${title}`;
-        });
-
-    const taskLineIndexSet = new Set(taskLineIndexes);
-    const lastTaskLineIndex = taskLineIndexes[taskLineIndexes.length - 1] ?? -1;
-    let canonicalIndex = 0;
-    const nextLines: string[] = [];
-
-    lines.forEach((line, index) => {
-        if (!taskLineIndexSet.has(index)) {
-            nextLines.push(line);
-            return;
-        }
-
-        if (canonicalIndex < canonicalLines.length) {
-            nextLines.push(canonicalLines[canonicalIndex]);
-            canonicalIndex += 1;
-        }
-
-        if (index === lastTaskLineIndex && canonicalIndex < canonicalLines.length) {
-            nextLines.push(...canonicalLines.slice(canonicalIndex));
-            canonicalIndex = canonicalLines.length;
-        }
-    });
-
-    const nextMarkdown = nextLines.join('\n');
-    return nextMarkdown === markdown ? markdown : nextMarkdown;
 }
 
 const normalizeSelection = (value: string, selection: MarkdownSelection): MarkdownSelection => {
@@ -898,14 +792,14 @@ const MARKDOWN_INSERTION_PAIRS: Record<string, string> = {
     '~': '~~',
 };
 
+// Auto-close only the characters that carry Markdown meaning (links and code).
+// Quotes, angle brackets, and braces were removed: auto-closing them while typing
+// fights normal prose and pasted URLs with no Markdown benefit (discussion #742).
+// Selection wrapping (MARKDOWN_INSERTION_PAIRS) still supports the full set.
 const MARKDOWN_AUTO_INSERTION_PAIRS: Record<string, string> = {
     '[': ']',
     '(': ')',
-    '{': '}',
-    '<': '>',
     '`': '`',
-    "'": "'",
-    '"': '"',
 };
 
 const MARKDOWN_CLOSING_INSERTIONS = new Set<string>([
@@ -1070,7 +964,9 @@ export function applyMarkdownPairInsertion(
     previousValue: string,
     nextValue: string,
     selection: MarkdownSelection,
+    options?: MarkdownAssistOptions,
 ): MarkdownToolbarResult | null {
+    if (options?.assist === false) return null;
     const replacement = detectSelectionReplacement(previousValue, nextValue, selection);
     if (!replacement) {
         return applyCollapsedPairInsertion(previousValue, nextValue, selection);
@@ -1104,7 +1000,9 @@ export function applyMarkdownUrlPaste(
     previousValue: string,
     nextValue: string,
     selection: MarkdownSelection,
+    options?: MarkdownAssistOptions,
 ): MarkdownToolbarResult | null {
+    if (options?.assist === false) return null;
     const replacement = detectSelectionReplacement(previousValue, nextValue, selection);
     if (!replacement) return null;
     const href = sanitizeLinkHref(replacement.insertedText);
@@ -1185,7 +1083,9 @@ export function applyMarkdownToolbarAction(
 export function continueMarkdownOnEnter(
     value: string,
     selection: MarkdownSelection,
+    options?: MarkdownAssistOptions,
 ): MarkdownToolbarResult | null {
+    if (options?.assist === false) return null;
     const normalizedSelection = normalizeSelection(value, selection);
     if (normalizedSelection.start !== normalizedSelection.end) {
         return null;
@@ -1212,7 +1112,9 @@ export function continueMarkdownOnTextChange(
     previousValue: string,
     nextValue: string,
     selection: MarkdownSelection,
+    options?: MarkdownAssistOptions,
 ): MarkdownToolbarResult | null {
+    if (options?.assist === false) return null;
     const normalizedSelection = normalizeSelection(previousValue, selection);
     if (normalizedSelection.start !== normalizedSelection.end) {
         return null;
@@ -1223,5 +1125,5 @@ export function continueMarkdownOnTextChange(
         return null;
     }
 
-    return continueMarkdownOnEnter(previousValue, normalizedSelection);
+    return continueMarkdownOnEnter(previousValue, normalizedSelection, options);
 }

@@ -1,8 +1,13 @@
 #!/usr/bin/env node
+import { readFileSync } from 'fs';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as z from 'zod';
 
+import { createCloudService } from './cloud-service.js';
 import { getMindwtrToolErrorCode, ReadOnlyError, ValidationError } from './errors.js';
 import {
   MAX_TASK_QUICK_ADD_LENGTH,
@@ -11,6 +16,19 @@ import {
   normalizeOptionalTaskTokens,
 } from './input-validation.js';
 import { createService, type MindwtrService } from './service.js';
+
+const resolvePackageVersion = (): string => {
+  try {
+    const packageJsonPath = resolve(dirname(fileURLToPath(import.meta.url)), '../package.json');
+    const parsed = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { version?: unknown };
+    if (typeof parsed.version === 'string' && parsed.version.trim()) {
+      return parsed.version;
+    }
+  } catch {
+    // Fall back to a valid implementation version if package metadata is unavailable.
+  }
+  return '0.0.0';
+};
 
 type LogLevel = 'info' | 'error';
 type LogEntry = {
@@ -115,6 +133,68 @@ export const resolveServerModeFlags = (flags: Record<string, string | boolean>) 
   return {
     allowWrite,
     readonly: explicitReadonly ?? !allowWrite,
+    keepAlive,
+  };
+};
+
+type ServerEnv = Record<string, string | undefined>;
+
+type LocalServerConfig = {
+  backend: 'local';
+  dbPath?: string;
+  readonly: boolean;
+  keepAlive: boolean;
+};
+
+type CloudServerConfig = {
+  backend: 'cloud';
+  cloudUrl: string;
+  cloudToken: string;
+  allowInsecureHttp: boolean;
+  readonly: true;
+  keepAlive: boolean;
+};
+
+export type ServerConfig = LocalServerConfig | CloudServerConfig;
+
+const readStringFlag = (flags: Record<string, string | boolean>, ...names: string[]): string | undefined => {
+  for (const name of names) {
+    const value = flags[name];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+};
+
+export const resolveServerConfig = (
+  flags: Record<string, string | boolean>,
+  env: ServerEnv = process.env,
+): ServerConfig => {
+  const { allowWrite, readonly, keepAlive } = resolveServerModeFlags(flags);
+  const cloudUrl = readStringFlag(flags, 'cloud-url', 'cloudUrl') ?? env.MINDWTR_MCP_CLOUD_URL;
+  const cloudToken = readStringFlag(flags, 'cloud-token', 'cloudToken') ?? env.MINDWTR_MCP_CLOUD_TOKEN;
+
+  if (cloudUrl || cloudToken) {
+    if (!cloudUrl) throw new ValidationError('Cloud URL is required for Cloud MCP mode');
+    if (!cloudToken) throw new ValidationError('Cloud token is required for Cloud MCP mode');
+    if (allowWrite) throw new ValidationError('Cloud MCP mode is read-only; remove --write.');
+    return {
+      backend: 'cloud',
+      cloudUrl,
+      cloudToken,
+      allowInsecureHttp: parseBooleanFlag(
+        flags['cloud-allow-insecure-http']
+        ?? flags.cloudAllowInsecureHttp
+        ?? env.MINDWTR_MCP_CLOUD_ALLOW_INSECURE_HTTP
+      ) ?? false,
+      readonly: true,
+      keepAlive,
+    };
+  }
+
+  return {
+    backend: 'local',
+    dbPath: readStringFlag(flags, 'db'),
+    readonly,
     keepAlive,
   };
 };
@@ -227,7 +307,14 @@ const restoreTaskSchema = z.object({
 
 const listProjectsSchema = z.object({});
 const listAreasSchema = z.object({});
+const listPeopleSchema = z.object({
+  includeDeleted: z.boolean().optional(),
+});
 const getProjectSchema = z.object({
+  id: z.string(),
+  includeDeleted: z.boolean().optional(),
+});
+const getPersonSchema = z.object({
   id: z.string(),
   includeDeleted: z.boolean().optional(),
 });
@@ -302,20 +389,44 @@ const updateAreaSchema = z.object({
 const deleteAreaSchema = z.object({
   id: z.string(),
 });
+const addPersonSchema = z.object({
+  name: z.string().min(1).max(200),
+  note: z.string().nullable().optional(),
+  referenceLink: z.string().nullable().optional(),
+});
+const updatePersonSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(200).optional(),
+  note: z.string().nullable().optional(),
+  referenceLink: z.string().nullable().optional(),
+});
+const renamePersonSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(200),
+  updateTasks: z.boolean().optional(),
+});
+const deletePersonSchema = z.object({
+  id: z.string(),
+});
 
-export const registerMindwtrTools = (server: McpServer, service: MindwtrService, readonly: boolean) => {
+export const registerMindwtrTools = (
+  server: McpServer,
+  service: MindwtrService,
+  readonly: boolean,
+  options: { readonlyMessage?: string } = {},
+) => {
   const withReadonlyMcpErrorHandling = <TInput>(
     scope: string,
     handler: (input: TInput) => Promise<McpToolResponse>,
   ) => withMcpErrorHandling(scope, async (input: TInput) => {
-    if (readonly) throw new ReadOnlyError();
+    if (readonly) throw new ReadOnlyError(options.readonlyMessage);
     return await handler(input);
   });
 
   server.registerTool(
     'mindwtr_list_tasks',
     {
-      description: 'List tasks from the local Mindwtr SQLite database. Supports filtering by status, project, date range, and search. Supports sorting by various fields.',
+      description: 'List tasks from the configured Mindwtr backend. Supports filtering by status, project, date range, and search. Supports sorting by various fields.',
       inputSchema: listTasksSchema,
     },
     withMcpErrorHandling('mindwtr_list_tasks', async (input) => {
@@ -329,7 +440,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_list_projects',
     {
-      description: 'List projects from the local Mindwtr SQLite database.',
+      description: 'List projects from the configured Mindwtr backend.',
       inputSchema: listProjectsSchema,
     },
     withMcpErrorHandling('mindwtr_list_projects', async () => {
@@ -341,7 +452,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_get_project',
     {
-      description: 'Get a single project by ID from the local Mindwtr SQLite database.',
+      description: 'Get a single project by ID from the configured Mindwtr backend.',
       inputSchema: getProjectSchema,
     },
     withMcpErrorHandling('mindwtr_get_project', async (input) => {
@@ -353,7 +464,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_list_sections',
     {
-      description: 'List project sections from the local Mindwtr SQLite database. Optionally filter by projectId.',
+      description: 'List project sections from the configured Mindwtr backend. Optionally filter by projectId.',
       inputSchema: listSectionsSchema,
     },
     withMcpErrorHandling('mindwtr_list_sections', async (input) => {
@@ -365,7 +476,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_get_section',
     {
-      description: 'Get a single project section by ID from the local Mindwtr SQLite database.',
+      description: 'Get a single project section by ID from the configured Mindwtr backend.',
       inputSchema: getSectionSchema,
     },
     withMcpErrorHandling('mindwtr_get_section', async (input) => {
@@ -377,7 +488,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_list_areas',
     {
-      description: 'List areas from the local Mindwtr SQLite database.',
+      description: 'List areas from the configured Mindwtr backend.',
       inputSchema: listAreasSchema,
     },
     withMcpErrorHandling('mindwtr_list_areas', async () => {
@@ -387,9 +498,33 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   );
 
   server.registerTool(
+    'mindwtr_list_people',
+    {
+      description: 'List managed people from the configured Mindwtr backend.',
+      inputSchema: listPeopleSchema,
+    },
+    withMcpErrorHandling('mindwtr_list_people', async (input) => {
+      const people = await service.listPeople(input);
+      return createMcpTextResponse({ people });
+    }),
+  );
+
+  server.registerTool(
+    'mindwtr_get_person',
+    {
+      description: 'Get a single managed person by ID from the configured Mindwtr backend.',
+      inputSchema: getPersonSchema,
+    },
+    withMcpErrorHandling('mindwtr_get_person', async (input) => {
+      const person = await service.getPerson({ id: input.id, includeDeleted: input.includeDeleted });
+      return createMcpTextResponse({ person });
+    }),
+  );
+
+  server.registerTool(
     'mindwtr_add_task',
     {
-      description: 'Add a task to the local Mindwtr SQLite database.',
+      description: 'Add a task to the configured Mindwtr backend.',
       inputSchema: addTaskSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_add_task', async (input) => {
@@ -404,7 +539,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_update_task',
     {
-      description: 'Update a task in the local Mindwtr SQLite database.',
+      description: 'Update a task in the configured Mindwtr backend.',
       inputSchema: updateTaskSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_update_task', async (input) => {
@@ -418,7 +553,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_complete_task',
     {
-      description: 'Mark a task as done in the local Mindwtr SQLite database.',
+      description: 'Mark a task as done in the configured Mindwtr backend.',
       inputSchema: completeTaskSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_complete_task', async (input) => {
@@ -430,7 +565,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_delete_task',
     {
-      description: 'Soft-delete a task in the local Mindwtr SQLite database.',
+      description: 'Soft-delete a task in the configured Mindwtr backend.',
       inputSchema: deleteTaskSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_delete_task', async (input) => {
@@ -442,7 +577,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_get_task',
     {
-      description: 'Get a single task by ID from the local Mindwtr SQLite database.',
+      description: 'Get a single task by ID from the configured Mindwtr backend.',
       inputSchema: getTaskSchema,
     },
     withMcpErrorHandling('mindwtr_get_task', async (input) => {
@@ -454,7 +589,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_restore_task',
     {
-      description: 'Restore a soft-deleted task in the local Mindwtr SQLite database.',
+      description: 'Restore a soft-deleted task in the configured Mindwtr backend.',
       inputSchema: restoreTaskSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_restore_task', async (input) => {
@@ -466,7 +601,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_add_project',
     {
-      description: 'Add a project to the local Mindwtr SQLite database.',
+      description: 'Add a project to the configured Mindwtr backend.',
       inputSchema: addProjectSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_add_project', async (input) => {
@@ -478,7 +613,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_update_project',
     {
-      description: 'Update a project in the local Mindwtr SQLite database.',
+      description: 'Update a project in the configured Mindwtr backend.',
       inputSchema: updateProjectSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_update_project', async (input) => {
@@ -490,7 +625,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_delete_project',
     {
-      description: 'Soft-delete a project in the local Mindwtr SQLite database.',
+      description: 'Soft-delete a project in the configured Mindwtr backend.',
       inputSchema: deleteProjectSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_delete_project', async (input) => {
@@ -502,7 +637,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_add_section',
     {
-      description: 'Add a project-scoped section to the local Mindwtr SQLite database.',
+      description: 'Add a project-scoped section to the configured Mindwtr backend.',
       inputSchema: addSectionSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_add_section', async (input) => {
@@ -514,7 +649,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_update_section',
     {
-      description: 'Update a project section in the local Mindwtr SQLite database.',
+      description: 'Update a project section in the configured Mindwtr backend.',
       inputSchema: updateSectionSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_update_section', async (input) => {
@@ -526,7 +661,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_delete_section',
     {
-      description: 'Soft-delete a project section in the local Mindwtr SQLite database. Tasks in the section are kept and moved to no section by core.',
+      description: 'Soft-delete a project section in the configured Mindwtr backend. Tasks in the section are kept and moved to no section by core.',
       inputSchema: deleteSectionSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_delete_section', async (input) => {
@@ -538,7 +673,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_add_area',
     {
-      description: 'Add an area to the local Mindwtr SQLite database.',
+      description: 'Add an area to the configured Mindwtr backend.',
       inputSchema: addAreaSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_add_area', async (input) => {
@@ -550,7 +685,7 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_update_area',
     {
-      description: 'Update an area in the local Mindwtr SQLite database.',
+      description: 'Update an area in the configured Mindwtr backend.',
       inputSchema: updateAreaSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_update_area', async (input) => {
@@ -562,12 +697,60 @@ export const registerMindwtrTools = (server: McpServer, service: MindwtrService,
   server.registerTool(
     'mindwtr_delete_area',
     {
-      description: 'Soft-delete an area in the local Mindwtr SQLite database.',
+      description: 'Soft-delete an area in the configured Mindwtr backend.',
       inputSchema: deleteAreaSchema,
     },
     withReadonlyMcpErrorHandling('mindwtr_delete_area', async (input) => {
       const area = await service.deleteArea(input.id);
       return createMcpTextResponse({ area });
+    }),
+  );
+
+  server.registerTool(
+    'mindwtr_add_person',
+    {
+      description: 'Add a managed person to the configured Mindwtr backend.',
+      inputSchema: addPersonSchema,
+    },
+    withReadonlyMcpErrorHandling('mindwtr_add_person', async (input) => {
+      const person = await service.addPerson(input);
+      return createMcpTextResponse({ person });
+    }),
+  );
+
+  server.registerTool(
+    'mindwtr_update_person',
+    {
+      description: 'Update managed person metadata in the configured Mindwtr backend.',
+      inputSchema: updatePersonSchema,
+    },
+    withReadonlyMcpErrorHandling('mindwtr_update_person', async (input) => {
+      const person = await service.updatePerson(input);
+      return createMcpTextResponse({ person });
+    }),
+  );
+
+  server.registerTool(
+    'mindwtr_rename_person',
+    {
+      description: 'Rename a managed person. By default, matching task assignees are updated too.',
+      inputSchema: renamePersonSchema,
+    },
+    withReadonlyMcpErrorHandling('mindwtr_rename_person', async (input) => {
+      const person = await service.renamePerson(input);
+      return createMcpTextResponse({ person });
+    }),
+  );
+
+  server.registerTool(
+    'mindwtr_delete_person',
+    {
+      description: 'Soft-delete a managed person in the configured Mindwtr backend.',
+      inputSchema: deletePersonSchema,
+    },
+    withReadonlyMcpErrorHandling('mindwtr_delete_person', async (input) => {
+      const person = await service.deletePerson(input.id);
+      return createMcpTextResponse({ person });
     }),
   );
 };
@@ -595,22 +778,31 @@ const attachLifecycleHandlers = (service: MindwtrService) => {
 export async function startMcpServer(argv: string[] = process.argv.slice(2)) {
   const flags = parseArgs(argv);
 
-  const dbPath = typeof flags.db === 'string' ? flags.db : undefined;
-  const { readonly, keepAlive } = resolveServerModeFlags(flags);
+  const config = resolveServerConfig(flags);
 
-  const service = createService({ dbPath, readonly });
+  const service = config.backend === 'cloud'
+    ? createCloudService({
+      url: config.cloudUrl,
+      token: config.cloudToken,
+      allowInsecureHttp: config.allowInsecureHttp,
+    })
+    : createService({ dbPath: config.dbPath, readonly: config.readonly });
   attachLifecycleHandlers(service);
 
   const server = new McpServer({
-    name: 'mindwtr-mcp-server',
-    version: '0.1.0',
+    name: 'mindwtr-mcp',
+    version: resolvePackageVersion(),
   });
 
-  registerMindwtrTools(server, service, readonly);
+  registerMindwtrTools(server, service, config.readonly, {
+    readonlyMessage: config.backend === 'cloud'
+      ? 'Cloud MCP mode is read-only. Use the local database backend with --write for edits.'
+      : undefined,
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  if (keepAlive) {
+  if (config.keepAlive) {
     process.stdin.resume();
     process.stdin.on('end', () => process.exit(0));
     setInterval(() => {}, 1 << 30);

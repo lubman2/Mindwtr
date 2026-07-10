@@ -15,6 +15,7 @@ const {
   mockAlarmScheduleAlarm,
   mockEnsureReminderNotificationChannel,
   mockGetNextScheduledAt,
+  mockGetDueReminderRepeatTimes,
   mockHasTimeComponent,
   mockLogInfo,
   mockPlatform,
@@ -46,6 +47,7 @@ const {
   mockAlarmScheduleAlarm: vi.fn(async () => ({ id: 99 })),
   mockEnsureReminderNotificationChannel: vi.fn(async () => undefined),
   mockGetNextScheduledAt: vi.fn<(...args: unknown[]) => Date | null>(() => null),
+  mockGetDueReminderRepeatTimes: vi.fn<(...args: unknown[]) => Date[]>(() => []),
   mockHasTimeComponent: vi.fn(() => false),
   mockLogInfo: vi.fn(async () => undefined),
   mockPlatform: {
@@ -95,6 +97,7 @@ vi.mock('react-native-alarm-notification', () => ({
 
 vi.mock('@mindwtr/core', () => ({
   getNextScheduledAt: mockGetNextScheduledAt,
+  getDueReminderRepeatTimes: mockGetDueReminderRepeatTimes,
   getSystemDefaultLanguage: vi.fn(() => 'en'),
   getTranslations: vi.fn(async () => ({
     'digest.morningTitle': 'Morning',
@@ -163,6 +166,8 @@ describe('notification-service-local', () => {
     mockEnsureReminderNotificationChannel.mockResolvedValue(undefined);
     mockGetNextScheduledAt.mockReset();
     mockGetNextScheduledAt.mockReturnValue(null);
+    mockGetDueReminderRepeatTimes.mockReset();
+    mockGetDueReminderRepeatTimes.mockReturnValue([]);
     mockHasTimeComponent.mockReset();
     mockHasTimeComponent.mockReturnValue(false);
     mockLogInfo.mockClear();
@@ -272,6 +277,80 @@ describe('notification-service-local', () => {
         }),
       })
     );
+  });
+
+  it('schedules future due-time repeat occurrences as :r{i} keyed one-shots', async () => {
+    const now = Date.now();
+    mockStoreState.tasks = [{ id: 'task-1', title: 'Pay rent', description: '' }];
+    mockGetNextScheduledAt.mockReturnValue(new Date(now + 5 * 60 * 1000));
+    mockGetDueReminderRepeatTimes.mockReturnValue([
+      new Date(now + 35 * 60 * 1000),
+      new Date(now + 65 * 60 * 1000),
+      new Date(now + 95 * 60 * 1000),
+      new Date(now + 125 * 60 * 1000),
+    ]);
+
+    await startLocalMobileNotifications();
+
+    const alarmKeys = (mockAlarmScheduleAlarm.mock.calls as unknown as Array<[{ data?: { alarmKey?: string } }]>)
+      .map((call) => call[0]?.data?.alarmKey);
+    expect(alarmKeys).toEqual(expect.arrayContaining([
+      'task:task-1:r1',
+      'task:task-1:r2',
+      'task:task-1:r3',
+      'task:task-1:r4',
+    ]));
+    expect(alarmKeys).not.toContain('task:task-1:r5');
+  });
+
+  it('reaps due-time repeat occurrences when the task is no longer active', async () => {
+    mockAsyncStorageGetItem.mockResolvedValue(JSON.stringify({
+      'task:task-1:r1': { id: 42 },
+      'task:task-1:r2': { id: 43 },
+    }));
+    // Task is done: no base reminder and no repeat occurrences.
+    mockStoreState.tasks = [{ id: 'task-1', title: 'Pay rent', description: '' }];
+    mockGetNextScheduledAt.mockReturnValue(null);
+    mockGetDueReminderRepeatTimes.mockReturnValue([]);
+
+    await startLocalMobileNotifications();
+
+    expect(mockAlarmDeleteAlarm).toHaveBeenCalledWith(42);
+    expect(mockAlarmDeleteAlarm).toHaveBeenCalledWith(43);
+    const snapshot = __localNotificationTestUtils.getAlarmMapSnapshot();
+    expect(snapshot.has('task:task-1:r1')).toBe(false);
+    expect(snapshot.has('task:task-1:r2')).toBe(false);
+  });
+
+  it('skips reschedules for store updates that leave tasks, projects, and settings untouched', async () => {
+    await startLocalMobileNotifications();
+    const listener = (mockStoreSubscribe.mock.calls as unknown[][])[0]?.[0] as (state: unknown, prevState: unknown) => void;
+    expect(typeof listener).toBe('function');
+
+    vi.useFakeTimers();
+    try {
+      const shared = {
+        tasks: mockStoreState.tasks,
+        projects: mockStoreState.projects,
+        settings: mockStoreState.settings,
+      };
+      mockLogInfo.mockClear();
+      listener({ ...shared, isLoading: true }, { ...shared, isLoading: false });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockLogInfo).not.toHaveBeenCalledWith(
+        '[Local Notifications] Reschedule cycle started',
+        expect.anything()
+      );
+
+      listener({ ...shared, tasks: [...mockStoreState.tasks] }, shared);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockLogInfo).toHaveBeenCalledWith(
+        '[Local Notifications] Reschedule cycle started',
+        expect.anything()
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('logs reminder scheduling diagnostics without task title or description content', async () => {
@@ -457,6 +536,41 @@ describe('notification-service-local', () => {
         channel: 'mindwtr_reminders_v2',
         message: 'Weekly review body',
         title: 'Weekly review',
+      })
+    );
+  });
+
+  it('reschedules current task reminders when startup is requested while already running', async () => {
+    const firstFireAt = new Date(Date.now() + 5 * 60 * 1000);
+    const recurringFollowUpFireAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    mockStoreState.tasks = [
+      { id: 'recurring-original', title: 'Daily standup', description: '' },
+    ];
+    mockGetNextScheduledAt.mockImplementation((task) => {
+      const id = String((task as { id?: string }).id);
+      if (id === 'recurring-original') return firstFireAt;
+      if (id === 'recurring-follow-up') return recurringFollowUpFireAt;
+      return null;
+    });
+
+    await startLocalMobileNotifications();
+
+    expect(mockAlarmScheduleAlarm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ taskId: 'recurring-original' }),
+      })
+    );
+
+    mockAlarmScheduleAlarm.mockClear();
+    mockStoreState.tasks = [
+      { id: 'recurring-follow-up', title: 'Daily standup', description: '' },
+    ];
+
+    await startLocalMobileNotifications();
+
+    expect(mockAlarmScheduleAlarm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ taskId: 'recurring-follow-up' }),
       })
     );
   });

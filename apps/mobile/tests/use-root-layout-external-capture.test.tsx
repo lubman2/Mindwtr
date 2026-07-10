@@ -59,7 +59,7 @@ describe('useRootLayoutExternalCapture', () => {
     showToast = vi.fn();
   });
 
-  it('opens shared text capture with the shared text as a note', () => {
+  it('opens shared text capture with the shared text as the task title', () => {
     const resetShareIntent = vi.fn();
 
     act(() => {
@@ -78,19 +78,16 @@ describe('useRootLayoutExternalCapture', () => {
     expect(router.replace).toHaveBeenCalledWith({
       pathname: '/capture-modal',
       params: {
-        initialProps: expect.any(String),
+        initialValue: 'The%20paragraph%20I%20selected%20in%20another%20app',
       },
     });
     const params = router.replace.mock.calls[0][0].params;
     expect(params.text).toBeUndefined();
-    expect(params.initialValue).toBeUndefined();
-    expect(JSON.parse(decodeURIComponent(params.initialProps))).toEqual({
-      description: 'The paragraph I selected in another app',
-    });
+    expect(params.initialProps).toBeUndefined();
     expect(resetShareIntent).toHaveBeenCalledTimes(1);
   });
 
-  it('preserves distinct shared text and URL together in the note', () => {
+  it('uses shared text as the task title and preserves a distinct URL in the note', () => {
     act(() => {
       create(
         <TestHarness
@@ -105,8 +102,30 @@ describe('useRootLayoutExternalCapture', () => {
     });
 
     const params = router.replace.mock.calls[0][0].params;
+    expect(params.initialValue).toBe('Read%20this%20before%20the%20project%20review');
     expect(JSON.parse(decodeURIComponent(params.initialProps))).toEqual({
-      description: 'Read this before the project review\n\nhttps://example.com/review-notes',
+      description: 'https://example.com/review-notes',
+    });
+  });
+
+  it('uses a shared URL as the task title when no text is available', () => {
+    act(() => {
+      create(
+        <TestHarness
+          hasShareIntent
+          incomingUrl={null}
+          router={router}
+          shareWebUrl="https://example.com/review-notes"
+          showToast={showToast}
+        />
+      );
+    });
+
+    expect(router.replace).toHaveBeenCalledWith({
+      pathname: '/capture-modal',
+      params: {
+        initialValue: 'https%3A%2F%2Fexample.com%2Freview-notes',
+      },
     });
   });
 

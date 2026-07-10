@@ -1,31 +1,52 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Keyboard,
   Platform,
   TextInput,
   useWindowDimensions,
 } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system';
 
 import {
-  DEFAULT_PROJECT_COLOR,
-  getQuickAddProjectInitialProps,
+  applyCapturedProject,
+  buildCaptureTaskProps,
+  filterCaptureAreas,
+  filterCaptureProjects,
+  hasExactCaptureAreaMatch,
+  hasExactCaptureProjectMatch,
+  resolveCaptureAreaQuery,
+  resolveCaptureProjectQuery,
+  canStarNewCapture,
+  formatFocusTaskLimitText,
+  getDefaultTaskAreaMode,
   getUsedTaskTokens,
   hasTimeComponent,
   isSelectableProjectForTaskAssignment,
   parseQuickAdd,
+  normalizeClockTimeInput,
+  normalizeFocusTaskLimit,
+  resolveDefaultNewTaskAreaId,
   safeFormatDate,
   safeParseDate,
   shallow,
+  splitQuickAddBulkLines,
+  tFallback,
   type Task,
   type TaskPriority,
   useTaskStore,
 } from '@mindwtr/core';
 import { useLanguage } from '../contexts/language-context';
-import { useThemeColors } from '@/hooks/use-theme-colors';
+import { readQuickCaptureAddAnother, writeQuickCaptureAddAnother } from '../lib/quick-capture-preferences';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
+import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useThemeTokens } from '@/hooks/use-theme-tokens';
 import { useToast } from '@/contexts/toast-context';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useAndroidKeyboardInset } from '../lib/use-android-keyboard-inset';
 import { logError, logWarn } from '../lib/app-log';
+import { openTaskScreen } from '@/lib/task-meta-navigation';
 import {
   buildCaptureExtra,
   normalizeContextToken,
@@ -34,9 +55,11 @@ import {
 import { QuickCaptureSheetBody } from './quick-capture-sheet/QuickCaptureSheetBody';
 import { QuickCaptureSheetPickers } from './quick-capture-sheet/QuickCaptureSheetPickers';
 import { useQuickCaptureAudio } from './use-quick-capture-audio';
+import { useAndroidQuickCaptureExpand } from './quick-capture-sheet/useAndroidQuickCaptureExpand';
 
 const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
-const ANDROID_OPTIONS_EXPAND_DELAY_MS = 160;
+const ANDROID_OPTIONS_EXPAND_FALLBACK_MS = 500;
+const BULK_PREVIEW_LINE_LIMIT = 5;
 
 const logCaptureWarn = (message: string, error?: unknown) => {
   void logWarn(message, { scope: 'capture', extra: buildCaptureExtra(undefined, error) });
@@ -57,6 +80,12 @@ const resolveInitialContextTokens = (contexts?: string[]): string[] => (
   )
 );
 
+const getCreatedTaskId = (result: unknown): string | null => {
+  if (!result || typeof result !== 'object') return null;
+  const maybeId = (result as { id?: unknown }).id;
+  return typeof maybeId === 'string' && maybeId.trim() ? maybeId : null;
+};
+
 export function QuickCaptureSheet({
   visible,
   openRequestId,
@@ -72,16 +101,29 @@ export function QuickCaptureSheet({
   initialValue?: string;
   autoRecord?: boolean;
 }) {
-  const { addTask, addProject, updateSettings, projects, settings, areas } = useTaskStore((state) => ({
+  const { addTask, addTasks, addProject, addArea, updateSettings, projects, settings, areas, getDerivedState } = useTaskStore((state) => ({
     addTask: state.addTask,
+    addTasks: state.addTasks,
     addProject: state.addProject,
+    addArea: state.addArea,
     updateSettings: state.updateSettings,
     projects: state.projects,
     settings: state.settings,
     areas: state.areas,
+    getDerivedState: state.getDerivedState,
   }), shallow);
   const { t } = useLanguage();
   const tc = useThemeColors();
+  const tokens = useThemeTokens();
+  // Two-tier M3 emphasis: the capture FAB owns the high-emphasis `primary` role
+  // (see tab _layout.tsx); secondary primary actions like Save sit one step below
+  // it on the canonical `primaryContainer`, preserving the action hierarchy.
+  const saveButtonBackgroundColor = tokens.isMaterial && tokens.roles
+    ? tokens.roles.primaryContainer
+    : tc.tint;
+  const saveButtonTextColor = tokens.isMaterial && tokens.roles
+    ? tokens.roles.onPrimaryContainer
+    : undefined;
   const { showToast } = useToast();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
@@ -90,6 +132,10 @@ export function QuickCaptureSheet({
   const isSavingRef = useRef(false);
   const prioritiesEnabled = settings?.features?.priorities !== false;
   const { selectedAreaIdForNewTasks } = useMobileAreaFilter();
+  const defaultAreaMode = getDefaultTaskAreaMode(settings);
+  const defaultAreaId = defaultAreaMode === 'active'
+    ? selectedAreaIdForNewTasks ?? null
+    : resolveDefaultNewTaskAreaId(settings, areas) ?? null;
 
   const updateSpeechSettings = useCallback(
     (next: Partial<NonNullable<NonNullable<typeof settings.ai>['speechToText']>>) => {
@@ -124,29 +170,34 @@ export function QuickCaptureSheet({
   const [projectQuery, setProjectQuery] = useState('');
   const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null);
   const [showAreaPicker, setShowAreaPicker] = useState(false);
+  const [areaQuery, setAreaQuery] = useState('');
   const [priority, setPriority] = useState<TaskPriority | null>(null);
   const [showPriorityPicker, setShowPriorityPicker] = useState(false);
   const [optionsExpanded, setOptionsExpanded] = useState(false);
+  const [androidKeyboardAvoidingEnabled, setAndroidKeyboardAvoidingEnabled] = useState(true);
+  const androidKeyboardInset = useAndroidKeyboardInset(visible);
   const [addAnother, setAddAnother] = useState(false);
+  const [focusNewTask, setFocusNewTask] = useState(false);
   const projectsRef = useRef(projects);
   const contextOptionsLoadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contextOptionsRequestRef = useRef(0);
-  const androidOptionsExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initialFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusTaskLimit = normalizeFocusTaskLimit(settings?.gtd?.focusTaskLimit);
+  const canFocusNewTask = focusNewTask || canStarNewCapture({ focusedCount: getDerivedState().focusedCount, focusTaskLimit });
+  const focusNewTaskDisabledReason = formatFocusTaskLimitText(
+    tFallback(t, 'agenda.maxFocusItems', 'Max {{count}} focus items'),
+    focusTaskLimit,
+  );
 
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
 
-  const filteredProjects = useMemo(() => {
-    if (!showProjectPicker) return [];
-    const visibleProjects = projects.filter(isSelectableProjectForTaskAssignment);
-    const areaFilteredProjects = selectedAreaId
-      ? visibleProjects.filter((project) => project.areaId === selectedAreaId)
-      : visibleProjects;
-    const query = projectQuery.trim().toLowerCase();
-    if (!query) return areaFilteredProjects;
-    return areaFilteredProjects.filter((project) => project.title.toLowerCase().includes(query));
-  }, [projectQuery, projects, selectedAreaId, showProjectPicker]);
+  const filteredProjects = useMemo(() => (
+    showProjectPicker
+      ? filterCaptureProjects(projects, { selectedAreaId, query: projectQuery })
+      : []
+  ), [projectQuery, projects, selectedAreaId, showProjectPicker]);
 
   const clearContextOptionsLoad = useCallback(() => {
     if (!contextOptionsLoadTimerRef.current) return;
@@ -154,11 +205,23 @@ export function QuickCaptureSheet({
     contextOptionsLoadTimerRef.current = null;
   }, []);
 
-  const clearAndroidOptionsExpandTimer = useCallback(() => {
-    if (!androidOptionsExpandTimerRef.current) return;
-    clearTimeout(androidOptionsExpandTimerRef.current);
-    androidOptionsExpandTimerRef.current = null;
+  const clearInitialFocusTimer = useCallback(() => {
+    if (!initialFocusTimerRef.current) return;
+    clearTimeout(initialFocusTimerRef.current);
+    initialFocusTimerRef.current = null;
   }, []);
+
+  const {
+    clearAndroidOptionsExpand,
+    collapseAndroidOptions,
+    requestAndroidOptionsExpand,
+  } = useAndroidQuickCaptureExpand({
+    clearInitialFocusTimer,
+    fallbackMs: ANDROID_OPTIONS_EXPAND_FALLBACK_MS,
+    inputRef,
+    setKeyboardAvoidingEnabled: setAndroidKeyboardAvoidingEnabled,
+    setOptionsExpanded,
+  });
 
   const loadContextOptions = useCallback(() => {
     clearContextOptionsLoad();
@@ -233,41 +296,60 @@ export function QuickCaptureSheet({
   }, [addContextFromQuery]);
 
   const submitProjectQuery = useCallback(async () => {
-    const title = projectQuery.trim();
-    if (!title) return;
-    const match = projects.find((project) => project.title.toLowerCase() === title.toLowerCase());
-    if (match) {
-      if (!isSelectableProjectForTaskAssignment(match)) return;
-      setProjectId(match.id);
-      setSelectedAreaId(null);
-      setShowProjectPicker(false);
-      setProjectQuery('');
-      Keyboard.dismiss();
-      return;
+    const resolution = resolveCaptureProjectQuery(projects, projectQuery, selectedAreaId);
+    if (resolution.kind === 'empty') return;
+    let nextProjectId: string | null = null;
+    if (resolution.kind === 'select') {
+      nextProjectId = resolution.project.id;
+    } else {
+      const created = await addProject(
+        resolution.projectToCreate.title,
+        resolution.projectToCreate.color,
+        resolution.projectToCreate.initialProps,
+      );
+      if (!created) return;
+      nextProjectId = created.id;
     }
-    const created = await addProject(
-      title,
-      DEFAULT_PROJECT_COLOR,
-      getQuickAddProjectInitialProps({}, selectedAreaId)
-    );
-    if (!created) return;
-    setProjectId(created.id);
+    setProjectId(nextProjectId);
     setSelectedAreaId(null);
     setShowProjectPicker(false);
     setProjectQuery('');
     Keyboard.dismiss();
   }, [addProject, projectQuery, projects, selectedAreaId]);
 
-  const hasExactProjectMatch = useMemo(() => {
-    if (!showProjectPicker) return false;
-    if (!projectQuery.trim()) return false;
-    const query = projectQuery.trim().toLowerCase();
-    return projects.some((project) => project.title.toLowerCase() === query);
-  }, [projectQuery, projects, showProjectPicker]);
+  const submitAreaQuery = useCallback(async () => {
+    const resolution = resolveCaptureAreaQuery(areas, areaQuery);
+    if (resolution.kind === 'empty') return;
+    let nextAreaId: string | null = null;
+    if (resolution.kind === 'select') {
+      nextAreaId = resolution.area.id;
+    } else {
+      const created = await addArea(resolution.areaToCreate.name, { color: resolution.areaToCreate.color });
+      if (!created) return;
+      nextAreaId = created.id;
+    }
+    setSelectedAreaId(nextAreaId);
+    setProjectId(null);
+    setShowAreaPicker(false);
+    setAreaQuery('');
+    Keyboard.dismiss();
+  }, [addArea, areaQuery, areas]);
 
-  const resetDraftState = useCallback(() => {
-    clearAndroidOptionsExpandTimer();
-    setValue(initialValue ?? '');
+  const hasExactProjectMatch = useMemo(() => (
+    showProjectPicker && hasExactCaptureProjectMatch(projects, projectQuery)
+  ), [projectQuery, projects, showProjectPicker]);
+
+  const filteredAreas = useMemo(() => (
+    showAreaPicker ? filterCaptureAreas(areas, areaQuery) : []
+  ), [areaQuery, areas, showAreaPicker]);
+
+  const hasExactAreaMatch = useMemo(() => (
+    showAreaPicker && hasExactCaptureAreaMatch(areas, areaQuery)
+  ), [areaQuery, areas, showAreaPicker]);
+
+  const resetDraftState = useCallback((options?: { keepAddAnother?: boolean; value?: string }) => {
+    clearAndroidOptionsExpand();
+    setValue(options?.value ?? initialValue ?? '');
     setDueDate(initialProps?.dueDate ? safeParseDate(initialProps.dueDate) : null);
     setDueDateHasTime(Boolean(initialProps?.dueDate && hasTimeComponent(initialProps.dueDate)));
     setStartTime(initialProps?.startTime ? safeParseDate(initialProps.startTime) : null);
@@ -286,33 +368,47 @@ export function QuickCaptureSheet({
       ? initialProps.projectId
       : null;
     setProjectId(initialProjectId);
-    setSelectedAreaId(initialProjectId ? null : (initialProps?.areaId ?? selectedAreaIdForNewTasks ?? null));
+    setSelectedAreaId(initialProjectId ? null : (initialProps?.areaId ?? defaultAreaId));
     setProjectQuery('');
     setShowProjectPicker(false);
     setShowAreaPicker(false);
+    setAreaQuery('');
     setPriority((initialProps?.priority as TaskPriority) ?? null);
     setShowPriorityPicker(false);
     setOptionsExpanded(false);
+    setAndroidKeyboardAvoidingEnabled(true);
     setShowDatePicker(false);
     setShowDueTimePicker(false);
     setStartPickerMode(null);
     setPendingStartDate(null);
-    setAddAnother(false);
-  }, [clearAndroidOptionsExpandTimer, clearContextOptionsLoad, initialProps, initialValue, selectedAreaIdForNewTasks]);
+    setFocusNewTask(Boolean(initialProps?.isFocusedToday));
+    setAddAnother(Boolean(options?.keepAddAnother));
+  }, [clearAndroidOptionsExpand, clearContextOptionsLoad, defaultAreaId, initialProps, initialValue]);
 
   useEffect(() => () => {
-    clearAndroidOptionsExpandTimer();
+    clearAndroidOptionsExpand();
+    clearInitialFocusTimer();
     clearContextOptionsLoad();
     contextOptionsRequestRef.current += 1;
-  }, [clearAndroidOptionsExpandTimer, clearContextOptionsLoad]);
+  }, [clearAndroidOptionsExpand, clearContextOptionsLoad, clearInitialFocusTimer]);
 
   useEffect(() => {
     if (!visible) return;
     resetDraftState();
+    // The "Add another" switch is a sticky device preference: capture bursts
+    // (Enter chains into the next task) should survive closing the sheet
+    // instead of resetting to one-shot mode every open (#819).
+    void readQuickCaptureAddAnother().then((stored) => {
+      if (stored) setAddAnother(true);
+    });
     if (autoRecord) return;
-    const handle = setTimeout(() => inputRef.current?.focus(), 120);
-    return () => clearTimeout(handle);
-  }, [autoRecord, openRequestId, resetDraftState, visible]);
+    clearInitialFocusTimer();
+    initialFocusTimerRef.current = setTimeout(() => {
+      initialFocusTimerRef.current = null;
+      inputRef.current?.focus();
+    }, 120);
+    return clearInitialFocusTimer;
+  }, [autoRecord, clearInitialFocusTimer, openRequestId, resetDraftState, visible]);
 
   useEffect(() => {
     if (prioritiesEnabled) return;
@@ -320,81 +416,60 @@ export function QuickCaptureSheet({
     setShowPriorityPicker(false);
   }, [prioritiesEnabled]);
 
-  const buildTaskProps = useCallback(async (fallbackTitle: string, extraProps?: Partial<Task>) => {
-    const trimmed = value.trim();
-    let finalTitle = trimmed || fallbackTitle;
-    let projectTitle: string | undefined;
-    let parsedProps: Partial<Task> = {};
-    let invalidDateCommands: string[] | undefined;
-    let detectedDate:
-      | {
-          date: string;
-          matchedText: string;
-          titleWithoutDate: string;
-        }
-      | undefined;
+  const buildTaskPropsForInput = useCallback(async (inputValue: string, fallbackTitle: string, extraProps?: Partial<Task>) => {
+    const trimmed = inputValue.trim();
+    const parsed = trimmed
+      ? parseQuickAdd(trimmed, projects, new Date(), areas, {
+        defaultScheduleTime: normalizeClockTimeInput(settings.gtd?.defaultScheduleTime) || undefined,
+        preserveText: settings.quickAddAutoClean !== true,
+      })
+      : { title: '', props: {}, projectTitle: undefined, detectedDate: undefined, invalidDateCommands: undefined };
 
-    if (trimmed) {
-      const parsed = parseQuickAdd(trimmed, projects, new Date(), areas);
-      finalTitle = parsed.title || trimmed;
-      parsedProps = parsed.props;
-      if (
-        parsedProps.projectId
-        && !projects.some((project) => project.id === parsedProps.projectId && isSelectableProjectForTaskAssignment(project))
-      ) {
-        delete parsedProps.projectId;
-      }
-      projectTitle = parsed.projectTitle;
-      invalidDateCommands = parsed.invalidDateCommands;
-      detectedDate = parsed.detectedDate;
+    // Capture policy lives in core buildCaptureTaskProps; this sheet only adds
+    // its picker state (project/area/context/priority/date pickers) on top.
+    const assembly = buildCaptureTaskProps({
+      parsed,
+      rawInput: trimmed,
+      fallbackTitle,
+      projects,
+      initialProps,
+      extraProps,
+      selectedAreaId,
+      starNewTask: focusNewTask && canFocusNewTask,
+      suppressDetectedDate: Boolean(dueDate),
+    });
+    if (!assembly.ok) {
+      return { title: '', props: { status: 'inbox' as const, ...initialProps, ...extraProps }, invalidDateCommands: parsed.invalidDateCommands };
     }
-
-    const initialPropsMerged: Partial<Task> = { status: 'inbox', ...initialProps, ...parsedProps, ...extraProps };
-    if (
-      initialPropsMerged.projectId
-      && !projects.some((project) => project.id === initialPropsMerged.projectId && isSelectableProjectForTaskAssignment(project))
-    ) {
-      delete initialPropsMerged.projectId;
-    }
-    if (!initialPropsMerged.status) initialPropsMerged.status = 'inbox';
-    const shouldApplyDetectedDate = Boolean(detectedDate?.date && !initialPropsMerged.dueDate && !dueDate);
-    if (shouldApplyDetectedDate && detectedDate) {
-      initialPropsMerged.dueDate = detectedDate.date;
-      finalTitle = detectedDate.titleWithoutDate;
-    }
-
-    if (!initialPropsMerged.projectId && projectTitle) {
-      const existingProject = projects.find((project) => project.title.toLowerCase() === projectTitle.toLowerCase());
-      if (existingProject && !isSelectableProjectForTaskAssignment(existingProject)) {
-        return { title: finalTitle, props: initialPropsMerged, invalidDateCommands };
-      }
+    let taskProps = assembly.props;
+    if (assembly.projectToCreate) {
       const created = await addProject(
-        projectTitle,
-        DEFAULT_PROJECT_COLOR,
-        getQuickAddProjectInitialProps(initialPropsMerged, selectedAreaId)
+        assembly.projectToCreate.title,
+        assembly.projectToCreate.color,
+        assembly.projectToCreate.initialProps,
       );
-      if (!created) return { title: finalTitle, props: initialPropsMerged, invalidDateCommands };
-      initialPropsMerged.projectId = created.id;
+      if (created) taskProps = applyCapturedProject(taskProps, created.id);
     }
-
-    if (projectId) initialPropsMerged.projectId = projectId;
-    if (!initialPropsMerged.projectId && selectedAreaId) initialPropsMerged.areaId = selectedAreaId;
-    if (initialPropsMerged.projectId) initialPropsMerged.areaId = undefined;
+    if (projectId) taskProps = applyCapturedProject(taskProps, projectId);
     if (contextTags.length > 0) {
-      initialPropsMerged.contexts = Array.from(new Set([...(initialPropsMerged.contexts ?? []), ...contextTags]));
+      taskProps.contexts = Array.from(new Set([...(taskProps.contexts ?? []), ...contextTags]));
     }
-    if (prioritiesEnabled && priority) initialPropsMerged.priority = priority;
+    if (prioritiesEnabled && priority) taskProps.priority = priority;
     if (dueDate) {
       const dateOnly = safeFormatDate(dueDate, 'yyyy-MM-dd');
-      if (dateOnly) initialPropsMerged.dueDate = dueDateHasTime ? dueDate.toISOString() : dateOnly;
+      if (dateOnly) taskProps.dueDate = dueDateHasTime ? dueDate.toISOString() : dateOnly;
     }
-    if (startTime) initialPropsMerged.startTime = startTime.toISOString();
+    if (startTime) taskProps.startTime = startTime.toISOString();
 
-    return { title: finalTitle, props: initialPropsMerged, invalidDateCommands };
-  }, [addProject, areas, contextTags, dueDate, dueDateHasTime, initialProps, prioritiesEnabled, priority, projectId, projects, selectedAreaId, startTime, value]);
+    return { title: assembly.title, props: taskProps, invalidDateCommands: assembly.invalidDateCommands };
+  }, [addProject, areas, canFocusNewTask, contextTags, dueDate, dueDateHasTime, focusNewTask, initialProps, prioritiesEnabled, priority, projectId, projects, selectedAreaId, settings.gtd?.defaultScheduleTime, settings.quickAddAutoClean, startTime]);
+
+  const buildTaskProps = useCallback((fallbackTitle: string, extraProps?: Partial<Task>) => (
+    buildTaskPropsForInput(value, fallbackTitle, extraProps)
+  ), [buildTaskPropsForInput, value]);
 
   const resetState = useCallback(() => {
-    clearAndroidOptionsExpandTimer();
+    clearAndroidOptionsExpand();
     clearContextOptionsLoad();
     contextOptionsRequestRef.current += 1;
     setValue('');
@@ -407,24 +482,28 @@ export function QuickCaptureSheet({
     setContextQuery('');
     setShowContextPicker(false);
     setProjectId(null);
-    setSelectedAreaId(selectedAreaIdForNewTasks ?? null);
+    setSelectedAreaId(defaultAreaId);
     setPriority(null);
     setProjectQuery('');
     setShowProjectPicker(false);
     setShowAreaPicker(false);
+    setAreaQuery('');
     setShowPriorityPicker(false);
     setOptionsExpanded(false);
+    setAndroidKeyboardAvoidingEnabled(true);
     setShowDatePicker(false);
     setShowDueTimePicker(false);
     setStartPickerMode(null);
     setPendingStartDate(null);
     setAddAnother(false);
-  }, [clearAndroidOptionsExpandTimer, clearContextOptionsLoad, selectedAreaIdForNewTasks]);
+    setFocusNewTask(false);
+  }, [clearAndroidOptionsExpand, clearContextOptionsLoad, defaultAreaId]);
 
   const finalizeClose = useCallback(() => {
+    clearInitialFocusTimer();
     resetState();
     onClose();
-  }, [onClose, resetState]);
+  }, [clearInitialFocusTimer, onClose, resetState]);
 
   const {
     recording,
@@ -453,27 +532,107 @@ export function QuickCaptureSheet({
     finalizeClose();
   }, [finalizeClose, recording, recordingBusy, stopRecording]);
 
-  const handleSave = useCallback(async () => {
-    if (!value.trim()) return;
+  const formatBulkConfirmTitle = useCallback((count: number) => (
+    tFallback(t, 'quickAdd.bulkConfirmTitle', 'Create {{count}} tasks?')
+      .replace('{{count}}', String(count))
+  ), [t]);
+
+  const formatBulkConfirmMessage = useCallback((lines: string[]) => {
+    const preview = lines.slice(0, BULK_PREVIEW_LINE_LIMIT).join('\n');
+    const remaining = Math.max(0, lines.length - BULK_PREVIEW_LINE_LIMIT);
+    const suffix = remaining > 0
+      ? `\n${tFallback(t, 'quickAdd.bulkMoreLines', '+{{count}} more').replace('{{count}}', String(remaining))}`
+      : '';
+    return `${preview}${suffix}`;
+  }, [t]);
+
+  const createTaskFromInput = useCallback(async (inputValue: string) => {
+    const { title, props, invalidDateCommands } = await buildTaskPropsForInput(inputValue, inputValue.trim());
+    if (invalidDateCommands && invalidDateCommands.length > 0) {
+      showToast({
+        title: t('common.notice'),
+        message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
+        tone: 'warning',
+        durationMs: 4200,
+      });
+      return null;
+    }
+    if (!title.trim()) return null;
+
+    const addTaskResult = await addTask(title, props);
+    if (addTaskResult && typeof addTaskResult === 'object' && addTaskResult.success === false) return null;
+    return {
+      createdTaskId: getCreatedTaskId(addTaskResult),
+      props,
+    };
+  }, [addTask, buildTaskPropsForInput, showToast, t]);
+
+  const createBulkTasks = useCallback(async (lines: string[]) => {
     if (isSavingRef.current) return;
     isSavingRef.current = true;
     try {
-      const { title, props, invalidDateCommands } = await buildTaskProps(value.trim());
-      if (invalidDateCommands && invalidDateCommands.length > 0) {
-        showToast({
-          title: t('common.notice'),
-          message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
-          tone: 'warning',
-          durationMs: 4200,
-        });
+      const taskInputs: Array<{ title: string; initialProps: Partial<Task> }> = [];
+      for (const line of lines) {
+        const { title, props, invalidDateCommands } = await buildTaskPropsForInput(line, line.trim());
+        if (invalidDateCommands && invalidDateCommands.length > 0) {
+          showToast({
+            title: t('common.notice'),
+            message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
+            tone: 'warning',
+            durationMs: 4200,
+          });
+          return;
+        }
+        if (!title.trim()) return;
+        taskInputs.push({ title, initialProps: props });
+      }
+      const result = await addTasks(taskInputs);
+      if (result && typeof result === 'object' && result.success === false) return;
+      finalizeClose();
+    } finally {
+      isSavingRef.current = false;
+    }
+  }, [addTasks, buildTaskPropsForInput, finalizeClose, showToast, t]);
+
+  const confirmBulkQuickAdd = useCallback((lines: string[]) => {
+    Alert.alert(
+      formatBulkConfirmTitle(lines.length),
+      formatBulkConfirmMessage(lines),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: tFallback(t, 'quickAdd.bulkConfirmCreate', 'Create tasks'),
+          onPress: () => {
+            void createBulkTasks(lines);
+          },
+        },
+      ],
+    );
+  }, [createBulkTasks, formatBulkConfirmMessage, formatBulkConfirmTitle, t]);
+
+  const handleSave = useCallback(async ({ openAfterSave = false }: { openAfterSave?: boolean } = {}) => {
+    if (!value.trim()) return;
+    const bulkLines = splitQuickAddBulkLines(value);
+    if (bulkLines.length > 1) {
+      confirmBulkQuickAdd(bulkLines);
+      return;
+    }
+    if (isSavingRef.current) return;
+    isSavingRef.current = true;
+    try {
+      const result = await createTaskFromInput(value.trim());
+      if (!result) return;
+
+      if (openAfterSave) {
+        finalizeClose();
+        if (result.createdTaskId) {
+          openTaskScreen(result.createdTaskId, result.props.projectId, 'task');
+        }
         return;
       }
-      if (!title.trim()) return;
-
-      await addTask(title, props);
 
       if (addAnother) {
-        setValue('');
+        resetDraftState({ keepAddAnother: true, value: '' });
         setTimeout(() => inputRef.current?.focus(), 80);
         return;
       }
@@ -482,7 +641,7 @@ export function QuickCaptureSheet({
     } finally {
       isSavingRef.current = false;
     }
-  }, [addAnother, addTask, buildTaskProps, finalizeClose, showToast, t, value]);
+  }, [addAnother, confirmBulkQuickAdd, createTaskFromInput, finalizeClose, resetDraftState, value]);
 
   const selectedProject = projectId ? projects.find((project) => project.id === projectId) : null;
   const dueLabel = dueDate ? safeFormatDate(dueDate, dueDateHasTime ? 'Pp' : 'P') : t('taskEdit.dueDateLabel');
@@ -644,6 +803,7 @@ export function QuickCaptureSheet({
       setProjectId(null);
     }
     setShowAreaPicker(false);
+    setAreaQuery('');
   }, []);
 
   const handleSelectProject = useCallback((nextProjectId: string | null) => {
@@ -668,23 +828,21 @@ export function QuickCaptureSheet({
   }, [recording, startRecording, stopRecording]);
 
   const handleToggleOptions = useCallback(() => {
-    setOptionsExpanded((prev) => {
-      clearAndroidOptionsExpandTimer();
-      if (!prev) {
-        inputRef.current?.blur();
-        Keyboard.dismiss();
-        if (Platform.OS === 'android') {
-          // Let the transparent modal settle after keyboard resize before growing the sheet.
-          androidOptionsExpandTimerRef.current = setTimeout(() => {
-            androidOptionsExpandTimerRef.current = null;
-            setOptionsExpanded(true);
-          }, ANDROID_OPTIONS_EXPAND_DELAY_MS);
-          return false;
-        }
+    clearAndroidOptionsExpand();
+    if (!optionsExpanded) {
+      clearInitialFocusTimer();
+      if (Platform.OS === 'android') {
+        requestAndroidOptionsExpand();
+        return;
       }
-      return !prev;
-    });
-  }, [clearAndroidOptionsExpandTimer]);
+      inputRef.current?.blur();
+      Keyboard.dismiss();
+    } else if (Platform.OS === 'android') {
+      collapseAndroidOptions();
+      return;
+    }
+    setOptionsExpanded((prev) => !prev);
+  }, [clearAndroidOptionsExpand, clearInitialFocusTimer, collapseAndroidOptions, optionsExpanded, requestAndroidOptionsExpand]);
 
   const openContextPicker = useCallback(() => {
     setShowContextPicker(true);
@@ -698,8 +856,37 @@ export function QuickCaptureSheet({
     setContextOptionsLoading(false);
   }, [clearContextOptionsLoad]);
 
+  const handleImportTextFile = useCallback(async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+        type: 'text/plain',
+      });
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset?.uri) return;
+      const text = await FileSystem.readAsStringAsync(asset.uri);
+      const lines = splitQuickAddBulkLines(text);
+      if (lines.length > 1) {
+        confirmBulkQuickAdd(lines);
+      } else if (lines.length === 1) {
+        setValue(lines[0]);
+      }
+    } catch (error) {
+      logCaptureError('Failed to import quick capture text file', error);
+      showToast({
+        title: t('common.notice'),
+        message: tFallback(t, 'quickAdd.bulkImportError', 'Could not read that text file.'),
+        tone: 'warning',
+        durationMs: 4200,
+      });
+    }
+  }, [confirmBulkQuickAdd, showToast, t]);
+
   const pickerProps = {
-    areas,
+    areaQuery,
+    filteredAreas,
     contextInputRef,
     contextOptionsLoading,
     contextQuery,
@@ -708,10 +895,15 @@ export function QuickCaptureSheet({
     filteredContexts,
     filteredProjects,
     hasAddableContextTokens,
+    hasExactAreaMatch,
     hasExactProjectMatch,
     onAddContextFromQuery: addContextFromQuery,
+    onAreaQueryChange: setAreaQuery,
     onClearContexts: handleClearContexts,
-    onCloseAreaPicker: () => setShowAreaPicker(false),
+    onCloseAreaPicker: () => {
+      setShowAreaPicker(false);
+      setAreaQuery('');
+    },
     onCloseContextPicker: closeContextPicker,
     onClosePriorityPicker: () => setShowPriorityPicker(false),
     onCloseProjectPicker: () => setShowProjectPicker(false),
@@ -726,6 +918,9 @@ export function QuickCaptureSheet({
     onSelectProject: handleSelectProject,
     onStartTimeChange: handleStartTimeChange,
     onSubmitContextQuery: handleContextSubmit,
+    onSubmitAreaQuery: () => {
+      void submitAreaQuery();
+    },
     onSubmitProjectQuery: () => {
       void submitProjectQuery();
     },
@@ -757,11 +952,20 @@ export function QuickCaptureSheet({
         dueLabel={dueLabel}
         dueTimeLabel={dueTimeLabel}
         handleClose={handleClose}
+        handleImportTextFile={handleImportTextFile}
         handleSave={() => {
           void handleSave();
         }}
+        focusNewTask={focusNewTask}
+        canFocusNewTask={canFocusNewTask}
+        focusNewTaskDisabledReason={focusNewTaskDisabledReason}
+        handleSaveAndEdit={() => {
+          void handleSave({ openAfterSave: true });
+        }}
         insetsBottom={insets.bottom}
         inputRef={inputRef}
+        keyboardAvoidingEnabled={androidKeyboardAvoidingEnabled}
+        androidKeyboardInset={androidKeyboardInset}
         onOpenAreaPicker={() => setShowAreaPicker(true)}
         onOpenContextPicker={openContextPicker}
         onOpenDueDatePicker={openDueDatePicker}
@@ -776,19 +980,38 @@ export function QuickCaptureSheet({
         onResetPriority={() => setPriority(null)}
         onResetProject={() => {
           setProjectId(null);
-          setSelectedAreaId(selectedAreaIdForNewTasks ?? null);
+          setSelectedAreaId(defaultAreaId);
         }}
         onToggleOptions={handleToggleOptions}
-        onToggleAddAnother={setAddAnother}
+        onToggleAddAnother={(next) => {
+          setAddAnother(next);
+          void writeQuickCaptureAddAnother(next);
+        }}
+        onToggleFocusNewTask={() => {
+          if (!focusNewTask && !canFocusNewTask) {
+            // Keep the hard focus cap, but explain the block instead of silently
+            // swallowing the tap (mirrors the task-list focus toggle).
+            showToast({
+              title: tFallback(t, 'digest.focus', 'Focus'),
+              message: focusNewTaskDisabledReason,
+              tone: 'warning',
+            });
+            return;
+          }
+          setFocusNewTask((current) => !current);
+        }}
         onToggleRecording={handleToggleRecording}
         onValueChange={setValue}
         optionsExpanded={optionsExpanded}
         prioritiesEnabled={prioritiesEnabled}
         priorityLabel={priorityLabel}
         projectLabel={projectLabel}
+        projectSelected={Boolean(selectedProject)}
         recording={Boolean(recording)}
         recordingBusy={recordingBusy}
         recordingReady={recordingReady}
+        saveButtonBackgroundColor={saveButtonBackgroundColor}
+        saveButtonTextColor={saveButtonTextColor}
         sheetMaxHeight={sheetMaxHeight}
         showDueTime={Boolean(dueDate)}
         t={t}
@@ -796,7 +1019,7 @@ export function QuickCaptureSheet({
         value={value}
         visible={visible}
       >
-        <QuickCaptureSheetPickers {...pickerProps} pickerLayer="overlay" />
+        <QuickCaptureSheetPickers {...pickerProps} pickerLayer="overlay" overlayKeyboardInset={androidKeyboardInset} />
       </QuickCaptureSheetBody>
       <QuickCaptureSheetPickers {...pickerProps} pickerLayer="date" />
     </>

@@ -4,6 +4,7 @@ import { Platform, Text, TextInput, TouchableOpacity, View } from 'react-native'
 import type { AIReasoningEffort } from '@mindwtr/core';
 
 import type { ThemeColors } from '@/hooks/use-theme-colors';
+import { CompactText } from '@/components/compact-text';
 
 import { styles } from './settings.styles';
 
@@ -66,13 +67,16 @@ export function AiSettingsAssistantOpenAiPanel({
                             ]}
                             onPress={() => onAiReasoningEffortChange(effort)}
                         >
-                            <Text style={[styles.backendOptionText, { color: aiReasoningEffort === effort ? tc.tint : tc.secondaryText }]}>
+                            <CompactText
+                                style={[styles.backendOptionText, { color: aiReasoningEffort === effort ? tc.tint : tc.secondaryText }]}
+                                numberOfLines={2}
+                            >
                                 {effort === 'low'
                                     ? t('settings.aiEffortLow')
                                     : effort === 'medium'
                                         ? t('settings.aiEffortMedium')
                                         : t('settings.aiEffortHigh')}
-                            </Text>
+                            </CompactText>
                         </TouchableOpacity>
                     ))}
                 </View>

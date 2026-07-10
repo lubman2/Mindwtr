@@ -4,6 +4,8 @@ import {
     clearDeletedTaskProjectArchiveMetadata,
     computeProjectDerivedState,
     computeTaskDerivedState,
+    createProjectOrderReserver,
+    applyTaskUpdates,
     getNextProjectOrder,
     hasSameEntityIdentity,
     reconcileEntityCollection,
@@ -11,7 +13,6 @@ import {
     replaceEntitiesInMap,
     replaceEntityInArray,
     replaceEntityInMap,
-    reserveNextProjectOrder,
     restoreSectionFromProjectArchive,
     restoreTaskFromProjectArchive,
     reuseArrayIfShallowEqual,
@@ -67,6 +68,89 @@ const createSection = (
     rev: 1,
     revBy: 'device-a',
     ...overrides,
+});
+
+
+describe('relative start updates', () => {
+    it('recomputes startTime from the stored due-date offset when dueDate changes', () => {
+        const task = createTask('t1', undefined, undefined, {
+            dueDate: '2026-04-24',
+            startTime: '2026-04-21',
+            relativeStartOffset: { amount: -3, unit: 'day' },
+        } as Partial<Task>);
+
+        const { updatedTask } = applyTaskUpdates(task, {
+            dueDate: '2026-05-01',
+        }, '2026-04-20T10:00:00.000Z');
+
+        expect(updatedTask.dueDate).toBe('2026-05-01');
+        expect(updatedTask.startTime).toBe('2026-04-28');
+        expect((updatedTask as Task & { relativeStartOffset?: unknown }).relativeStartOffset).toEqual({
+            amount: -3,
+            unit: 'day',
+        });
+    });
+
+    it('sets startTime when a relative offset is added to a task with a dueDate', () => {
+        const task = createTask('t1', undefined, undefined, {
+            dueDate: '2026-04-24',
+            startTime: undefined,
+        });
+
+        const { updatedTask } = applyTaskUpdates(task, {
+            relativeStartOffset: { amount: -1, unit: 'week' },
+        }, '2026-04-20T10:00:00.000Z');
+
+        expect(updatedTask.startTime).toBe('2026-04-17');
+        expect(updatedTask.relativeStartOffset).toEqual({ amount: -1, unit: 'week' });
+    });
+
+    it('recomputes when full-form saves include an unchanged startTime', () => {
+        const task = createTask('t1', undefined, undefined, {
+            dueDate: '2026-04-24',
+            startTime: '2026-04-21',
+            relativeStartOffset: { amount: -3, unit: 'day' },
+        } as Partial<Task>);
+
+        const { updatedTask } = applyTaskUpdates(task, {
+            dueDate: '2026-05-01',
+            startTime: '2026-04-21',
+        }, '2026-04-20T10:00:00.000Z');
+
+        expect(updatedTask.startTime).toBe('2026-04-28');
+        expect(updatedTask.relativeStartOffset).toEqual({ amount: -3, unit: 'day' });
+    });
+
+    it('clears the relative start link when startTime is edited directly', () => {
+        const task = createTask('t1', undefined, undefined, {
+            dueDate: '2026-04-24',
+            startTime: '2026-04-21',
+            relativeStartOffset: { amount: -3, unit: 'day' },
+        } as Partial<Task>);
+
+        const { updatedTask } = applyTaskUpdates(task, {
+            startTime: '2026-04-22',
+        }, '2026-04-20T10:00:00.000Z');
+
+        expect(updatedTask.startTime).toBe('2026-04-22');
+        expect((updatedTask as Task & { relativeStartOffset?: unknown }).relativeStartOffset).toBeUndefined();
+    });
+
+    it('keeps the current startTime as absolute when dueDate is removed', () => {
+        const task = createTask('t1', undefined, undefined, {
+            dueDate: '2026-04-24',
+            startTime: '2026-04-21',
+            relativeStartOffset: { amount: -3, unit: 'day' },
+        } as Partial<Task>);
+
+        const { updatedTask } = applyTaskUpdates(task, {
+            dueDate: undefined,
+        }, '2026-04-20T10:00:00.000Z');
+
+        expect(updatedTask.dueDate).toBeUndefined();
+        expect(updatedTask.startTime).toBe('2026-04-21');
+        expect((updatedTask as Task & { relativeStartOffset?: unknown }).relativeStartOffset).toBeUndefined();
+    });
 });
 
 describe('entity collection helpers', () => {
@@ -363,28 +447,29 @@ describe('getNextProjectOrder', () => {
         expect(getNextProjectOrder('project-2', tasks)).toBe(0);
     });
 
-    it('reserves unique project orders against the same snapshot', () => {
+    it('reserves unique project orders with an explicit reserver', () => {
         const tasks = [
             createTask('t1', 'project-1', 0),
             createTask('t2', 'project-1', 1),
         ];
+        const reserveProjectOrder = createProjectOrderReserver(tasks);
 
-        expect(reserveNextProjectOrder('project-1', tasks)).toBe(2);
-        expect(reserveNextProjectOrder('project-1', tasks)).toBe(3);
-        expect(reserveNextProjectOrder('project-2', tasks)).toBe(0);
-        expect(reserveNextProjectOrder('project-2', tasks)).toBe(1);
+        expect(reserveProjectOrder('project-1')).toBe(2);
+        expect(reserveProjectOrder('project-1')).toBe(3);
+        expect(reserveProjectOrder('project-2')).toBe(0);
+        expect(reserveProjectOrder('project-2')).toBe(1);
     });
 
-    it('does not carry reserved orders across new task snapshots', () => {
+    it('does not carry reserved orders across reserver instances', () => {
         const tasks = [
             createTask('t1', 'project-1', 0),
             createTask('t2', 'project-1', 1),
         ];
 
-        expect(reserveNextProjectOrder('project-1', tasks)).toBe(2);
+        expect(createProjectOrderReserver(tasks)('project-1')).toBe(2);
 
         const refreshedTasks = tasks.map((task) => ({ ...task }));
-        expect(reserveNextProjectOrder('project-1', refreshedTasks)).toBe(2);
+        expect(createProjectOrderReserver(refreshedTasks)('project-1')).toBe(2);
     });
 });
 
@@ -483,5 +568,97 @@ describe('derived store state helpers', () => {
 
         expect([...derived.sequentialProjectIds]).toEqual(['project-wide', 'section-wide']);
         expect([...derived.sequentialWithinSectionProjectIds]).toEqual(['section-wide']);
+    });
+});
+
+describe('completion timestamp updates', () => {
+    const now = '2026-07-08T10:00:00.000Z';
+
+    it('uses a caller-supplied completedAt when completing a task', () => {
+        const task = createTask('t1', undefined, 0, { status: 'next' });
+        const { updatedTask } = applyTaskUpdates(
+            task,
+            { status: 'done', completedAt: '2026-07-07T18:00:00.000Z' },
+            now
+        );
+        expect(updatedTask.completedAt).toBe('2026-07-07T18:00:00.000Z');
+        expect(updatedTask.status).toBe('done');
+    });
+
+    it('falls back to now when the supplied completedAt is invalid', () => {
+        const task = createTask('t2', undefined, 0, { status: 'next' });
+        const { updatedTask } = applyTaskUpdates(
+            task,
+            { status: 'done', completedAt: 'not-a-date' },
+            now
+        );
+        expect(updatedTask.completedAt).toBe(now);
+    });
+
+    it('anchors after-completion recurrence to the backdated completion time', () => {
+        const task = createTask('t3', undefined, 0, {
+            status: 'next',
+            dueDate: '2026-07-01',
+            recurrence: { rule: 'weekly', strategy: 'fluid' },
+        });
+        const { nextRecurringTask } = applyTaskUpdates(
+            task,
+            { status: 'done', completedAt: '2026-07-04T09:00:00.000Z' },
+            now
+        );
+        // Fluid weekly: next due = completed date + 7 days, not click date + 7.
+        expect(nextRecurringTask?.dueDate).toBe('2026-07-11');
+    });
+
+    it('keeps click-time anchoring when no completedAt is supplied', () => {
+        const task = createTask('t4', undefined, 0, {
+            status: 'next',
+            dueDate: '2026-07-01',
+            recurrence: { rule: 'weekly', strategy: 'fluid' },
+        });
+        const { nextRecurringTask } = applyTaskUpdates(task, { status: 'done' }, now);
+        expect(nextRecurringTask?.dueDate).toBe('2026-07-15');
+    });
+
+    it('uses a caller-supplied completedAt when archiving a task', () => {
+        const task = createTask('t5', undefined, 0, { status: 'next' });
+        const { updatedTask } = applyTaskUpdates(
+            task,
+            { status: 'archived', completedAt: '2026-07-06T08:00:00.000Z' },
+            now
+        );
+        expect(updatedTask.completedAt).toBe('2026-07-06T08:00:00.000Z');
+    });
+
+    it('preserves attachments when completing a task', () => {
+        const task = createTask('t7', undefined, 0, {
+            status: 'next',
+            attachments: [{
+                id: 'att-1',
+                kind: 'file',
+                uri: 'file:///doc.pdf',
+                title: 'doc.pdf',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+            }],
+        });
+        const { updatedTask } = applyTaskUpdates(task, { status: 'done' }, now);
+        expect(updatedTask.status).toBe('done');
+        expect(updatedTask.attachments).toEqual(task.attachments);
+    });
+
+    it('passes completedAt edits through on an already-done task', () => {
+        const task = createTask('t6', undefined, 0, {
+            status: 'done',
+            completedAt: '2026-07-08T09:00:00.000Z',
+        });
+        const { updatedTask, nextRecurringTask } = applyTaskUpdates(
+            task,
+            { completedAt: '2026-07-05T12:00:00.000Z' },
+            now
+        );
+        expect(updatedTask.completedAt).toBe('2026-07-05T12:00:00.000Z');
+        expect(updatedTask.status).toBe('done');
+        expect(nextRecurringTask).toBeNull();
     });
 });

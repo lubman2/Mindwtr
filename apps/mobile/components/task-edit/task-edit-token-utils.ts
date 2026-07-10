@@ -1,6 +1,3 @@
-import { extractChecklistFromMarkdown, generateUUID } from '@mindwtr/core';
-import type { Task } from '@mindwtr/core';
-
 export const parseTokenList = (value: string | undefined, tokenPrefix: '@' | '#'): string[] => {
     if (!value) return [];
     const tokens = value
@@ -34,45 +31,4 @@ export const replaceTrailingToken = (value: string | undefined, token: string): 
     }
     const head = source.slice(0, lastCommaIndex + 1).trimEnd();
     return `${head} ${token}, `;
-};
-
-const normalizeChecklistKey = (value: string): string => value.trim().toLowerCase();
-
-export const applyMarkdownChecklistToTask = (
-    description: string | undefined,
-    checklist: Task['checklist'],
-): Task['checklist'] => {
-    const markdownItems = extractChecklistFromMarkdown(String(description ?? ''));
-    if (markdownItems.length === 0) return checklist;
-
-    const current = checklist || [];
-    const remainingByTitle = new Map<string, { id: string; title: string; isCompleted: boolean }[]>();
-    for (const item of current) {
-        if (!item?.title) continue;
-        const key = normalizeChecklistKey(item.title);
-        const bucket = remainingByTitle.get(key);
-        if (bucket) {
-            bucket.push(item);
-        } else {
-            remainingByTitle.set(key, [item]);
-        }
-    }
-
-    const usedIds = new Set<string>();
-    const merged: NonNullable<Task['checklist']> = [];
-    for (const item of markdownItems) {
-        const key = normalizeChecklistKey(item.title);
-        const bucket = remainingByTitle.get(key) || [];
-        const reusable = bucket.find((entry) => !usedIds.has(entry.id));
-        if (reusable) {
-            usedIds.add(reusable.id);
-        }
-        merged.push({
-            id: reusable?.id ?? generateUUID(),
-            title: item.title,
-            isCompleted: item.isCompleted,
-        });
-    }
-
-    return merged;
 };

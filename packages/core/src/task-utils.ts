@@ -4,6 +4,7 @@
 
 import { Task, TaskStatus, TaskSortBy, TaskPriority, Project, AppData, SortField } from './types';
 import { isDueForReview, safeParseDate, safeParseDueDate } from './date';
+import { hasRecurrenceRule } from './recurrence';
 import { timeEstimateToMinutes } from './calendar-scheduling';
 import { TASK_STATUS_ORDER } from './task-status';
 import { isTaskInActiveProject } from './project-utils';
@@ -313,9 +314,17 @@ export function getWaitingPerson(task: Pick<Task, 'assignedTo' | 'description'>)
     return extractWaitingPerson(task.description);
 }
 
-export function isTaskFutureStart(task: Pick<Task, 'startTime'>, now: Date = new Date()): boolean {
+export function isTaskFutureStart(
+    task: Pick<Task, 'startTime'> & Partial<Pick<Task, 'dueDate' | 'recurrence'>>,
+    now: Date = new Date(),
+): boolean {
     const start = safeParseDate(task.startTime);
-    if (!start) return false;
+    // A recurring task with only a due date defers like a start-dated one; otherwise
+    // the next instance spawned on completion reappears in Next/Focus immediately,
+    // indistinguishable from the instance just completed (#843).
+    const deferUntil = start
+        ?? (hasRecurrenceRule(task.recurrence) ? safeParseDate(task.dueDate) : null);
+    if (!deferUntil) return false;
 
     const endOfToday = new Date(
         now.getFullYear(),
@@ -326,11 +335,11 @@ export function isTaskFutureStart(task: Pick<Task, 'startTime'>, now: Date = new
         59,
         999,
     );
-    return start > endOfToday;
+    return deferUntil > endOfToday;
 }
 
 export function shouldShowTaskForStart(
-    task: Pick<Task, 'startTime'>,
+    task: Pick<Task, 'startTime'> & Partial<Pick<Task, 'dueDate' | 'recurrence'>>,
     options: TaskStartVisibilityOptions = {},
 ): boolean {
     if (options.showFutureStarts === true) return true;
@@ -625,6 +634,19 @@ export function sortTasksBy(tasks: Task[], sortBy: TaskSortBy = 'default'): Task
     }
 }
 
+/**
+ * Stable sort for Board columns: tasks with a manual boardOrder come first
+ * in ascending order; tasks without one keep their incoming relative order.
+ */
+export function sortTasksByBoardOrder<T extends Pick<Task, 'boardOrder'>>(tasks: T[]): T[] {
+    return [...tasks].sort((a, b) => {
+        const aOrder = Number.isFinite(a.boardOrder) ? (a.boardOrder as number) : Number.POSITIVE_INFINITY;
+        const bOrder = Number.isFinite(b.boardOrder) ? (b.boardOrder as number) : Number.POSITIVE_INFINITY;
+        if (aOrder === bOrder) return 0;
+        return aOrder - bOrder;
+    });
+}
+
 export function splitCompletedTasks<T extends Pick<Task, 'status'>>(tasks: T[]): {
     activeTasks: T[];
     completedTasks: T[];
@@ -641,6 +663,22 @@ export function splitCompletedTasks<T extends Pick<Task, 'status'>>(tasks: T[]):
     });
 
     return { activeTasks, completedTasks };
+}
+
+function getCompletionListTime(task: Pick<Task, 'completedAt' | 'updatedAt' | 'createdAt'>): number {
+    const completedAt = safeParseDate(task.completedAt)?.getTime();
+    if (Number.isFinite(completedAt)) return completedAt as number;
+    const updatedAt = safeParseDate(task.updatedAt)?.getTime();
+    if (Number.isFinite(updatedAt)) return updatedAt as number;
+    return safeParseDate(task.createdAt)?.getTime() ?? 0;
+}
+
+export function sortDoneTasksForListView<T extends Pick<Task, 'completedAt' | 'updatedAt' | 'createdAt' | 'title'>>(tasks: T[]): T[] {
+    return [...tasks].sort((a, b) => {
+        const completionDiff = getCompletionListTime(b) - getCompletionListTime(a);
+        if (completionDiff !== 0) return completionDiff;
+        return a.title.localeCompare(b.title);
+    });
 }
 
 export function groupCompletedTasksLast<T extends Pick<Task, 'status'>>(tasks: T[]): T[] {
@@ -787,6 +825,62 @@ export function sortFocusNextActions(tasks: Task[], options: SortFocusNextAction
     });
 }
 
+export type CalendarPlanningCandidateOptions = {
+    limit?: number;
+    now?: Date;
+    prioritizeByPriority?: boolean;
+    projects?: readonly Project[] | Map<string, Project>;
+    sectionScopedProjectIds?: ReadonlySet<string>;
+    sequentialProjectIds?: ReadonlySet<string>;
+};
+
+export function getCalendarPlanningCandidates<T extends Task>(
+    tasks: readonly T[],
+    options: CalendarPlanningCandidateOptions = {},
+): T[] {
+    const now = options.now ?? new Date();
+    const projectMap = options.projects ? getFocusEligibilityProjectMap(options.projects) : null;
+    const derivedSequential = projectMap && (!options.sequentialProjectIds || !options.sectionScopedProjectIds)
+        ? getFocusEligibilitySequentialProjectIds(projectMap)
+        : null;
+    const sequentialProjectIds = options.sequentialProjectIds
+        ?? derivedSequential?.sequentialProjectIds
+        ?? new Set<string>();
+    const sectionScopedProjectIds = options.sectionScopedProjectIds
+        ?? derivedSequential?.sectionScopedProjectIds
+        ?? new Set<string>();
+
+    const activeFocusTasks = tasks.filter((task) => (
+        !task.deletedAt
+        && FOCUS_ELIGIBILITY_ACTIVE_STATUS_SET.has(task.status)
+        && (!projectMap || isTaskInActiveProject(task, projectMap))
+    ));
+    const sequentialFirstTaskIds = getFocusSequentialFirstTaskIds(
+        activeFocusTasks,
+        sequentialProjectIds,
+        { now, sectionScopedProjectIds },
+    );
+
+    const candidates = tasks.filter((task) => {
+        if (task.deletedAt) return false;
+        if (task.status !== 'next') return false;
+        if (task.isFocusedToday) return false;
+        if (task.startTime) return false;
+        if (projectMap && !isTaskInActiveProject(task, projectMap)) return false;
+        if (task.projectId && sequentialProjectIds.has(task.projectId) && !sequentialFirstTaskIds.has(task.id)) return false;
+        return true;
+    });
+
+    const sortProjects = Array.isArray(options.projects) ? options.projects : undefined;
+    const sorted = sortFocusNextActions(candidates as Task[], {
+        now,
+        prioritizeByPriority: options.prioritizeByPriority,
+        projects: sortProjects,
+    }) as T[];
+    const limit = Number.isFinite(options.limit) ? Math.max(0, Math.floor(options.limit as number)) : sorted.length;
+    return sorted.slice(0, limit);
+}
+
 /**
  * Get display color for a task status
  */
@@ -889,6 +983,41 @@ export type SpeechUpdatePlan = {
     suggestedProjectTitle?: string;
 };
 
+const normalizeSpeechTranscriptForTask = (transcript: string | null | undefined): string | undefined => {
+    const trimmed = transcript?.trim();
+    if (!trimmed) return undefined;
+
+    const parseStructuredTranscript = (candidate: string): string | undefined | null => {
+        try {
+            const parsed = JSON.parse(candidate) as unknown;
+            if (!parsed || typeof parsed !== 'object') return null;
+            const text = (parsed as { text?: unknown; transcript?: unknown }).text
+                ?? (parsed as { transcript?: unknown }).transcript;
+            if (typeof text !== 'string') return null;
+            const normalized = text.trim();
+            return normalized || undefined;
+        } catch {
+            return null;
+        }
+    };
+
+    const direct = parseStructuredTranscript(trimmed);
+    if (direct !== null) return direct;
+
+    const objectStart = trimmed.indexOf('{');
+    const objectEnd = trimmed.lastIndexOf('}');
+    if (objectStart >= 0 && objectEnd > objectStart) {
+        const embedded = parseStructuredTranscript(trimmed.slice(objectStart, objectEnd + 1));
+        if (embedded !== null) return embedded;
+    }
+
+    if (/^(?:\[\s*[^\]]+?\s*\]\s*)+$/.test(trimmed)) {
+        return undefined;
+    }
+
+    return trimmed;
+};
+
 export function buildTaskUpdatesFromSpeechResult(
     existing: Pick<Task, 'title' | 'description' | 'dueDate' | 'startTime' | 'tags' | 'contexts' | 'projectId'>,
     result: SpeechResultLike,
@@ -897,7 +1026,7 @@ export function buildTaskUpdatesFromSpeechResult(
     const updates: Partial<Task> = {};
     const mode = settings?.ai?.speechToText?.mode ?? 'smart_parse';
     const fieldStrategy = settings?.ai?.speechToText?.fieldStrategy ?? 'smart';
-    const transcript = result.transcript?.trim();
+    const transcript = normalizeSpeechTranscriptForTask(result.transcript);
 
     if (mode === 'transcribe_only') {
         if (transcript) {

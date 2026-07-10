@@ -18,6 +18,7 @@ import type {
     TimeEstimate,
     MarkdownSelection,
     MarkdownToolbarResult,
+    Person,
 } from '@mindwtr/core';
 import type { ThemeColors } from '@/hooks/use-theme-colors';
 
@@ -50,6 +51,7 @@ export type TaskEditFieldRendererProps = {
     commitTagDraft: () => void;
     contextInputDraft: string;
     contextTokenSuggestions: string[];
+    createAssignedToPerson: (name: string) => Promise<Person | null>;
     customWeekdays: RecurrenceWeekday[];
     dailyInterval: number;
     descriptionDraft: string;
@@ -93,6 +95,7 @@ export type TaskEditFieldRendererProps = {
     recurrenceRuleValue: RecurrenceRule | '';
     recurrenceStrategyValue: RecurrenceStrategy;
     recurrenceWeekdayButtons: WeekdayButton[];
+    requestStatusChange: (status: TaskStatus) => void;
     removeAttachment: (attachmentId: string) => void | Promise<void>;
     selectedContextTokens: Set<string>;
     selectedTagTokens: Set<string>;
@@ -117,6 +120,7 @@ export type TaskEditFieldRendererProps = {
     tc: ThemeColors;
     timeEstimateOptions: PickerOption<TimeEstimate>[];
     timeEstimatesEnabled: boolean;
+    timeSpentEnabled: boolean;
     titleDraft: string;
     toggleQuickContextToken: (token: string) => void;
     toggleQuickTagToken: (token: string) => void;

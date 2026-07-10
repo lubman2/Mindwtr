@@ -3,9 +3,13 @@ import { describe, expect, it } from 'vitest';
 import {
   buildStaticListVirtualWindow,
   buildProjectTaskReorderGroups,
+  flattenProjectReorderGroups,
   getBulkActionFailureMessage,
+  resolveProjectReorderDropPlan,
   resolveStaticListViewportHeight,
   sortProjectTasksByOrder,
+  type ProjectReorderFlatItem,
+  type ProjectTaskReorderGroup,
 } from './task-list-utils';
 
 describe('getBulkActionFailureMessage', () => {
@@ -71,6 +75,74 @@ describe('buildProjectTaskReorderGroups', () => {
             { id: 'filled', taskIds: ['task-1'], title: 'Filled' },
         ]);
     });
+});
+
+describe('flattenProjectReorderGroups + resolveProjectReorderDropPlan', () => {
+  type TestTask = { id: string };
+  const makeGroups = (): ProjectTaskReorderGroup<TestTask>[] => [
+    { id: 'sec-a', sectionId: 'sec-a', title: 'Section A', tasks: [{ id: 't1' }] },
+    { id: 'sec-b', sectionId: 'sec-b', title: 'Section B', tasks: [{ id: 't2' }, { id: 't3' }] },
+    { id: 'sec-empty', sectionId: 'sec-empty', title: 'Empty', tasks: [] },
+  ];
+
+  it('flattens titled groups into header rows followed by their tasks', () => {
+    const items = flattenProjectReorderGroups(makeGroups());
+    expect(items.map((item) => item.key)).toEqual([
+      'header-sec-a', 't1', 'header-sec-b', 't2', 't3', 'header-sec-empty',
+    ]);
+  });
+
+  it('omits header rows for untitled leading groups', () => {
+    const items = flattenProjectReorderGroups([
+      { id: 'project', sectionId: null, tasks: [{ id: 't0' }] },
+      ...makeGroups(),
+    ]);
+    expect(items[0]).toEqual({ type: 'task', key: 't0', task: { id: 't0' } });
+    expect(items[1]).toEqual(expect.objectContaining({ key: 'header-sec-a' }));
+  });
+
+  const header = (id: string): ProjectReorderFlatItem<TestTask> => ({
+    type: 'header',
+    key: `header-${id}`,
+    group: { id, sectionId: id, title: id, tasks: [] },
+  });
+  const task = (id: string): ProjectReorderFlatItem<TestTask> => ({ type: 'task', key: id, task: { id } });
+
+  it('keeps a task in its own section when reordered within it', () => {
+    const plan = resolveProjectReorderDropPlan(
+      [header('sec-b'), task('t3'), task('t2'), header('sec-c'), task('t4')],
+      't3',
+    );
+    expect(plan).toEqual({ sectionId: 'sec-b', orderedIds: ['t3', 't2'] });
+  });
+
+  it('assigns the section whose header sits above the drop position', () => {
+    const plan = resolveProjectReorderDropPlan(
+      [header('sec-a'), task('t1'), header('sec-b'), task('t2'), task('t1-moved-away'), task('t3')],
+      't1-moved-away',
+    );
+    expect(plan).toEqual({ sectionId: 'sec-b', orderedIds: ['t2', 't1-moved-away', 't3'] });
+  });
+
+  it('drops a task into an empty section', () => {
+    const plan = resolveProjectReorderDropPlan(
+      [header('sec-a'), task('t1'), header('sec-empty'), task('t2')],
+      't2',
+    );
+    expect(plan).toEqual({ sectionId: 'sec-empty', orderedIds: ['t2'] });
+  });
+
+  it('treats tasks above the first header as unsectioned', () => {
+    const plan = resolveProjectReorderDropPlan(
+      [task('t2'), header('sec-a'), task('t1')],
+      't2',
+    );
+    expect(plan).toEqual({ sectionId: null, orderedIds: ['t2'] });
+  });
+
+  it('returns null when the moved task is not present', () => {
+    expect(resolveProjectReorderDropPlan([header('sec-a'), task('t1')], 'missing')).toBeNull();
+  });
 });
 
 describe('sortProjectTasksByOrder', () => {

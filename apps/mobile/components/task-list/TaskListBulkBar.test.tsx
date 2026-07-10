@@ -4,6 +4,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { TaskListBulkBar } from './TaskListBulkBar';
 
+vi.mock('@/hooks/use-theme-colors', () => ({
+  useThemeColors: () => ({ tint: '#3b82f6', onTint: '#ffffff' }),
+}));
+vi.mock('@/hooks/use-theme-tokens', () => ({
+  useThemeTokens: () => ({ isMaterial: false, roles: null, shape: { large: 16 } }),
+}));
+
 vi.mock('react-native', () => ({
   ActivityIndicator: ({ color, size }: any) => React.createElement('span', { 'data-activity': size, style: { color } }),
   ScrollView: ({ children, contentContainerStyle, horizontal, showsHorizontalScrollIndicator, style, ...props }: any) =>
@@ -42,7 +49,8 @@ const themeColors = {
 
 const t = (key: string) => ({
   'bulk.addTag': 'Add tag',
-  'bulk.delete': 'Delete selected',
+  'bulk.delete': 'Delete',
+  'common.delete': 'Delete',
   'bulk.exitSelect': 'Done',
   'bulk.moveTo': 'Move to',
   'bulk.selectRange': 'Range',
@@ -96,5 +104,21 @@ describe('TaskListBulkBar', () => {
     const html = renderBulkBar();
 
     expect(html).toContain('aria-label="Done"');
+  });
+
+
+
+  it('renders provided move statuses in order without adding hidden statuses', () => {
+    const html = renderBulkBar({ statusOptions: ['next', 'done', 'reference'] } as any);
+
+    expect(html).not.toContain('Move to Inbox');
+    expect(html.indexOf('Move to Done')).toBeLessThan(html.indexOf('Move to Reference'));
+  });
+
+  it('labels bulk organize generically because it is shared outside Inbox', () => {
+    const html = renderBulkBar({ onOpenOrganize: vi.fn() });
+
+    expect(html).toContain('aria-label="Bulk organize"');
+    expect(html).not.toContain('Bulk organize Inbox');
   });
 });

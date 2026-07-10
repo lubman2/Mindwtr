@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
+import { Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import {
   getQuickDate,
   isQuickDatePresetSelected,
@@ -9,6 +9,7 @@ import {
 } from '@mindwtr/core';
 
 import type { ThemeColors } from '@/hooks/use-theme-colors';
+import { CompactText } from '@/components/compact-text';
 
 const QUICK_DATE_LABELS: Record<QuickDatePreset, { key: string; fallback: string }> = {
   today: { key: 'quickDate.today', fallback: 'Today' },
@@ -23,7 +24,12 @@ type QuickDateChipsProps = {
   t: (key: string) => string;
   tc: ThemeColors;
   selectedDate?: Date | null;
+  selectedPreset?: QuickDatePreset | null;
   onSelect: (date: Date | null, preset: QuickDatePreset) => void;
+  /** Which presets to render. Defaults to the full core set. */
+  presets?: readonly QuickDatePreset[];
+  /** Optional node rendered as the last item inside the same wrapping row (e.g. a custom-date chip). */
+  trailing?: React.ReactNode;
   style?: StyleProp<ViewStyle>;
   contentContainerStyle?: StyleProp<ViewStyle>;
 };
@@ -32,7 +38,10 @@ export function QuickDateChips({
   t,
   tc,
   selectedDate,
+  selectedPreset,
   onSelect,
+  presets = QUICK_DATE_PRESETS,
+  trailing,
   style,
   contentContainerStyle,
 }: QuickDateChipsProps) {
@@ -43,10 +52,10 @@ export function QuickDateChips({
       testID="quick-date-chips-row"
       style={[styles.content, style, contentContainerStyle]}
     >
-      {QUICK_DATE_PRESETS.map((preset) => {
+      {presets.map((preset) => {
         const labelConfig = QUICK_DATE_LABELS[preset];
         const label = tFallback(t, labelConfig.key, labelConfig.fallback);
-        const active = isQuickDatePresetSelected(preset, selectedDate, now);
+        const active = selectedPreset === preset || isQuickDatePresetSelected(preset, selectedDate, now);
 
         return (
           <Pressable
@@ -54,7 +63,8 @@ export function QuickDateChips({
             accessibilityRole="button"
             accessibilityState={{ selected: active }}
             accessibilityLabel={label}
-            onPress={() => onSelect(getQuickDate(preset, now), preset)}
+            // Tapping the active chip clears the date (replaces the standalone "No date" chip).
+            onPress={() => onSelect(active ? null : getQuickDate(preset, now), preset)}
             style={[
               styles.chip,
               {
@@ -63,19 +73,19 @@ export function QuickDateChips({
               },
             ]}
           >
-            <Text
+            <CompactText
               style={[
                 styles.chipText,
                 { color: active ? tc.onTint : tc.secondaryText },
               ]}
               numberOfLines={2}
-              maxFontSizeMultiplier={1.2}
             >
               {label}
-            </Text>
+            </CompactText>
           </Pressable>
         );
       })}
+      {trailing}
     </View>
   );
 }
@@ -85,14 +95,17 @@ const styles = StyleSheet.create({
     marginTop: 8,
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
+    gap: 6,
     paddingRight: 4,
   },
   chip: {
     minHeight: 34,
     borderRadius: 999,
     borderWidth: 1,
-    paddingHorizontal: 11,
+    flexBasis: 92,
+    flexGrow: 1,
+    flexShrink: 1,
+    paddingHorizontal: 10,
     paddingVertical: 7,
     justifyContent: 'center',
     maxWidth: '100%',

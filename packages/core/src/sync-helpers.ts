@@ -1,7 +1,8 @@
 import type { AppData, Attachment } from './types';
 import { normalizeSavedFilters } from './saved-filters';
+import { SYNC_FILE_NAME } from './sync-service-utils';
 
-const SYNC_FILE_NAME = 'data.json';
+const MISSING_ATTACHMENT_TIMESTAMP_SENTINEL = '1970-01-01T00:00:00.000Z';
 
 export type SoftDeletable = {
     deletedAt?: string | null;
@@ -21,10 +22,27 @@ export type PendingAttachmentUpload = {
 };
 
 export const normalizeWebdavUrl = (rawUrl: string): string => {
-    const trimmed = rawUrl.replace(/\/+$/, '');
-    return trimmed.toLowerCase().endsWith(`/${SYNC_FILE_NAME}`) || trimmed.toLowerCase().endsWith('.json')
-        ? trimmed
-        : `${trimmed}/${SYNC_FILE_NAME}`;
+    const splitIndex = rawUrl.search(/[?#]/);
+    const pathEnd = splitIndex >= 0 ? splitIndex : rawUrl.length;
+    const path = rawUrl.slice(0, pathEnd).replace(/\/+$/, '');
+    const suffix = rawUrl.slice(pathEnd);
+    const lowerPath = path.toLowerCase();
+    const normalizedPath = lowerPath.endsWith(`/${SYNC_FILE_NAME}`) || lowerPath.endsWith('.json')
+        ? path
+        : `${path}/${SYNC_FILE_NAME}`;
+
+    if (!suffix) return normalizedPath;
+    const hashIndex = suffix.indexOf('#');
+    const queryPart = suffix.startsWith('?')
+        ? suffix.slice(0, hashIndex >= 0 ? hashIndex : suffix.length)
+        : '';
+    const hashPart = hashIndex >= 0 ? suffix.slice(hashIndex) : (suffix.startsWith('#') ? suffix : '');
+    if (!queryPart) return `${normalizedPath}${hashPart}`;
+
+    const params = new URLSearchParams(queryPart.slice(1));
+    params.delete('_');
+    const query = params.toString();
+    return `${normalizedPath}${query ? `?${query}` : ''}${hashPart}`;
 };
 
 export const normalizeCloudUrl = (rawUrl: string): string => {
@@ -132,10 +150,9 @@ export const sanitizeAppDataForRemote = (data: AppData): AppData => {
             const hasCloudKey = hasNonEmptyValue(attachment.cloudKey);
             if (!attachment.deletedAt) {
                 if ((ownerDeleted && !hasCloudKey) || (attachment.localStatus === 'missing' && !hasCloudKey)) {
-                    const nowIso = new Date().toISOString();
                     const fallbackUpdatedAt = hasNonEmptyValue(attachment.updatedAt)
                         ? attachment.updatedAt
-                        : nowIso;
+                        : MISSING_ATTACHMENT_TIMESTAMP_SENTINEL;
                     return {
                         ...attachment,
                         deletedAt: fallbackUpdatedAt,
@@ -178,14 +195,21 @@ export const sanitizeAppDataForRemote = (data: AppData): AppData => {
         }
 
         if (prefs.gtd === true) {
+            // This allowlist must stay in step with the gtd group in
+            // mergeSettingsForSync (sync-merge-settings.ts) — a field present in
+            // the merge but missing here silently never leaves the device.
             if (
                 settings.gtd?.defaultScheduleTime !== undefined
+                || settings.gtd?.defaultAreaMode !== undefined
+                || settings.gtd?.defaultAreaId !== undefined
                 || settings.gtd?.focusTaskLimit !== undefined
                 || settings.gtd?.focusGroupBy !== undefined
                 || settings.gtd?.defaultProjectFlowMode !== undefined
             ) {
                 next.gtd = {
                     ...(settings.gtd.defaultScheduleTime !== undefined ? { defaultScheduleTime: settings.gtd.defaultScheduleTime } : {}),
+                    ...(settings.gtd.defaultAreaMode !== undefined ? { defaultAreaMode: settings.gtd.defaultAreaMode } : {}),
+                    ...(settings.gtd.defaultAreaId !== undefined ? { defaultAreaId: settings.gtd.defaultAreaId } : {}),
                     ...(settings.gtd.focusTaskLimit !== undefined ? { focusTaskLimit: settings.gtd.focusTaskLimit } : {}),
                     ...(settings.gtd.focusGroupBy !== undefined ? { focusGroupBy: settings.gtd.focusGroupBy } : {}),
                     ...(settings.gtd.defaultProjectFlowMode !== undefined ? { defaultProjectFlowMode: settings.gtd.defaultProjectFlowMode } : {}),

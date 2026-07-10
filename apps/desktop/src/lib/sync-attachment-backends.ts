@@ -51,6 +51,7 @@ import {
     saveCloudKitAttachmentAsset,
     type CloudKitAttachmentMetadata,
 } from './cloudkit-sync';
+import { normalizeAttachmentPathForUrl } from './attachment-paths';
 
 export type WebDavConfig = {
     url: string;
@@ -64,6 +65,7 @@ export type CloudConfig = {
     url: string;
     token: string;
     allowInsecureHttp?: boolean;
+    rememberToken?: boolean;
 };
 
 export type AttachmentBackendDeps = {
@@ -97,13 +99,32 @@ const WEBDAV_ATTACHMENT_MAX_UPLOADS_PER_SYNC = 10;
 const WEBDAV_ATTACHMENT_MISSING_BACKOFF_MS = 15 * 60_000;
 const WEBDAV_ATTACHMENT_ERROR_BACKOFF_MS = 2 * 60_000;
 
+const normalizeAttachmentFsPath = (path: string): string => normalizeAttachmentPathForUrl(path.trim());
+
 const webdavDownloadBackoff = createWebdavDownloadBackoff({
     missingBackoffMs: WEBDAV_ATTACHMENT_MISSING_BACKOFF_MS,
     errorBackoffMs: WEBDAV_ATTACHMENT_ERROR_BACKOFF_MS,
 });
+let webdavAttachmentRateLimitedUntil = 0;
 
 export const clearAttachmentSyncState = (): void => {
     webdavDownloadBackoff.clear();
+    webdavAttachmentRateLimitedUntil = 0;
+};
+
+const getWebdavAttachmentRateLimitRemainingMs = (): number => Math.max(0, webdavAttachmentRateLimitedUntil - Date.now());
+
+const markWebdavAttachmentRateLimited = (
+    error: unknown,
+    logSyncWarning: AttachmentBackendDeps['logSyncWarning'],
+): boolean => {
+    if (!isWebdavRateLimitedError(error)) return false;
+    webdavAttachmentRateLimitedUntil = Math.max(
+        webdavAttachmentRateLimitedUntil,
+        Date.now() + WEBDAV_ATTACHMENT_COOLDOWN_MS,
+    );
+    logSyncWarning('WebDAV rate limited; pausing attachment sync', error);
+    return true;
 };
 
 const getWebdavDownloadBackoff = (attachmentId: string): number | null => {
@@ -204,6 +225,13 @@ export async function syncWebdavAttachments(
 ): Promise<AppData | null> {
     if (!deps.isTauriRuntimeEnv()) return null;
     if (!webDavConfig.url) return null;
+    const cooldownRemainingMs = getWebdavAttachmentRateLimitRemainingMs();
+    if (cooldownRemainingMs > 0) {
+        deps.logSyncInfo('WebDAV attachment sync skipped during rate-limit cooldown', {
+            remainingMs: String(Math.ceil(cooldownRemainingMs)),
+        });
+        return null;
+    }
 
     const fetcher = await deps.getTauriFetch();
     const { BaseDirectory, exists, mkdir, readFile, writeFile, rename, remove } = await import('@tauri-apps/plugin-fs');
@@ -219,6 +247,9 @@ export async function syncWebdavAttachments(
             fetcher,
         });
     } catch (error) {
+        if (markWebdavAttachmentRateLimited(error, deps.logSyncWarning)) {
+            return null;
+        }
         deps.logSyncWarning('Failed to ensure WebDAV attachments directory', error);
     }
 
@@ -241,12 +272,12 @@ export async function syncWebdavAttachments(
     });
 
     let lastRequestAt = 0;
-    let blockedUntil = 0;
     const waitForSlot = async (): Promise<void> => {
-        const now = Date.now();
-        if (blockedUntil && now < blockedUntil) {
-            throw new Error(`WebDAV rate limited for ${blockedUntil - now}ms`);
+        const cooldownRemainingMs = getWebdavAttachmentRateLimitRemainingMs();
+        if (cooldownRemainingMs > 0) {
+            throw new Error(`WebDAV rate limited for ${cooldownRemainingMs}ms`);
         }
+        const now = Date.now();
         const elapsed = now - lastRequestAt;
         if (elapsed < WEBDAV_ATTACHMENT_MIN_INTERVAL_MS) {
             await sleep(WEBDAV_ATTACHMENT_MIN_INTERVAL_MS - elapsed);
@@ -254,10 +285,7 @@ export async function syncWebdavAttachments(
         lastRequestAt = Date.now();
     };
     const handleRateLimit = (error: unknown): boolean => {
-        if (!isWebdavRateLimitedError(error)) return false;
-        blockedUntil = Date.now() + WEBDAV_ATTACHMENT_COOLDOWN_MS;
-        deps.logSyncWarning('WebDAV rate limited; pausing attachment sync', error);
-        return true;
+        return markWebdavAttachmentRateLimited(error, deps.logSyncWarning);
     };
 
     const readLocalFile = async (path: string): Promise<Uint8Array> => {
@@ -265,7 +293,7 @@ export async function syncWebdavAttachments(
             const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
             return await readFile(relative, { baseDir: BaseDirectory.Data });
         }
-        return await readFile(path);
+        return await readFile(normalizeAttachmentFsPath(path));
     };
 
     const localFileExists = async (path: string): Promise<boolean> => {
@@ -274,7 +302,7 @@ export async function syncWebdavAttachments(
                 const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
                 return await exists(relative, { baseDir: BaseDirectory.Data });
             }
-            return await exists(path);
+            return await exists(normalizeAttachmentFsPath(path));
         } catch (error) {
             deps.logSyncWarning('Failed to check attachment file', error);
             return false;
@@ -555,7 +583,7 @@ export async function syncCloudAttachments(
             const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
             return await readFile(relative, { baseDir: BaseDirectory.Data });
         }
-        return await readFile(path);
+        return await readFile(normalizeAttachmentFsPath(path));
     };
 
     const localFileExists = async (path: string): Promise<boolean> => {
@@ -564,7 +592,7 @@ export async function syncCloudAttachments(
                 const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
                 return await exists(relative, { baseDir: BaseDirectory.Data });
             }
-            return await exists(path);
+            return await exists(normalizeAttachmentFsPath(path));
         } catch (error) {
             deps.logSyncWarning('Failed to check attachment file', error);
             return false;
@@ -731,7 +759,7 @@ export async function syncDropboxAttachments(
             const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
             return await readFile(relative, { baseDir: BaseDirectory.Data });
         }
-        return await readFile(path);
+        return await readFile(normalizeAttachmentFsPath(path));
     };
 
     const localFileExists = async (path: string): Promise<boolean> => {
@@ -740,7 +768,7 @@ export async function syncDropboxAttachments(
                 const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
                 return await exists(relative, { baseDir: BaseDirectory.Data });
             }
-            return await exists(path);
+            return await exists(normalizeAttachmentFsPath(path));
         } catch (error) {
             deps.logSyncWarning('Failed to check attachment file', error);
             return false;
@@ -883,7 +911,7 @@ export async function syncCloudKitAttachments(appData: AppData, deps: Attachment
             const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
             return await readFile(relative, { baseDir: BaseDirectory.Data });
         }
-        return await readFile(path);
+        return await readFile(normalizeAttachmentFsPath(path));
     };
 
     const localFileExists = async (path: string): Promise<boolean> => {
@@ -892,7 +920,7 @@ export async function syncCloudKitAttachments(appData: AppData, deps: Attachment
                 const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
                 return await exists(relative, { baseDir: BaseDirectory.Data });
             }
-            return await exists(path);
+            return await exists(normalizeAttachmentFsPath(path));
         } catch (error) {
             deps.logSyncWarning('Failed to check CloudKit attachment file', error);
             return false;
@@ -1035,7 +1063,7 @@ export async function syncFileAttachments(
             const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
             return await readFile(relative, { baseDir: BaseDirectory.Data });
         }
-        return await readFile(path);
+        return await readFile(normalizeAttachmentFsPath(path));
     };
 
     const localFileExists = async (path: string): Promise<boolean> => {
@@ -1044,7 +1072,7 @@ export async function syncFileAttachments(
                 const relative = path.slice(baseDataDir.length).replace(/^[\\/]/, '');
                 return await exists(relative, { baseDir: BaseDirectory.Data });
             }
-            return await exists(path);
+            return await exists(normalizeAttachmentFsPath(path));
         } catch (error) {
             deps.logSyncWarning('Failed to check attachment file', error);
             return false;

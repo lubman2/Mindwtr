@@ -26,6 +26,11 @@ const { addTask, updateTask, restoreTask, showToast, getChecklistProgress, getTa
     areas: [] as any[],
     settings: { features: {}, appearance: {} },
     getDerivedState: () => ({ focusedCount: 0 }),
+    getFocusStarAction: (task: any) => (
+      task.isFocusedToday
+        ? { isFocused: true, canToggle: true, blockedReason: null, labelKey: 'agenda.removeFromFocus', patch: { isFocusedToday: false } }
+        : { isFocused: false, canToggle: true, blockedReason: null, labelKey: 'agenda.addToFocus', patch: { isFocusedToday: true } }
+    ),
     tasks: [] as any[],
     _allTasks: [] as any[],
     _tasksById: new Map<string, any>(),
@@ -43,6 +48,8 @@ const translate = vi.hoisted(() => {
     'common.notice': 'Notice',
     'common.skip': 'Skip',
     'common.undo': 'Undo',
+    'agenda.addToFocus': 'Add to focus',
+    'agenda.removeFromFocus': 'Remove from focus',
     'list.taskDeleted': 'Task deleted',
     'list.done': 'Completed',
     'status.inbox': 'Inbox',
@@ -60,7 +67,11 @@ const translate = vi.hoisted(() => {
     'projects.nextActionPromptAddButton': 'Add next action',
     'task.aria.delete': 'Delete task',
     'task.deleteConfirmBody': 'Move this task to Trash?',
+    'taskEdit.recurrenceLabel': 'Recurrence',
     'taskEdit.startDateLabel': 'Start',
+    'recurrence.daily': 'Daily',
+    'recurrence.repeatEvery': 'Repeat every',
+    'recurrence.dayUnit': 'day(s)',
   };
   return (key: string) => labels[key] ?? key;
 });
@@ -79,6 +90,9 @@ vi.mock('@mindwtr/core', () => {
 
   return {
     useTaskStore,
+    getFocusStarBlockedText: (_t: unknown, action: { blockedReason: string | null }, limit: number) => (
+      action.blockedReason === 'limit' ? `Max ${limit} focus items.` : action.blockedReason
+    ),
     getProjectNextActionPromptData: (completedTask: any, tasks: any[], projects: any[]) => {
       if (!completedTask?.projectId || completedTask.status !== 'done') return null;
       const project = projects.find((candidate) => candidate.id === completedTask.projectId);
@@ -104,6 +118,20 @@ vi.mock('@mindwtr/core', () => {
       };
     },
     formatFocusTaskLimitText: (template: string, limit: number) => template.replace('{{count}}', String(limit)),
+    formatRecurrenceLabel: ({ recurrence, t }: any) => {
+      const rule = typeof recurrence === 'string' ? recurrence : recurrence?.rule;
+      if (!rule) return '';
+      const intervalMatch = typeof recurrence === 'object'
+        ? /INTERVAL=(\d+)/.exec(recurrence.rrule || '')
+        : null;
+      const interval = intervalMatch ? Number(intervalMatch[1]) : 1;
+      return [
+        t(`recurrence.${rule}`),
+        rule === 'daily' && interval > 1
+          ? `${t('recurrence.repeatEvery')} ${interval} ${t('recurrence.dayUnit')}`
+          : undefined,
+      ].filter(Boolean).join(' · ');
+    },
     shallow: (value: unknown) => value,
     getChecklistProgress,
     getTaskAgeLabel,
@@ -193,6 +221,11 @@ vi.mock('expo-linking', () => ({
   openURL: vi.fn(),
 }));
 
+vi.mock('@react-native-community/datetimepicker', () => ({
+  __esModule: true,
+  default: () => null,
+}));
+
 vi.mock('expo-clipboard', () => ({
   setStringAsync: vi.fn(async () => {}),
 }));
@@ -209,10 +242,21 @@ vi.mock('../contexts/toast-context', () => ({
   }),
 }));
 
+vi.mock('../hooks/use-theme-tokens', () => ({
+  useThemeTokens: () => ({
+    isMaterial: false,
+    shape: { large: 16 },
+    state: { rippleColor: undefined, stateLayerColor: () => 'transparent' },
+  }),
+}));
+
 vi.mock('lucide-react-native', () => ({
   ArrowRight: (props: any) => React.createElement('ArrowRight', props),
   Check: (props: any) => React.createElement('Check', props),
+  CircleDot: (props: any) => React.createElement('CircleDot', props),
+  Repeat: (props: any) => React.createElement('Repeat', props),
   RotateCcw: (props: any) => React.createElement('RotateCcw', props),
+  Star: (props: any) => React.createElement('Star', props),
   Trash2: (props: any) => React.createElement('Trash2', props),
 }));
 
@@ -230,11 +274,12 @@ describe('SwipeableTaskItem', () => {
   const hasText = (tree: renderer.ReactTestRenderer, text: string) =>
     tree.root.findAll((node) => flattenText(node.props?.children).includes(text)).length > 0;
 
+  const flattenStyle = (style: unknown): Record<string, unknown> => {
+    if (Array.isArray(style)) return Object.assign({}, ...style.map(flattenStyle));
+    return style && typeof style === 'object' ? style as Record<string, unknown> : {};
+  };
+
   const getTextColor = (tree: renderer.ReactTestRenderer, text: string) => {
-    const flattenStyle = (style: unknown): Record<string, unknown> => {
-      if (Array.isArray(style)) return Object.assign({}, ...style.map(flattenStyle));
-      return style && typeof style === 'object' ? style as Record<string, unknown> : {};
-    };
     const matches = tree.root.findAll((node) => (
       flattenText(node.props?.children) === text && node.props?.style
     ));
@@ -260,6 +305,46 @@ describe('SwipeableTaskItem', () => {
       formatStr === 'Pp' ? 'May 12, 2026, 8:30 AM' : ''
     ));
     safeParseDate.mockImplementation((value?: string | null) => (value ? new Date(value) : null));
+  });
+
+  it('keeps inbox row titles width-constrained without the focus toggle', () => {
+    let tree!: renderer.ReactTestRenderer;
+    renderer.act(() => {
+      tree = renderer.create(
+        <SwipeableTaskItem
+          task={{
+            id: 'task-1',
+            title: 'Do laundry',
+            status: 'inbox',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          } as any}
+          isDark={false}
+          tc={{
+            taskItemBg: '#111111',
+            border: '#222222',
+            text: '#ffffff',
+            secondaryText: '#999999',
+            tint: '#3b82f6',
+            warning: '#f59e0b',
+          } as any}
+          onPress={vi.fn()}
+          onStatusChange={vi.fn()}
+          onDelete={vi.fn()}
+          statusBadgeAsIcon
+        />
+      );
+    });
+
+    const title = tree.root.findAll((node) => (
+      flattenText(node.props?.children) === 'Do laundry' && node.props?.style
+    )).at(-1);
+
+    expect(title).toBeTruthy();
+    expect(flattenStyle(title?.props.style)).toEqual(expect.objectContaining({
+      flex: 1,
+      minWidth: 0,
+    }));
   });
 
   it('requires a deliberate horizontal drag before opening swipe actions', () => {
@@ -300,7 +385,50 @@ describe('SwipeableTaskItem', () => {
     expect(swipeable.props.overshootRight).toBe(false);
   });
 
-  it('confirms deletion before invoking onDelete', async () => {
+it('uses the shared rounded star treatment for focused tasks', () => {
+  let tree!: renderer.ReactTestRenderer;
+  renderer.act(() => {
+    tree = renderer.create(
+      <SwipeableTaskItem
+        task={{
+          id: 'task-1',
+          title: 'File taxes',
+          status: 'next',
+          isFocusedToday: true,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        } as any}
+        isDark={true}
+        tc={{
+          taskItemBg: '#111111',
+          border: '#222222',
+          text: '#ffffff',
+          secondaryText: '#999999',
+          tint: '#3b82f6',
+          warning: '#f59e0b',
+        } as any}
+        onPress={vi.fn()}
+        onStatusChange={vi.fn()}
+        onDelete={vi.fn()}
+        showFocusToggle
+      />
+    );
+  });
+
+  const focusButton = tree.root.find((node) => node.props.accessibilityLabel === 'Remove from focus');
+  const focusButtonStyle = Array.isArray(focusButton.props.style)
+    ? Object.assign({}, ...focusButton.props.style.filter(Boolean))
+    : focusButton.props.style;
+  expect(focusButtonStyle).not.toHaveProperty('backgroundColor');
+  expect(hasText(tree, '★')).toBe(false);
+
+  const star = tree.root.find((node) => (node.type as unknown) === 'Star');
+  expect(star.props.color).toBe('#F59E0B');
+  expect(star.props.fill).toBe('#F59E0B');
+  expect(star.props.strokeWidth).toBe(2);
+});
+
+  it('deletes immediately with an undo toast instead of a confirmation', async () => {
     const alertSpy = vi.spyOn(Alert, 'alert');
     const onDelete = vi.fn();
 
@@ -339,23 +467,11 @@ describe('SwipeableTaskItem', () => {
       deleteAction.props.onPress();
     });
 
-    expect(alertSpy).toHaveBeenCalledWith(
-      'Pay rent',
-      'Move this task to Trash?',
-      expect.arrayContaining([
-        expect.objectContaining({ text: 'Cancel', style: 'cancel' }),
-        expect.objectContaining({ text: 'Delete', style: 'destructive', onPress: expect.any(Function) }),
-      ]),
-      { cancelable: true }
-    );
-    expect(onDelete).not.toHaveBeenCalled();
-
-    const alertButtons = alertSpy.mock.calls[0]?.[2] as { text?: string; onPress?: () => void }[];
-    const destructiveAction = alertButtons.find((button) => button.text === 'Delete');
-    expect(destructiveAction?.onPress).toBeTypeOf('function');
+    // Deleting moves the task to Trash immediately; the undo toast replaces a
+    // confirmation prompt.
+    expect(alertSpy).not.toHaveBeenCalled();
 
     await renderer.act(async () => {
-      destructiveAction?.onPress?.();
       await Promise.resolve();
     });
 
@@ -414,6 +530,43 @@ describe('SwipeableTaskItem', () => {
     });
 
     expect(onLongPressAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows recurring task metadata in the mobile row', () => {
+    let tree!: renderer.ReactTestRenderer;
+    renderer.act(() => {
+      tree = renderer.create(
+        <SwipeableTaskItem
+          task={{
+            id: 'task-1',
+            title: 'Water plants',
+            status: 'next',
+            recurrence: { rule: 'daily', rrule: 'FREQ=DAILY;INTERVAL=3' },
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          } as any}
+          isDark={false}
+          tc={{
+            taskItemBg: '#111111',
+            border: '#222222',
+            text: '#ffffff',
+            secondaryText: '#999999',
+            tint: '#3b82f6',
+            warning: '#f59e0b',
+          } as any}
+          onPress={vi.fn()}
+          onStatusChange={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      );
+    });
+
+    expect(hasText(tree, 'Daily · Repeat every 3 day(s)')).toBe(true);
+    expect(tree.root.findAll((node) => (node.type as unknown) === 'Repeat')).toHaveLength(1);
+    expect(tree.root.findAll((node) => (
+      node.props.accessibilityLabel === 'Water plants. Status: Next. Recurrence: Daily · Repeat every 3 day(s)'
+      && Array.isArray(node.props.accessibilityActions)
+    )).length).toBeGreaterThan(0);
   });
 
   it('uses long press to toggle selection when no custom long-press action is present', () => {
@@ -898,6 +1051,60 @@ describe('SwipeableTaskItem', () => {
     expect(onStatusChange).toHaveBeenCalledWith('reference');
   });
 
+  it('renders the status control as an icon button on single-status lists and still opens the menu', () => {
+    const onStatusChange = vi.fn();
+
+    let tree!: renderer.ReactTestRenderer;
+    renderer.act(() => {
+      tree = renderer.create(
+        <SwipeableTaskItem
+          task={{
+            id: 'task-1',
+            title: 'Capture idea',
+            status: 'inbox',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          } as any}
+          isDark={false}
+          tc={{
+            taskItemBg: '#111111',
+            cardBg: '#111111',
+            border: '#222222',
+            text: '#ffffff',
+            secondaryText: '#999999',
+            tint: '#3b82f6',
+            warning: '#f59e0b',
+          } as any}
+          onPress={vi.fn()}
+          onStatusChange={onStatusChange}
+          onDelete={vi.fn()}
+          statusBadgeAsIcon
+        />
+      );
+    });
+
+    // Icon variant renders the status dot, not the redundant "Inbox" label.
+    expect(tree.root.findAll((node) => (node.type as unknown) === 'CircleDot')).toHaveLength(1);
+    const statusControl = tree.root.find(
+      (node) => node.props.accessibilityLabel === 'Change status. Current status: inbox'
+    );
+    expect(flattenText(statusControl.props.children)).not.toContain('Inbox');
+
+    // Tapping the icon still opens the quick-status menu.
+    renderer.act(() => {
+      statusControl.props.onPress({ stopPropagation: vi.fn() });
+    });
+    expect(hasText(tree, 'Change Status')).toBe(true);
+
+    const nextAction = tree.root.find(
+      (node) => node.props.accessibilityLabel === 'Next' && typeof node.props.onPress === 'function'
+    );
+    renderer.act(() => {
+      nextAction.props.onPress();
+    });
+    expect(onStatusChange).toHaveBeenCalledWith('next');
+  });
+
   it('prompts for the project next action after completing the last next task', async () => {
     const project = { id: 'project-1', title: 'Launch plan', status: 'active' };
     const task = {
@@ -1236,10 +1443,7 @@ describe('SwipeableTaskItem', () => {
       deleteAction.props.onPress();
     });
 
-    const alertButtons = alertSpy.mock.calls[0]?.[2] as { text?: string; onPress?: () => void }[];
-    const destructiveAction = alertButtons.find((button) => button.text === 'Delete');
     renderer.act(() => {
-      destructiveAction?.onPress?.();
       tree.unmount();
       vi.runAllTimers();
     });

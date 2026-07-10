@@ -1,4 +1,4 @@
-import type { AppData, Area, Attachment, Project, SavedFilter, Task, Section } from './types';
+import type { AppData, Area, Attachment, Person, Project, SavedFilter, Task, Section } from './types';
 
 export type CalendarSyncEntry = {
     taskId: string;
@@ -11,9 +11,11 @@ import { SEARCH_RESULT_LIMIT, type SearchProjectResult, type SearchResults, type
 import { SQLITE_BASE_SCHEMA, SQLITE_FTS_SCHEMA, SQLITE_INDEX_SCHEMA } from './sqlite-schema';
 import { normalizeTaskStatus } from './task-status';
 import { normalizeRecurrenceForLoad } from './recurrence';
+import { normalizeRelativeStartOffset } from './task-relative-start';
 import { logWarn } from './logger';
 import { normalizeSavedFilter, normalizeSavedFilters } from './saved-filters';
 import { normalizeProjectSequentialScope } from './project-utils';
+import { sleep } from './async-utils';
 
 export interface SqliteClient {
     run(sql: string, params?: unknown[]): Promise<void>;
@@ -56,7 +58,72 @@ const fromNullableBool = (value: unknown): boolean | null | undefined => {
     return Boolean(value);
 };
 
-const TASK_UPSERT_COLUMNS = [
+type SqliteReferenceIssue = {
+    kind: string;
+    id: string;
+    missingId: string;
+};
+
+const optionalId = (value: unknown): string | undefined => (
+    typeof value === 'string' && value.trim().length > 0 ? value : undefined
+);
+
+const collectSqliteReferenceIssues = (data: AppData): SqliteReferenceIssue[] => {
+    const areaIds = new Set(data.areas.map((area) => area.id));
+    const projectIds = new Set(data.projects.map((project) => project.id));
+    const sectionIds = new Set(data.sections.map((section) => section.id));
+    const issues: SqliteReferenceIssue[] = [];
+    const addIssue = (kind: string, id: string, missingId: string) => {
+        issues.push({ kind, id, missingId });
+    };
+
+    data.projects.forEach((project) => {
+        const areaId = optionalId(project.areaId);
+        if (areaId && !areaIds.has(areaId)) {
+            addIssue('project.areaId', project.id, areaId);
+        }
+    });
+    data.sections.forEach((section) => {
+        const projectId = optionalId(section.projectId);
+        if (projectId && !projectIds.has(projectId)) {
+            addIssue('section.projectId', section.id, projectId);
+        }
+    });
+    data.tasks.forEach((task) => {
+        const projectId = optionalId(task.projectId);
+        if (projectId && !projectIds.has(projectId)) {
+            addIssue('task.projectId', task.id, projectId);
+        }
+        const sectionId = optionalId(task.sectionId);
+        if (sectionId && !sectionIds.has(sectionId)) {
+            addIssue('task.sectionId', task.id, sectionId);
+        }
+        const areaId = optionalId(task.areaId);
+        if (areaId && !areaIds.has(areaId)) {
+            addIssue('task.areaId', task.id, areaId);
+        }
+    });
+
+    return issues;
+};
+
+const buildSqliteSaveFailureContext = (data: AppData, step: string): Record<string, unknown> => {
+    const referenceIssues = collectSqliteReferenceIssues(data);
+    return {
+        step,
+        tasks: data.tasks.length,
+        projects: data.projects.length,
+        sections: data.sections.length,
+        areas: data.areas.length,
+        people: Array.isArray(data.people) ? data.people.length : 0,
+        taskAttachments: data.tasks.reduce((count, task) => count + (task.attachments?.length ?? 0), 0),
+        projectAttachments: data.projects.reduce((count, project) => count + (project.attachments?.length ?? 0), 0),
+        referenceIssues: referenceIssues.length,
+        referenceIssueSamples: referenceIssues.slice(0, 8),
+    };
+};
+
+export const TASK_SQLITE_COLUMNS = [
     'id',
     'title',
     'status',
@@ -65,10 +132,12 @@ const TASK_UPSERT_COLUMNS = [
     'assignedTo',
     'taskMode',
     'startTime',
+    'relativeStartOffset',
     'dueDate',
     'recurrence',
     'showFutureRecurrence',
     'pushCount',
+    'repeatReminderMinutes',
     'tags',
     'contexts',
     'checklist',
@@ -80,8 +149,10 @@ const TASK_UPSERT_COLUMNS = [
     'sectionId',
     'areaId',
     'orderNum',
+    'boardOrder',
     'isFocusedToday',
     'timeEstimate',
+    'timeSpentMinutes',
     'suppressMindwtrReminders',
     'reviewAt',
     'completedAt',
@@ -97,6 +168,8 @@ const TASK_UPSERT_COLUMNS = [
     'purgedAt',
 ] as const;
 
+const TASK_UPSERT_COLUMNS = TASK_SQLITE_COLUMNS;
+
 const TASK_UPSERT_UPDATE_CLAUSE = `title=excluded.title,
 status=excluded.status,
 priority=excluded.priority,
@@ -104,10 +177,12 @@ energyLevel=excluded.energyLevel,
 assignedTo=excluded.assignedTo,
 taskMode=excluded.taskMode,
 startTime=excluded.startTime,
+relativeStartOffset=excluded.relativeStartOffset,
 dueDate=excluded.dueDate,
 recurrence=excluded.recurrence,
 showFutureRecurrence=excluded.showFutureRecurrence,
 pushCount=excluded.pushCount,
+repeatReminderMinutes=excluded.repeatReminderMinutes,
 tags=excluded.tags,
 contexts=excluded.contexts,
 checklist=excluded.checklist,
@@ -119,8 +194,10 @@ projectId=excluded.projectId,
 sectionId=excluded.sectionId,
 areaId=excluded.areaId,
 orderNum=excluded.orderNum,
+boardOrder=excluded.boardOrder,
 isFocusedToday=excluded.isFocusedToday,
 timeEstimate=excluded.timeEstimate,
+timeSpentMinutes=excluded.timeSpentMinutes,
 suppressMindwtrReminders=excluded.suppressMindwtrReminders,
 reviewAt=excluded.reviewAt,
 completedAt=excluded.completedAt,
@@ -133,9 +210,10 @@ revBy=excluded.revBy,
 createdAt=excluded.createdAt,
 updatedAt=excluded.updatedAt,
 deletedAt=excluded.deletedAt,
-purgedAt=excluded.purgedAt`;
+purgedAt=excluded.purgedAt
+WHERE tasks.rev IS NULL OR tasks.rev <= excluded.rev`;
 
-const taskToSqliteRow = (task: Task): unknown[] => {
+export const taskToSqliteRow = (task: Task): unknown[] => {
     const taskOrder = Number.isFinite(task.order) ? task.order : task.orderNum;
     return [
         task.id,
@@ -146,10 +224,12 @@ const taskToSqliteRow = (task: Task): unknown[] => {
         task.assignedTo ?? null,
         task.taskMode ?? null,
         task.startTime ?? null,
+        toJson(task.relativeStartOffset),
         task.dueDate ?? null,
         toJson(task.recurrence),
         toBool(task.showFutureRecurrence),
         task.pushCount ?? null,
+        task.repeatReminderMinutes ?? null,
         toJson(task.tags ?? []),
         toJson(task.contexts ?? []),
         toJson(task.checklist),
@@ -161,8 +241,10 @@ const taskToSqliteRow = (task: Task): unknown[] => {
         task.sectionId ?? null,
         task.areaId ?? null,
         Number.isFinite(taskOrder) ? taskOrder : null,
+        Number.isFinite(task.boardOrder) ? task.boardOrder : null,
         toBool(task.isFocusedToday),
         task.timeEstimate ?? null,
+        task.timeSpentMinutes ?? null,
         toBool(task.suppressMindwtrReminders),
         task.reviewAt ?? null,
         task.completedAt ?? null,
@@ -178,11 +260,29 @@ const taskToSqliteRow = (task: Task): unknown[] => {
         task.purgedAt ?? null,
     ];
 };
+// Serialized row + fingerprint cache keyed by task object identity. Store and
+// sync updates are immutable — a changed task is a new object — and
+// taskToSqliteRow is pure, so an unchanged object always serializes to the
+// same row. The one in-place writer, the attachment transfer lifecycle
+// (attachment-transfer.ts), operates on cloned AppData for this reason.
+// This turns the per-save serialization/fingerprint pass over every
+// task into a lookup for unchanged rows, which dominated saveData time on
+// large mobile libraries (#766).
+type TaskRowEntry = { row: unknown[]; fingerprint: string };
+const taskRowEntryCache = new WeakMap<Task, TaskRowEntry>();
+const getTaskRowEntry = (task: Task): TaskRowEntry => {
+    const cached = taskRowEntryCache.get(task);
+    if (cached) return cached;
+    const row = taskToSqliteRow(task);
+    const entry: TaskRowEntry = { row, fingerprint: JSON.stringify(row) };
+    taskRowEntryCache.set(task, entry);
+    return entry;
+};
+
 const READ_PAGE_SIZE = 1000;
 const FTS_LOCK_TTL_MS = 5 * 60 * 1000;
 const FTS_LOCK_REFRESH_INTERVAL_MS = Math.max(15_000, Math.floor(FTS_LOCK_TTL_MS / 3));
 const SQLITE_ID_INSERT_BATCH_SIZE = 500;
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const SEARCH_TASK_SELECT = [
     't.id AS id',
     't.title AS title',
@@ -207,7 +307,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 let tempIdTableCounter = 0;
 
-const createTempIdTableName = (table: 'tasks' | 'projects' | 'sections' | 'areas' | 'saved_filters'): string => {
+const createTempIdTableName = (table: 'tasks' | 'projects' | 'sections' | 'areas' | 'people' | 'saved_filters'): string => {
     tempIdTableCounter = (tempIdTableCounter + 1) % Number.MAX_SAFE_INTEGER;
     const timestamp = Date.now().toString(36);
     const random = Math.random().toString(36).slice(2, 10) || '0';
@@ -293,10 +393,14 @@ export function mapSqliteTaskRow(row: Record<string, unknown>): Task {
         assignedTo: row.assignedTo as string | undefined,
         taskMode: row.taskMode as Task['taskMode'] | undefined,
         startTime: row.startTime as string | undefined,
+        relativeStartOffset: normalizeRelativeStartOffset(fromJson<unknown>(row.relativeStartOffset, undefined)),
         dueDate: row.dueDate as string | undefined,
         recurrence: normalizeRecurrenceForLoad(fromJson<unknown>(row.recurrence, null)),
         showFutureRecurrence: fromBool(row.showFutureRecurrence),
         pushCount: row.pushCount === null || row.pushCount === undefined ? undefined : Number(row.pushCount),
+        repeatReminderMinutes: row.repeatReminderMinutes === null || row.repeatReminderMinutes === undefined
+            ? undefined
+            : Number(row.repeatReminderMinutes),
         tags: toStringArray(fromJson<unknown>(row.tags, [])),
         contexts: toStringArray(fromJson<unknown>(row.contexts, [])),
         checklist: toChecklist(fromJson<unknown>(row.checklist, undefined)),
@@ -309,8 +413,12 @@ export function mapSqliteTaskRow(row: Record<string, unknown>): Task {
         areaId: row.areaId as string | undefined,
         order,
         orderNum: order,
+        boardOrder: row.boardOrder === null || row.boardOrder === undefined ? undefined : Number(row.boardOrder),
         isFocusedToday: fromBool(row.isFocusedToday),
         timeEstimate: row.timeEstimate as Task['timeEstimate'] | undefined,
+        timeSpentMinutes: row.timeSpentMinutes === null || row.timeSpentMinutes === undefined
+            ? undefined
+            : Number(row.timeSpentMinutes),
         suppressMindwtrReminders: fromBool(row.suppressMindwtrReminders),
         reviewAt: row.reviewAt as string | undefined,
         completedAt: row.completedAt as string | undefined,
@@ -327,15 +435,38 @@ export function mapSqliteTaskRow(row: Record<string, unknown>): Task {
     };
 }
 
+export type SqliteSaveDataStats = {
+    incremental: boolean;
+    writtenRows: number;
+    removedRows: number;
+    totalRows: number;
+    settingsWritten: boolean;
+    /** Await time spent on BEGIN IMMEDIATE (long values point at writer-lock contention). */
+    beginMs: number;
+    /** Await time spent on COMMIT (long values point at fsync/checkpoint cost). */
+    commitMs: number;
+    /** Total await time across all SQL statements in this save, including begin/commit. */
+    sqlMs: number;
+    /** Number of SQL statements executed (per-statement average separates bridge latency from statement volume). */
+    sqlCount: number;
+};
+
 export class SqliteAdapter {
     private client: SqliteClient;
     private schemaReadyPromise: Promise<void> | null = null;
+    // Fingerprints of every row as of the last committed save. Valid only because
+    // this adapter is the database's sole entity-table writer: a row whose bound
+    // values are byte-identical to the last committed save can be skipped without
+    // changing what the rev-guarded upsert would have produced. Must be nulled
+    // whenever a transaction fails, and only repopulated after a successful COMMIT.
+    private lastSavedFingerprints: { tables: Map<string, Map<string, string>>; settingsJson: string | null } | null = null;
+    private lastSaveDataStats: SqliteSaveDataStats | null = null;
 
     constructor(client: SqliteClient) {
         this.client = client;
     }
 
-    private async loadAllRows(table: 'tasks' | 'projects' | 'sections' | 'areas'): Promise<Record<string, unknown>[]> {
+    private async loadAllRows(table: 'tasks' | 'projects' | 'sections' | 'areas' | 'people'): Promise<Record<string, unknown>[]> {
         const rows: Record<string, unknown>[] = [];
         try {
             let lastRowId = 0;
@@ -429,6 +560,7 @@ export class SqliteAdapter {
         await this.ensureProjectColumns();
         await this.ensureSectionColumns();
         await this.ensureAreaColumns();
+        await this.ensurePeopleTable();
         await this.ensureSavedFilterTable();
         if (this.client.exec) {
             await this.client.exec(SQLITE_FTS_SCHEMA);
@@ -464,7 +596,8 @@ export class SqliteAdapter {
     private async ensureFtsSchema() {
         const columns = await this.client.all<{ name?: string }>('PRAGMA table_info(tasks_fts)');
         const hasChecklist = columns.some((column) => column.name === 'checklist');
-        if (hasChecklist) return;
+        const hasAssignedTo = columns.some((column) => column.name === 'assignedTo');
+        if (hasChecklist && hasAssignedTo) return;
 
         await this.client.run('DROP TRIGGER IF EXISTS tasks_ai');
         await this.client.run('DROP TRIGGER IF EXISTS tasks_ad');
@@ -479,6 +612,7 @@ export class SqliteAdapter {
               contexts,
               checklist,
               location,
+              assignedTo,
               content=''
             )
         `);
@@ -496,33 +630,33 @@ export class SqliteAdapter {
             await this.client.run('DROP TRIGGER IF EXISTS projects_au');
 
             await this.client.run(`
-                CREATE TRIGGER tasks_ai AFTER INSERT ON tasks BEGIN
-                  INSERT INTO tasks_fts (rowid, title, description, tags, contexts, checklist, location)
-                  VALUES (new.rowid, new.title, coalesce(new.description, ''), coalesce(new.tags, ''), coalesce(new.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(new.checklist)), ''), coalesce(new.location, ''));
+                CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
+                  INSERT INTO tasks_fts (rowid, title, description, tags, contexts, checklist, location, assignedTo)
+                  VALUES (new.rowid, new.title, coalesce(new.description, ''), coalesce(new.tags, ''), coalesce(new.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(new.checklist)), ''), coalesce(new.location, ''), coalesce(new.assignedTo, ''));
                 END
             `);
             await this.client.run(`
-                CREATE TRIGGER tasks_ad AFTER DELETE ON tasks BEGIN
-                  INSERT INTO tasks_fts (tasks_fts, rowid, title, description, tags, contexts, checklist, location)
-                  VALUES ('delete', old.rowid, old.title, coalesce(old.description, ''), coalesce(old.tags, ''), coalesce(old.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(old.checklist)), ''), coalesce(old.location, ''));
+                CREATE TRIGGER IF NOT EXISTS tasks_ad AFTER DELETE ON tasks BEGIN
+                  INSERT INTO tasks_fts (tasks_fts, rowid, title, description, tags, contexts, checklist, location, assignedTo)
+                  VALUES ('delete', old.rowid, old.title, coalesce(old.description, ''), coalesce(old.tags, ''), coalesce(old.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(old.checklist)), ''), coalesce(old.location, ''), coalesce(old.assignedTo, ''));
                 END
             `);
             await this.client.run(`
-                CREATE TRIGGER tasks_au AFTER UPDATE ON tasks BEGIN
-                  INSERT INTO tasks_fts (tasks_fts, rowid, title, description, tags, contexts, checklist, location)
-                  VALUES ('delete', old.rowid, old.title, coalesce(old.description, ''), coalesce(old.tags, ''), coalesce(old.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(old.checklist)), ''), coalesce(old.location, ''));
-                  INSERT INTO tasks_fts (rowid, title, description, tags, contexts, checklist, location)
-                  VALUES (new.rowid, new.title, coalesce(new.description, ''), coalesce(new.tags, ''), coalesce(new.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(new.checklist)), ''), coalesce(new.location, ''));
+                CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE ON tasks BEGIN
+                  INSERT INTO tasks_fts (tasks_fts, rowid, title, description, tags, contexts, checklist, location, assignedTo)
+                  VALUES ('delete', old.rowid, old.title, coalesce(old.description, ''), coalesce(old.tags, ''), coalesce(old.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(old.checklist)), ''), coalesce(old.location, ''), coalesce(old.assignedTo, ''));
+                  INSERT INTO tasks_fts (rowid, title, description, tags, contexts, checklist, location, assignedTo)
+                  VALUES (new.rowid, new.title, coalesce(new.description, ''), coalesce(new.tags, ''), coalesce(new.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(new.checklist)), ''), coalesce(new.location, ''), coalesce(new.assignedTo, ''));
                 END
             `);
             await this.client.run(`
-                CREATE TRIGGER projects_ad AFTER DELETE ON projects BEGIN
+                CREATE TRIGGER IF NOT EXISTS projects_ad AFTER DELETE ON projects BEGIN
                   INSERT INTO projects_fts (projects_fts, rowid, title, supportNotes, tagIds, areaTitle)
                   VALUES ('delete', old.rowid, old.title, coalesce(old.supportNotes, ''), coalesce(old.tagIds, ''), coalesce(old.areaTitle, ''));
                 END
             `);
             await this.client.run(`
-                CREATE TRIGGER projects_au AFTER UPDATE ON projects BEGIN
+                CREATE TRIGGER IF NOT EXISTS projects_au AFTER UPDATE ON projects BEGIN
                   INSERT INTO projects_fts (projects_fts, rowid, title, supportNotes, tagIds, areaTitle)
                   VALUES ('delete', old.rowid, old.title, coalesce(old.supportNotes, ''), coalesce(old.tagIds, ''), coalesce(old.areaTitle, ''));
                   INSERT INTO projects_fts (rowid, title, supportNotes, tagIds, areaTitle)
@@ -550,10 +684,12 @@ export class SqliteAdapter {
             { name: 'assignedTo', sql: 'ALTER TABLE tasks ADD COLUMN assignedTo TEXT' },
             { name: 'taskMode', sql: 'ALTER TABLE tasks ADD COLUMN taskMode TEXT' },
             { name: 'startTime', sql: 'ALTER TABLE tasks ADD COLUMN startTime TEXT' },
+            { name: 'relativeStartOffset', sql: 'ALTER TABLE tasks ADD COLUMN relativeStartOffset TEXT' },
             { name: 'dueDate', sql: 'ALTER TABLE tasks ADD COLUMN dueDate TEXT' },
             { name: 'recurrence', sql: 'ALTER TABLE tasks ADD COLUMN recurrence TEXT' },
             { name: 'showFutureRecurrence', sql: 'ALTER TABLE tasks ADD COLUMN showFutureRecurrence INTEGER' },
             { name: 'pushCount', sql: 'ALTER TABLE tasks ADD COLUMN pushCount INTEGER' },
+            { name: 'repeatReminderMinutes', sql: 'ALTER TABLE tasks ADD COLUMN repeatReminderMinutes INTEGER' },
             { name: 'tags', sql: 'ALTER TABLE tasks ADD COLUMN tags TEXT' },
             { name: 'contexts', sql: 'ALTER TABLE tasks ADD COLUMN contexts TEXT' },
             { name: 'checklist', sql: 'ALTER TABLE tasks ADD COLUMN checklist TEXT' },
@@ -565,8 +701,10 @@ export class SqliteAdapter {
             { name: 'sectionId', sql: 'ALTER TABLE tasks ADD COLUMN sectionId TEXT' },
             { name: 'areaId', sql: 'ALTER TABLE tasks ADD COLUMN areaId TEXT' },
             { name: 'orderNum', sql: 'ALTER TABLE tasks ADD COLUMN orderNum INTEGER' },
+            { name: 'boardOrder', sql: 'ALTER TABLE tasks ADD COLUMN boardOrder INTEGER' },
             { name: 'isFocusedToday', sql: 'ALTER TABLE tasks ADD COLUMN isFocusedToday INTEGER' },
             { name: 'timeEstimate', sql: 'ALTER TABLE tasks ADD COLUMN timeEstimate TEXT' },
+            { name: 'timeSpentMinutes', sql: 'ALTER TABLE tasks ADD COLUMN timeSpentMinutes INTEGER' },
             { name: 'suppressMindwtrReminders', sql: 'ALTER TABLE tasks ADD COLUMN suppressMindwtrReminders INTEGER' },
             { name: 'reviewAt', sql: 'ALTER TABLE tasks ADD COLUMN reviewAt TEXT' },
             { name: 'completedAt', sql: 'ALTER TABLE tasks ADD COLUMN completedAt TEXT' },
@@ -638,6 +776,7 @@ export class SqliteAdapter {
             { name: 'createdAt', sql: 'ALTER TABLE projects ADD COLUMN createdAt TEXT' },
             { name: 'updatedAt', sql: 'ALTER TABLE projects ADD COLUMN updatedAt TEXT' },
             { name: 'deletedAt', sql: 'ALTER TABLE projects ADD COLUMN deletedAt TEXT' },
+            { name: 'purgedAt', sql: 'ALTER TABLE projects ADD COLUMN purgedAt TEXT' },
         ];
         for (const definition of definitions) {
             if (!names.has(definition.name)) {
@@ -701,6 +840,39 @@ export class SqliteAdapter {
                 await this.client.run(definition.sql);
             }
         }
+    }
+
+    private async ensurePeopleTable() {
+        await this.client.run(`
+            CREATE TABLE IF NOT EXISTS people (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              note TEXT,
+              referenceLink TEXT,
+              rev INTEGER,
+              revBy TEXT,
+              createdAt TEXT NOT NULL,
+              updatedAt TEXT NOT NULL,
+              deletedAt TEXT
+            )
+        `);
+        const columns = await this.client.all<{ name?: string }>('PRAGMA table_info(people)');
+        const names = new Set(columns.map((col) => col.name));
+        const definitions: Array<{ name: string; sql: string }> = [
+            { name: 'note', sql: 'ALTER TABLE people ADD COLUMN note TEXT' },
+            { name: 'referenceLink', sql: 'ALTER TABLE people ADD COLUMN referenceLink TEXT' },
+            { name: 'rev', sql: 'ALTER TABLE people ADD COLUMN rev INTEGER' },
+            { name: 'revBy', sql: 'ALTER TABLE people ADD COLUMN revBy TEXT' },
+            { name: 'createdAt', sql: 'ALTER TABLE people ADD COLUMN createdAt TEXT' },
+            { name: 'updatedAt', sql: 'ALTER TABLE people ADD COLUMN updatedAt TEXT' },
+            { name: 'deletedAt', sql: 'ALTER TABLE people ADD COLUMN deletedAt TEXT' },
+        ];
+        for (const definition of definitions) {
+            if (!names.has(definition.name)) {
+                await this.client.run(definition.sql);
+            }
+        }
+        await this.client.run('CREATE INDEX IF NOT EXISTS idx_people_updatedAt_rev ON people(updatedAt, rev)');
     }
 
     private async ensureSavedFilterTable() {
@@ -821,8 +993,8 @@ export class SqliteAdapter {
                         // Use FTS5 delete-all command for contentless tables (content='')
                         await this.client.run("INSERT INTO tasks_fts(tasks_fts) VALUES('delete-all')");
                         await this.client.run(
-                            `INSERT INTO tasks_fts (rowid, title, description, tags, contexts, checklist, location)
-                             SELECT rowid, title, coalesce(description, ''), coalesce(tags, ''), coalesce(contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(tasks.checklist)), ''), coalesce(location, '') FROM tasks`
+                            `INSERT INTO tasks_fts (rowid, title, description, tags, contexts, checklist, location, assignedTo)
+                             SELECT rowid, title, coalesce(description, ''), coalesce(tags, ''), coalesce(contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(tasks.checklist)), ''), coalesce(location, ''), coalesce(assignedTo, '') FROM tasks`
                         );
                     }
                     if (needsProjectRebuild) {
@@ -880,6 +1052,7 @@ export class SqliteAdapter {
             createdAt: String(row.createdAt ?? ''),
             updatedAt: String(row.updatedAt ?? ''),
             deletedAt: row.deletedAt as string | undefined,
+            purgedAt: row.purgedAt as string | undefined,
         };
     }
 
@@ -945,11 +1118,12 @@ export class SqliteAdapter {
 
     async getData(): Promise<AppData> {
         await this.ensureSchema();
-        const [tasksRows, projectsRows, sectionsRows, areasRows, settingsRow, savedFilterRows] = await Promise.all([
+        const [tasksRows, projectsRows, sectionsRows, areasRows, peopleRows, settingsRow, savedFilterRows] = await Promise.all([
             this.loadAllRows('tasks'),
             this.loadAllRows('projects'),
             this.loadAllRows('sections'),
             this.loadAllRows('areas'),
+            this.loadAllRows('people'),
             this.client.get<Record<string, unknown>>('SELECT data FROM settings WHERE id = 1'),
             this.client.all<Record<string, unknown>>('SELECT * FROM saved_filters ORDER BY createdAt, name'),
         ]);
@@ -981,6 +1155,27 @@ export class SqliteAdapter {
                 deletedAt: row.deletedAt as string | undefined,
             };
         });
+        const people: Person[] = peopleRows.map((row) => {
+            const createdAtRaw = typeof row.createdAt === 'string' && row.createdAt.trim().length > 0
+                ? row.createdAt
+                : undefined;
+            const updatedAtRaw = typeof row.updatedAt === 'string' && row.updatedAt.trim().length > 0
+                ? row.updatedAt
+                : undefined;
+            const createdAt = createdAtRaw ?? updatedAtRaw ?? nowIso;
+            const updatedAt = updatedAtRaw ?? createdAtRaw ?? nowIso;
+            return {
+                id: String(row.id),
+                name: String(row.name ?? ''),
+                note: row.note as string | undefined,
+                referenceLink: row.referenceLink as string | undefined,
+                rev: row.rev === null || row.rev === undefined ? undefined : Number(row.rev),
+                revBy: row.revBy as string | undefined,
+                createdAt,
+                updatedAt,
+                deletedAt: row.deletedAt as string | undefined,
+            };
+        });
 
         const settings = settingsRow?.data ? fromJson<AppData['settings']>(settingsRow.data, {}) : {};
         const savedFiltersFromTable = savedFilterRows
@@ -992,7 +1187,7 @@ export class SqliteAdapter {
             settings.savedFilters = normalizeSavedFilters(settings.savedFilters);
         }
 
-        return { tasks, projects, sections, areas, settings };
+        return { tasks, projects, sections, areas, people, settings };
     }
 
     async queryTasks(options: TaskQueryOptions): Promise<Task[]> {
@@ -1077,18 +1272,25 @@ export class SqliteAdapter {
         }
     }
 
+    getLastSaveDataStats(): SqliteSaveDataStats | null {
+        return this.lastSaveDataStats;
+    }
+
     async saveTask(task: Task): Promise<void> {
         await this.ensureSchema();
         await this.client.run('BEGIN IMMEDIATE');
         try {
             const columnList = TASK_UPSERT_COLUMNS.join(', ');
             const placeholders = TASK_UPSERT_COLUMNS.map(() => '?').join(', ');
+            const entry = getTaskRowEntry(task);
             await this.client.run(
                 `INSERT INTO tasks (${columnList}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${TASK_UPSERT_UPDATE_CLAUSE}`,
-                taskToSqliteRow(task)
+                entry.row
             );
             await this.client.run('COMMIT');
+            this.lastSavedFingerprints?.tables.get('tasks')?.set(String(entry.row[0]), entry.fingerprint);
         } catch (error) {
+            this.lastSavedFingerprints = null;
             await this.client.run('ROLLBACK').catch(() => undefined);
             throw error;
         }
@@ -1096,7 +1298,36 @@ export class SqliteAdapter {
 
     async saveData(data: AppData): Promise<void> {
         await this.ensureSchema();
-        await this.client.run('BEGIN IMMEDIATE');
+        const previousSave = this.lastSavedFingerprints;
+        const nextSave: { tables: Map<string, Map<string, string>>; settingsJson: string | null } = {
+            tables: new Map(),
+            settingsJson: null,
+        };
+        const stats: SqliteSaveDataStats = {
+            incremental: previousSave !== null,
+            writtenRows: 0,
+            removedRows: 0,
+            totalRows: 0,
+            settingsWritten: false,
+            beginMs: 0,
+            commitMs: 0,
+            sqlMs: 0,
+            sqlCount: 0,
+        };
+        const runTimed = async (sql: string, args?: unknown[]) => {
+            const statementStartedAt = Date.now();
+            try {
+                return await this.client.run(sql, args);
+            } finally {
+                stats.sqlMs += Date.now() - statementStartedAt;
+                stats.sqlCount += 1;
+            }
+        };
+        this.lastSavedFingerprints = null;
+        const beginStartedAt = Date.now();
+        await runTimed('BEGIN IMMEDIATE');
+        stats.beginMs = Date.now() - beginStartedAt;
+        let saveStep = 'begin';
         try {
             const nowIso = new Date().toISOString();
             const chunkArray = <T>(items: T[], size: number): T[][] => {
@@ -1113,11 +1344,27 @@ export class SqliteAdapter {
                 rows: unknown[][],
                 updateClause: string,
                 chunkSize = 200,
+                precomputedFingerprints?: string[],
             ) => {
-                if (rows.length === 0) return;
+                const previousRows = previousSave?.tables.get(table);
+                const fingerprints = new Map<string, string>();
+                const changedRows: unknown[][] = [];
+                for (let i = 0; i < rows.length; i += 1) {
+                    const row = rows[i];
+                    const id = String(row[0]);
+                    const fingerprint = precomputedFingerprints?.[i] ?? JSON.stringify(row);
+                    fingerprints.set(id, fingerprint);
+                    if (previousRows?.get(id) !== fingerprint) {
+                        changedRows.push(row);
+                    }
+                }
+                nextSave.tables.set(table, fingerprints);
+                stats.totalRows += rows.length;
+                stats.writtenRows += changedRows.length;
+                if (changedRows.length === 0) return;
                 const columnList = columns.join(', ');
                 const placeholders = `(${columns.map(() => '?').join(', ')})`;
-                for (const batch of chunkArray(rows, chunkSize)) {
+                for (const batch of chunkArray(changedRows, chunkSize)) {
                     const values: unknown[] = [];
                     const valuePlaceholders = batch
                         .map((row) => {
@@ -1125,28 +1372,42 @@ export class SqliteAdapter {
                             return placeholders;
                         })
                         .join(', ');
-                    await this.client.run(
+                    await runTimed(
                         `INSERT INTO ${table} (${columnList}) VALUES ${valuePlaceholders} ON CONFLICT(id) DO UPDATE SET ${updateClause}`,
                         values
                     );
                 }
             };
 
-            const syncIds = async (table: 'tasks' | 'projects' | 'sections' | 'areas' | 'saved_filters', ids: string[]) => {
+            const syncIds = async (table: 'tasks' | 'projects' | 'sections' | 'areas' | 'people' | 'saved_filters', ids: string[]) => {
+                const previousRows = previousSave?.tables.get(table);
+                if (previousRows) {
+                    const keptIds = new Set(ids);
+                    const removedIds: string[] = [];
+                    for (const id of previousRows.keys()) {
+                        if (!keptIds.has(id)) removedIds.push(id);
+                    }
+                    stats.removedRows += removedIds.length;
+                    for (const batch of chunkArray(removedIds, SQLITE_ID_INSERT_BATCH_SIZE)) {
+                        const placeholders = batch.map(() => '?').join(', ');
+                        await runTimed(`DELETE FROM ${table} WHERE id IN (${placeholders})`, batch);
+                    }
+                    return;
+                }
                 const tempTable = createTempIdTableName(table);
                 try {
-                    await this.client.run(`CREATE TEMP TABLE ${tempTable} (id TEXT PRIMARY KEY)`);
+                    await runTimed(`CREATE TEMP TABLE ${tempTable} (id TEXT PRIMARY KEY)`);
                     for (const batch of chunkArray(ids, SQLITE_ID_INSERT_BATCH_SIZE)) {
                         const placeholders = batch.map(() => '(?)').join(', ');
-                        await this.client.run(
+                        await runTimed(
                             `INSERT OR IGNORE INTO ${tempTable} (id) VALUES ${placeholders}`,
                             batch
                         );
                     }
-                    await this.client.run(`DELETE FROM ${table} WHERE id NOT IN (SELECT id FROM ${tempTable})`);
+                    await runTimed(`DELETE FROM ${table} WHERE id NOT IN (SELECT id FROM ${tempTable})`);
                 } finally {
                     try {
-                        await this.client.run(`DROP TABLE ${tempTable}`);
+                        await runTimed(`DROP TABLE ${tempTable}`);
                     } catch (dropError) {
                         logWarn(`Failed to drop temp table ${tempTable}`, {
                             scope: 'sqlite',
@@ -1157,6 +1418,7 @@ export class SqliteAdapter {
                 }
             };
 
+            saveStep = 'areas';
             await upsertBatch(
                 'areas',
                 [
@@ -1195,9 +1457,11 @@ export class SqliteAdapter {
                  revBy=excluded.revBy,
                  createdAt=excluded.createdAt,
                  updatedAt=excluded.updatedAt,
-                 deletedAt=excluded.deletedAt`,
+                 deletedAt=excluded.deletedAt
+                 WHERE areas.rev IS NULL OR areas.rev <= excluded.rev`,
             );
 
+            saveStep = 'projects';
             await upsertBatch(
                 'projects',
                 [
@@ -1221,6 +1485,7 @@ export class SqliteAdapter {
                     'createdAt',
                     'updatedAt',
                     'deletedAt',
+                    'purgedAt',
                 ],
                 data.projects.map((project) => [
                     project.id,
@@ -1243,6 +1508,7 @@ export class SqliteAdapter {
                     project.createdAt,
                     project.updatedAt,
                     project.deletedAt ?? null,
+                    project.purgedAt ?? null,
                 ]),
                 `title=excluded.title,
                  status=excluded.status,
@@ -1262,9 +1528,53 @@ export class SqliteAdapter {
                  revBy=excluded.revBy,
                  createdAt=excluded.createdAt,
                  updatedAt=excluded.updatedAt,
-                 deletedAt=excluded.deletedAt`,
+                 deletedAt=excluded.deletedAt,
+                 purgedAt=excluded.purgedAt
+                 WHERE projects.rev IS NULL OR projects.rev <= excluded.rev`,
             );
 
+            const people = Array.isArray(data.people) ? data.people : [];
+            saveStep = 'people';
+            await upsertBatch(
+                'people',
+                [
+                    'id',
+                    'name',
+                    'note',
+                    'referenceLink',
+                    'rev',
+                    'revBy',
+                    'createdAt',
+                    'updatedAt',
+                    'deletedAt',
+                ],
+                people.map((person) => {
+                    const createdAt = person.createdAt ?? person.updatedAt ?? nowIso;
+                    const updatedAt = person.updatedAt ?? person.createdAt ?? nowIso;
+                    return [
+                        person.id,
+                        person.name,
+                        person.note ?? null,
+                        person.referenceLink ?? null,
+                        person.rev ?? null,
+                        person.revBy ?? null,
+                        createdAt,
+                        updatedAt,
+                        person.deletedAt ?? null,
+                    ];
+                }),
+                `name=excluded.name,
+                 note=excluded.note,
+                 referenceLink=excluded.referenceLink,
+                 rev=excluded.rev,
+                 revBy=excluded.revBy,
+                 createdAt=excluded.createdAt,
+                 updatedAt=excluded.updatedAt,
+                 deletedAt=excluded.deletedAt
+                 WHERE people.rev IS NULL OR people.rev <= excluded.rev`,
+            );
+
+            saveStep = 'sections';
             await upsertBatch(
                 'sections',
                 [
@@ -1308,23 +1618,35 @@ export class SqliteAdapter {
                  updatedAt=excluded.updatedAt,
                  deletedAt=excluded.deletedAt,
                  deletedAtBeforeProjectArchive=excluded.deletedAtBeforeProjectArchive,
-                 projectArchivedAt=excluded.projectArchivedAt`,
+                 projectArchivedAt=excluded.projectArchivedAt
+                 WHERE sections.rev IS NULL OR sections.rev <= excluded.rev`,
             );
 
+            saveStep = 'tasks';
+            const taskRowEntries = data.tasks.map(getTaskRowEntry);
             await upsertBatch(
                 'tasks',
                 [...TASK_UPSERT_COLUMNS],
-                data.tasks.map(taskToSqliteRow),
+                taskRowEntries.map((entry) => entry.row),
                 TASK_UPSERT_UPDATE_CLAUSE,
+                200,
+                taskRowEntries.map((entry) => entry.fingerprint),
             );
 
+            saveStep = 'sync-task-ids';
             await syncIds('tasks', data.tasks.map((task) => task.id));
+            saveStep = 'sync-section-ids';
             await syncIds('sections', data.sections.map((section) => section.id));
+            saveStep = 'sync-project-ids';
             await syncIds('projects', data.projects.map((project) => project.id));
+            saveStep = 'sync-area-ids';
             await syncIds('areas', data.areas.map((area) => area.id));
+            saveStep = 'sync-people-ids';
+            await syncIds('people', people.map((person) => person.id));
 
             const rawSavedFilters = data.settings?.savedFilters;
             const savedFilters = normalizeSavedFilters(rawSavedFilters);
+            saveStep = 'saved-filters';
             await upsertBatch(
                 'saved_filters',
                 [
@@ -1364,6 +1686,7 @@ export class SqliteAdapter {
                  updatedAt=excluded.updatedAt,
                  deletedAt=excluded.deletedAt`,
             );
+            saveStep = 'sync-saved-filter-ids';
             await syncIds('saved_filters', savedFilters.map((filter) => filter.id));
 
             const settingsForSave = { ...(data.settings ?? {}) };
@@ -1373,14 +1696,38 @@ export class SqliteAdapter {
                 delete settingsForSave.savedFilters;
             }
 
-            await this.client.run(
-                'INSERT INTO settings (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
-                [toJson(settingsForSave)]
-            );
+            saveStep = 'settings';
+            const settingsJson = toJson(settingsForSave);
+            nextSave.settingsJson = settingsJson;
+            if (previousSave?.settingsJson !== settingsJson) {
+                stats.settingsWritten = true;
+                await runTimed(
+                    'INSERT INTO settings (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+                    [settingsJson]
+                );
+            }
 
-            await this.client.run('COMMIT');
+            saveStep = 'commit';
+            const commitStartedAt = Date.now();
+            await runTimed('COMMIT');
+            stats.commitMs = Date.now() - commitStartedAt;
+            this.lastSavedFingerprints = nextSave;
+            this.lastSaveDataStats = stats;
         } catch (error) {
-            await this.client.run('ROLLBACK');
+            await this.client.run('ROLLBACK').catch((rollbackError) => {
+                logWarn('SQLite saveData rollback failed', {
+                    scope: 'sqlite',
+                    category: 'storage',
+                    error: rollbackError,
+                    context: { step: saveStep },
+                });
+            });
+            logWarn('SQLite saveData failed', {
+                scope: 'sqlite',
+                category: 'storage',
+                error,
+                context: buildSqliteSaveFailureContext(data, saveStep),
+            });
             throw error;
         }
     }

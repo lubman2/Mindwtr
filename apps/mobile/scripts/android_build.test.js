@@ -9,6 +9,8 @@ describe('android_build FOSS guards', () => {
 
     expect(source.indexOf('node scripts/fdroid_patch_expo_application.js')).toBeGreaterThanOrEqual(0);
     expect(source.indexOf('node scripts/fdroid_patch_expo_application.js')).toBeLessThan(source.indexOf('npx expo prebuild'));
+    expect(source.indexOf('DONATION_PROMPT_ENABLED="${DONATION_PROMPT_ENABLED:-true}"')).toBeLessThan(source.indexOf('npx expo prebuild'));
+    expect(source.indexOf('FEEDBACK_ENDPOINT_URL="${FEEDBACK_ENDPOINT_URL:-https://feedback.mindwtr.app}"')).toBeLessThan(source.indexOf('npx expo prebuild'));
     expect(source).toContain("exclude group: 'com.android.installreferrer'");
     expect(source).toContain("exclude group: 'com.google.android.play'");
     expect(source).toContain("exclude group: 'com.google.android.gms'");

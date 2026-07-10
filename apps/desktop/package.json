@@ -2,7 +2,7 @@
   "name": "mindwtr",
   "license": "AGPL-3.0-only",
   "private": true,
-  "version": "0.9.9",
+  "version": "1.1.0",
   "description": "A complete Getting Things Done (GTD) productivity system for desktop - Mind Like Water",
   "author": {
     "name": "dongdongbh",
@@ -49,6 +49,7 @@
     "zustand": "^4.5.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "2.11.3",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",

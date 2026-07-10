@@ -5,6 +5,7 @@ import { tFallback } from '@mindwtr/core';
 
 import { AIResponseModal } from './ai-response-modal';
 import { styles } from './inbox-processing-modal.styles';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
 import { useInboxProcessingController } from './inbox-processing/useInboxProcessingController';
 import { InboxActionabilitySection } from './inbox-processing/InboxActionabilitySection';
 import { InboxContextSection } from './inbox-processing/InboxContextSection';
@@ -15,6 +16,7 @@ import { InboxProjectSection } from './inbox-processing/InboxProjectSection';
 import { InboxSchedulingSection } from './inbox-processing/InboxSchedulingSection';
 import { InboxTitleSection } from './inbox-processing/InboxTitleSection';
 import { InboxTwoMinuteSection } from './inbox-processing/InboxTwoMinuteSection';
+import { useAndroidKeyboardInset } from '../lib/use-android-keyboard-inset';
 
 type InboxProcessingModalProps = {
   visible: boolean;
@@ -24,6 +26,7 @@ type InboxProcessingModalProps = {
 const IOS_KEYBOARD_FOOTER_OFFSET = 48;
 
 export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalProps) {
+  const filledButton = useFilledButtonColors();
   const {
     actionabilityChoice,
     addCustomContextMobile,
@@ -62,6 +65,9 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
     isDelegateConfirmationDisabled,
     newContext,
     nextActionDraft,
+    extraActionDrafts,
+    setExtraActionDrafts,
+    laterNoDateSelected,
     pendingDueDate,
     pendingDueDateOnly,
     pendingReviewDate,
@@ -92,6 +98,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
     setDelegateWho,
     setExecutionChoice,
     setNewContext,
+    setLaterNoDateSelected,
     setPendingDueDate,
     setPendingDueDateOnly,
     setPendingReviewDate,
@@ -154,7 +161,8 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
   const aiWorkingText = aiWorkingLabel === 'ai.working' ? 'Working...' : aiWorkingLabel;
   const laterLabel = tFallback(t, 'process.later', 'Later');
   const laterHint = tFallback(t, 'process.laterHint', 'Set a start date and move this to Next.');
-  const dateOnlyLabel = tFallback(t, 'taskEdit.dateOnly', 'Date only');
+    const dateOnlyLabel = t('taskEdit.dateOnly');
+  const androidKeyboardInset = useAndroidKeyboardInset(visible);
 
   if (!visible) return null;
 
@@ -209,6 +217,9 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
   }
 
   const sharedDateRowProps = { tc, defaultScheduleTime, dateOnlyLabel };
+  const androidKeyboardLift = Platform.OS === 'android' && androidKeyboardInset > 0
+    ? { paddingBottom: androidKeyboardInset }
+    : null;
 
   return (
     <>
@@ -254,9 +265,9 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
           </View>
 
           <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
             keyboardVerticalOffset={Platform.OS === 'ios' ? IOS_KEYBOARD_FOOTER_OFFSET : 0}
-            style={styles.keyboardAvoidingContainer}
+            style={[styles.keyboardAvoidingContainer, androidKeyboardLift]}
           >
             <View style={styles.stepContainer}>
               <ScrollView
@@ -296,7 +307,9 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
                 laterHint={laterHint}
                 dateOnlyLabel={dateOnlyLabel}
                 pendingStartDate={pendingStartDate}
+                laterNoDateSelected={laterNoDateSelected}
                 setPendingStartDate={setPendingStartDate}
+                setLaterNoDateSelected={setLaterNoDateSelected}
                 pendingStartDateOnly={pendingStartDateOnly}
                 setPendingStartDateOnly={setPendingStartDateOnly}
                 setShowStartDatePicker={setShowStartDatePicker}
@@ -397,6 +410,8 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
                           setProjectTitleDraft={setProjectTitleDraft}
                           nextActionDraft={nextActionDraft}
                           setNextActionDraft={setNextActionDraft}
+                          extraActionDrafts={extraActionDrafts}
+                          setExtraActionDrafts={setExtraActionDrafts}
                           filteredProjects={filteredProjects}
                           areaById={areaById}
                           hasExactProjectMatch={hasExactProjectMatch}
@@ -460,6 +475,8 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
                           setProjectTitleDraft={setProjectTitleDraft}
                           nextActionDraft={nextActionDraft}
                           setNextActionDraft={setNextActionDraft}
+                          extraActionDrafts={extraActionDrafts}
+                          setExtraActionDrafts={setExtraActionDrafts}
                           filteredProjects={filteredProjects}
                           areaById={areaById}
                           hasExactProjectMatch={hasExactProjectMatch}
@@ -481,7 +498,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
                     show: (showStartDateField || actionabilityChoice === 'later') && showStartDatePicker,
                     value: pendingStartDate,
                     onClose: () => setShowStartDatePicker(false),
-                    onSelect: (date) => { setPendingStartDate(date); setPendingStartDateOnly(false); },
+                    onSelect: (date) => { setPendingStartDate(date); setPendingStartDateOnly(false); setLaterNoDateSelected(false); },
                   },
                   {
                     show: showDueDateField && showDueDatePicker,
@@ -515,13 +532,13 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
                 <TouchableOpacity
                   style={[
                     styles.bottomNextButton,
-                    { backgroundColor: tc.tint },
+                    { backgroundColor: filledButton.backgroundColor },
                     isDelegateConfirmationDisabled && { opacity: 0.5 },
                   ]}
                   disabled={isDelegateConfirmationDisabled}
                   onPress={handleNextTask}
                 >
-                  <Text style={styles.bottomNextButtonText}>
+                  <Text style={[styles.bottomNextButtonText, filledButton.textColor ? { color: filledButton.textColor } : null]}>
                     {tFallback(t, 'inbox.nextTask', 'Next task →')}
                   </Text>
                 </TouchableOpacity>

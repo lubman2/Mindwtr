@@ -54,6 +54,7 @@ vi.mock('@mindwtr/core', () => {
   };
   return {
     formatFocusTaskLimitText: (template: string, limit: number) => template.replace('{{count}}', String(limit)),
+    shallow: Object.is,
     useTaskStore: () => storeState,
     isDueForReview: () => false,
     isTaskInActiveProject: () => true,
@@ -67,6 +68,10 @@ vi.mock('@mindwtr/core', () => {
       return start <= new Date(2026, 2, 15, 23, 59, 59, 999);
     },
     sortTasksBy: (tasks: unknown[]) => tasks,
+    tFallback: (t: (key: string) => string, key: string, fallback: string) => {
+      const value = t(key);
+      return value === key ? fallback : value;
+    },
   };
 });
 
@@ -84,6 +89,7 @@ vi.mock('../contexts/language-context', () => ({
         'dailyReview.focusStep': "Today's Focus",
         'dailyReview.focusDesc': 'Optional focus.',
         'dailyReview.focusSelected': 'focused',
+        'dailyReview.followUpToday': 'Follow up today',
         'dailyReview.inboxStep': 'Inbox',
         'dailyReview.inboxDesc': 'Review inbox.',
         'dailyReview.waitingStep': 'Waiting',
@@ -94,6 +100,7 @@ vi.mock('../contexts/language-context', () => ({
         'review.of': 'of',
         'review.nextStepBtn': 'Next Step',
         'review.back': 'Back',
+        'agenda.reviewDue': 'Review Due',
         'common.tasks': 'tasks',
         'calendar.events': 'Events',
         'calendar.noTasks': 'No tasks',
@@ -101,6 +108,10 @@ vi.mock('../contexts/language-context', () => ({
         'agenda.focusHint': 'Pick focus tasks.',
       }[key] ?? key),
   }),
+}));
+
+vi.mock('@/hooks/use-theme-tokens', () => ({
+  useThemeTokens: () => ({ isMaterial: false, roles: null, shape: { large: 16 } }),
 }));
 
 vi.mock('@/hooks/use-theme-colors', () => ({
@@ -199,6 +210,23 @@ describe('DailyReviewScreen', () => {
     expect(taskRows[0].props.hideStatusBadge).toBe(true);
   });
 
+  it('does not let task chips navigate away mid-review', async () => {
+    let tree!: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(<DailyReviewScreen onClose={vi.fn()} />);
+    });
+
+    const rows = tree.root.findAllByType(SwipeableTaskItem);
+    expect(rows.length).toBeGreaterThan(0);
+    rows.forEach((row) => {
+      expect(typeof row.props.onPress).toBe('function');
+      expect(row.props.onContextPress).toBeUndefined();
+      expect(row.props.onTagPress).toBeUndefined();
+      expect(row.props.onProjectPress).toBeUndefined();
+    });
+  });
+
   it('skips the focus step when daily review focus is disabled', async () => {
     storeState.tasks = [
       {
@@ -227,6 +255,81 @@ describe('DailyReviewScreen', () => {
     const allText = getAllText(tree);
     expect(allText).toContain('Waiting');
     expect(allText).not.toContain("Today's Focus");
+  });
+
+  it('reviews waiting items before choosing todays focus', async () => {
+    storeState.tasks = [
+      {
+        id: 'waiting-task',
+        title: 'Waiting for invoice',
+        status: 'waiting',
+        contexts: [],
+        tags: [],
+        createdAt: '2026-03-01T00:00:00.000Z',
+        updatedAt: '2026-03-01T00:00:00.000Z',
+      },
+      {
+        id: 'next-task',
+        title: 'Write report',
+        status: 'next',
+        contexts: [],
+        tags: [],
+        createdAt: '2026-03-01T00:00:00.000Z',
+        updatedAt: '2026-03-01T00:00:00.000Z',
+      },
+    ];
+
+    let tree!: ReturnType<typeof create>;
+    await act(async () => {
+      tree = create(<DailyReviewScreen onClose={vi.fn()} />);
+    });
+
+    expect(tree.root.findAll((node) =>
+      node.props?.accessibilityLabel === 'Follow up today: Waiting for invoice'
+    ).length).toBeGreaterThan(0);
+
+    let pressable = tree.root.find((node) => node.props?.children === 'Next Step') as any;
+    while (pressable.parent && typeof pressable.props?.onPress !== 'function') {
+      pressable = pressable.parent;
+    }
+    await act(async () => {
+      pressable.props.onPress();
+    });
+
+    const rows = tree.root.findAllByType(SwipeableTaskItem);
+    expect(rows.some((row) => row.props.showFocusToggle === true)).toBe(true);
+  });
+
+  it('sets a waiting item to follow up today without changing its status', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 2, 15, 10, 30, 0));
+    storeState.tasks = [
+      {
+        id: 'waiting-task',
+        title: 'Waiting for invoice',
+        status: 'waiting',
+        contexts: [],
+        tags: [],
+        createdAt: '2026-03-01T00:00:00.000Z',
+        updatedAt: '2026-03-01T00:00:00.000Z',
+      },
+    ];
+
+    let tree!: ReturnType<typeof create>;
+    await act(async () => {
+      tree = create(<DailyReviewScreen onClose={vi.fn()} />);
+    });
+
+    const followUpButton = tree.root.find((node) =>
+      node.props?.accessibilityLabel === 'Follow up today: Waiting for invoice'
+    );
+    await act(async () => {
+      followUpButton.props.onPress();
+    });
+
+    expect(storeState.updateTask).toHaveBeenCalledWith('waiting-task', {
+      reviewAt: new Date(2026, 2, 15, 0, 0, 0, 0).toISOString(),
+    });
   });
 
   it('collapses calendar events without hiding today tasks', async () => {

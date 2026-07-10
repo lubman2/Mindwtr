@@ -156,6 +156,7 @@ export const prepareRestoredBackupDataForSync = (
         projects: data.projects.map((project) => prepareRestoredEntityForSync(project, restoredAt)),
         sections: data.sections.map((section) => prepareRestoredEntityForSync(section, restoredAt)),
         areas: data.areas.map((area) => prepareRestoredEntityForSync(area, restoredAt)),
+        people: (data.people ?? []).map((person) => prepareRestoredEntityForSync(person, restoredAt)),
         settings: {
             ...restoredSettings,
             pendingRemoteWriteAt: restoredAt,

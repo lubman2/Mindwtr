@@ -21,6 +21,12 @@ This folder contains small, focused decision documents that explain **why** we m
 - [ADR 0015: Cap sync revisions at a safe integer ceiling](0015-sync-revision-cap.md)
 - [ADR 0016: Serialize sync cycles around the merge/write window](0016-sync-cycle-serialization.md)
 - [ADR 0017: Defer CRDT sync adoption](0017-defer-crdt-sync-adoption.md)
+- [ADR 0018: Mobile theming via unified token hook with theme-isolation invariant](0018-mobile-theming-token-hook.md)
+- [ADR 0019: Mobile local Whisper audio contract](0019-mobile-local-whisper-audio-contract.md)
+- [ADR 0020: Sync document lifecycle and growth](0020-sync-document-lifecycle.md)
+- [ADR 0021: Review candidates beyond review dates](0021-review-candidates-beyond-review-dates.md)
+- [ADR 0022: Checklist decoupled from description markdown](0022-checklist-decoupled-from-description-markdown.md)
+- [ADR 0023: Unified Projects-view DndContext](0023-unified-projects-view-dnd-context.md)
 
 ## Template
 

@@ -21,7 +21,9 @@ fn strip_file_scheme(raw: &str) -> Result<String, String> {
 }
 
 fn canonical_existing_dir(path: PathBuf) -> Option<PathBuf> {
-    path.canonicalize().ok().filter(|candidate| candidate.is_dir())
+    path.canonicalize()
+        .ok()
+        .filter(|candidate| candidate.is_dir())
 }
 
 fn configured_obsidian_vault_path(config: &AppConfigToml) -> Option<PathBuf> {
@@ -65,15 +67,15 @@ fn allowed_open_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
         roots.push(PathBuf::from(runtime_dir).join("doc"));
     }
 
-    roots
-        .into_iter()
-        .filter_map(canonical_existing_dir)
-        .fold(Vec::<PathBuf>::new(), |mut unique_roots, root| {
+    roots.into_iter().filter_map(canonical_existing_dir).fold(
+        Vec::<PathBuf>::new(),
+        |mut unique_roots, root| {
             if !unique_roots.iter().any(|existing| existing == &root) {
                 unique_roots.push(root);
             }
             unique_roots
-        })
+        },
+    )
 }
 
 fn normalize_open_path(raw: &str) -> Result<PathBuf, String> {
@@ -92,7 +94,9 @@ fn normalize_open_path(raw: &str) -> Result<PathBuf, String> {
 }
 
 fn path_is_under_allowed_root(path: &Path, allowed_roots: &[PathBuf]) -> bool {
-    allowed_roots.iter().any(|root| path == root || path.starts_with(root))
+    allowed_roots
+        .iter()
+        .any(|root| path == root || path.starts_with(root))
 }
 
 fn path_is_openable(path: &Path, allowed_roots: &[PathBuf]) -> bool {
@@ -188,8 +192,7 @@ pub(crate) fn get_macos_calendar_events(
 pub(crate) fn get_macos_writable_calendars() -> Result<Vec<MacOsCalendarPushTarget>, String> {
     #[cfg(target_os = "macos")]
     {
-        let value =
-            parse_macos_eventkit_json(unsafe { mindwtr_macos_writable_calendars_json() })?;
+        let value = parse_macos_eventkit_json(unsafe { mindwtr_macos_writable_calendars_json() })?;
         let parsed = serde_json::from_value::<Vec<MacOsCalendarPushTarget>>(value)
             .map_err(|error| format!("Failed to decode writable EventKit calendars: {error}"))?;
         return Ok(parsed);
@@ -578,6 +581,91 @@ pub(crate) fn cloudkit_register_for_notifications() -> Result<bool, String> {
     }
 }
 
+pub(crate) const ATTACHMENT_IMPORT_TOO_LARGE: &str = "file_too_large";
+
+fn sanitize_attachment_file_name(raw: &str) -> Result<&str, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\0')
+    {
+        return Err("Invalid attachment file name.".to_string());
+    }
+    Ok(trimmed)
+}
+
+// Intentionally avoids canonicalize(): exotic mounts (Windows RAM drives, some
+// network shares) fail canonicalization even though plain reads work, which is
+// exactly the case this import path exists to support.
+fn import_attachment_into(
+    dest_dir: &Path,
+    source: &Path,
+    file_name: &str,
+    max_bytes: Option<u64>,
+) -> Result<(PathBuf, u64), String> {
+    if !source.is_absolute() {
+        return Err("Only absolute local file paths can be attached.".to_string());
+    }
+    let metadata = std::fs::metadata(source)
+        .map_err(|_| "File does not exist or cannot be accessed.".to_string())?;
+    if !metadata.is_file() {
+        return Err("Only regular files can be attached.".to_string());
+    }
+    let size = metadata.len();
+    if let Some(max) = max_bytes {
+        if size > max {
+            return Err(ATTACHMENT_IMPORT_TOO_LARGE.to_string());
+        }
+    }
+    let file_name = sanitize_attachment_file_name(file_name)?;
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|error| format!("Failed to create attachments directory: {error}"))?;
+    let final_path = dest_dir.join(file_name);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let temp_path = dest_dir.join(format!("{file_name}.tmp-{}-{nanos:x}", std::process::id()));
+    std::fs::copy(source, &temp_path)
+        .map_err(|error| format!("Failed to copy attachment: {error}"))?;
+    if let Err(rename_error) = std::fs::rename(&temp_path, &final_path) {
+        let copy_result = std::fs::copy(&temp_path, &final_path);
+        let _ = std::fs::remove_file(&temp_path);
+        copy_result.map_err(|_| format!("Failed to store attachment: {rename_error}"))?;
+    }
+    Ok((final_path, size))
+}
+
+#[derive(Serialize)]
+pub(crate) struct ImportedAttachmentFile {
+    uri: String,
+    size: u64,
+}
+
+#[tauri::command]
+pub(crate) fn import_attachment_file(
+    app: tauri::AppHandle,
+    path: String,
+    file_name: String,
+    max_bytes: Option<u64>,
+) -> Result<ImportedAttachmentFile, String> {
+    let source = PathBuf::from(strip_file_scheme(path.trim())?);
+    // Matches the webview-side managed dir (BaseDirectory.Data + mindwtr/attachments)
+    // used by sync downloads, previews, and cleanup — not the portable-mode data dir.
+    let dest_dir = app
+        .path()
+        .resolve("mindwtr/attachments", BaseDirectory::Data)
+        .map_err(|error| error.to_string())?;
+    let (final_path, size) = import_attachment_into(&dest_dir, &source, &file_name, max_bytes)?;
+    Ok(ImportedAttachmentFile {
+        uri: final_path.to_string_lossy().into_owned(),
+        size,
+    })
+}
+
 #[tauri::command]
 pub(crate) fn open_path(app: tauri::AppHandle, path: String) -> Result<bool, String> {
     let normalized = normalize_open_path(&path)?;
@@ -600,10 +688,58 @@ mod tests {
     }
 
     #[test]
+    fn import_attachment_into_copies_file_and_keeps_original() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("original.txt");
+        std::fs::write(&source, b"hello attachment").expect("write source");
+        let dest_dir = dir.path().join("managed");
+
+        let (copied, size) =
+            import_attachment_into(&dest_dir, &source, "id-1.txt", Some(1024)).expect("import");
+
+        assert_eq!(size, 16);
+        assert_eq!(copied, dest_dir.join("id-1.txt"));
+        assert_eq!(std::fs::read(&copied).expect("read copy"), b"hello attachment");
+        assert!(source.exists(), "original must stay untouched");
+        let leftovers: Vec<_> = std::fs::read_dir(&dest_dir)
+            .expect("read dest dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files may remain");
+    }
+
+    #[test]
+    fn import_attachment_into_rejects_oversized_missing_and_bad_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("big.bin");
+        std::fs::write(&source, vec![0u8; 32]).expect("write source");
+        let dest_dir = dir.path().join("managed");
+
+        let too_large = import_attachment_into(&dest_dir, &source, "id.bin", Some(16));
+        assert_eq!(too_large.unwrap_err(), ATTACHMENT_IMPORT_TOO_LARGE);
+
+        let missing = import_attachment_into(&dest_dir, &dir.path().join("nope.bin"), "id.bin", None);
+        assert!(missing.is_err());
+
+        let relative = import_attachment_into(&dest_dir, Path::new("relative.bin"), "id.bin", None);
+        assert!(relative.is_err());
+
+        let traversal = import_attachment_into(&dest_dir, &source, "../escape.bin", None);
+        assert!(traversal.is_err());
+    }
+
+    #[test]
     fn path_is_under_allowed_root_respects_boundaries() {
         let root = PathBuf::from("/tmp/mindwtr");
-        assert!(path_is_under_allowed_root(Path::new("/tmp/mindwtr/attachments/a.pdf"), &[root.clone()]));
-        assert!(!path_is_under_allowed_root(Path::new("/tmp/mindwtr-other/a.pdf"), &[root]));
+        assert!(path_is_under_allowed_root(
+            Path::new("/tmp/mindwtr/attachments/a.pdf"),
+            &[root.clone()]
+        ));
+        assert!(!path_is_under_allowed_root(
+            Path::new("/tmp/mindwtr-other/a.pdf"),
+            &[root]
+        ));
     }
 
     #[test]

@@ -6,6 +6,7 @@ import {
     findPendingAttachmentUploads,
     hasPendingSyncSideEffects,
     normalizeCloudUrl,
+    normalizeWebdavUrl,
     sanitizeAppDataForRemote,
 } from './sync-helpers';
 import type { AppData, Attachment } from './types';
@@ -55,6 +56,23 @@ describe('sync-helpers normalizeCloudUrl', () => {
     it('preserves full data endpoints for compatibility', () => {
         expect(normalizeCloudUrl('https://example.com/v1/data')).toBe('https://example.com/v1/data');
         expect(normalizeCloudUrl('https://example.com/data/')).toBe('https://example.com/data');
+    });
+});
+
+describe('sync-helpers normalizeWebdavUrl', () => {
+    it('strips cache-busting query strings before appending data.json', () => {
+        expect(normalizeWebdavUrl('https://dav.example.com/mindwtr?_=1782668355219')).toBe(
+            'https://dav.example.com/mindwtr/data.json'
+        );
+        expect(normalizeWebdavUrl('https://dav.example.com/mindwtr/#sync')).toBe(
+            'https://dav.example.com/mindwtr/data.json#sync'
+        );
+    });
+
+    it('strips cache-busting query strings from existing WebDAV data file URLs', () => {
+        expect(normalizeWebdavUrl('https://dav.example.com/mindwtr/data.json?_=1782668355219')).toBe(
+            'https://dav.example.com/mindwtr/data.json'
+        );
     });
 });
 
@@ -262,6 +280,8 @@ describe('sync-helpers sanitizeAppDataForRemote', () => {
             syncPreferences: { gtd: true, language: true },
             gtd: {
                 defaultScheduleTime: '09:30',
+                defaultAreaMode: 'fixed',
+                defaultAreaId: 'area-1',
                 focusTaskLimit: 5,
                 focusGroupBy: 'project',
                 defaultProjectFlowMode: 'sequential',
@@ -275,12 +295,29 @@ describe('sync-helpers sanitizeAppDataForRemote', () => {
 
         expect(sanitized.settings.gtd).toEqual({
             defaultScheduleTime: '09:30',
+            defaultAreaMode: 'fixed',
+            defaultAreaId: 'area-1',
             focusTaskLimit: 5,
             focusGroupBy: 'project',
             defaultProjectFlowMode: 'sequential',
         });
         expect(sanitized.settings.language).toBe('en');
         expect(sanitized.settings.timeFormat).toBe('24h');
+    });
+
+    it('uploads a default area that is the only GTD preference set (#default-area-sync)', () => {
+        const data = createData([]);
+        data.settings = {
+            syncPreferences: { gtd: true },
+            gtd: { defaultAreaId: 'area-1', defaultAreaMode: 'fixed' },
+        };
+
+        const sanitized = sanitizeAppDataForRemote(data);
+
+        expect(sanitized.settings.gtd).toEqual({
+            defaultAreaMode: 'fixed',
+            defaultAreaId: 'area-1',
+        });
     });
 
     it('does not include the default schedule time with only synced date/time preferences', () => {
@@ -487,5 +524,21 @@ describe('sync-helpers computeSyncPayloadFingerprint', () => {
         right.tasks[0].title = 'Changed';
 
         expect(computeSyncPayloadFingerprint(left)).not.toBe(computeSyncPayloadFingerprint(right));
+    });
+
+    it('uses a deterministic fallback timestamp for missing file attachments', () => {
+        const data = createData([
+            fileAttachment({
+                updatedAt: '',
+                localStatus: 'missing',
+                cloudKey: undefined,
+            }),
+        ]);
+
+        const sanitized = sanitizeAppDataForRemote(data);
+        const attachment = sanitized.tasks[0].attachments?.[0];
+        expect(attachment?.updatedAt).toBe('1970-01-01T00:00:00.000Z');
+        expect(attachment?.deletedAt).toBe('1970-01-01T00:00:00.000Z');
+        expect(computeSyncPayloadFingerprint(data)).toBe(computeSyncPayloadFingerprint(data));
     });
 });

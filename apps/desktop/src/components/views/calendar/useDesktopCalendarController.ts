@@ -21,6 +21,7 @@ import {
     formatCalendarDurationLabel,
     formatCalendarTimeInputValue,
     findFreeSlotForDay as findCalendarFreeSlotForDay,
+    getCalendarPlanningCandidates,
     getExternalCalendarColorForId,
     getCalendarYear,
     getQuickAddProjectInitialProps,
@@ -51,7 +52,7 @@ import { checkBudget } from '../../../config/performanceBudgets';
 import { useLanguage } from '../../../contexts/language-context';
 import { usePerformanceMonitor } from '../../../hooks/usePerformanceMonitor';
 import { logError } from '../../../lib/app-log';
-import { resolveAreaFilter, taskMatchesAreaFilter } from '../../../lib/area-filter';
+import { resolveAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
 import { fetchExternalCalendarEvents, summarizeExternalCalendarWarnings } from '../../../lib/external-calendar-events';
 import { reportError } from '../../../lib/report-error';
 import { getCalendarMonthNames, getCalendarWeekdayHeaders, resolveCalendarLocale } from '../calendar-locale';
@@ -218,7 +219,13 @@ export function useDesktopCalendarController() {
         }),
         shallow
     );
-    const { allContexts = [], allTags = [], projectMap } = getDerivedState();
+    const {
+        allContexts = [],
+        allTags = [],
+        projectMap,
+        sequentialProjectIds = new Set<string>(),
+        sequentialWithinSectionProjectIds = new Set<string>(),
+    } = getDerivedState();
     const { t, language } = useLanguage();
     const resolveText = useCallback(
         (key: string, fallback: string) => {
@@ -227,6 +234,7 @@ export function useDesktopCalendarController() {
         [t]
     );
     const timeEstimatesEnabled = settings?.features?.timeEstimates !== false;
+    const prioritiesEnabled = settings?.features?.priorities !== false;
     const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
     const resolvedAreaFilter = useMemo(
         () => resolveAreaFilter(settings?.filters?.areaId, areas),
@@ -395,6 +403,24 @@ export function useDesktopCalendarController() {
             .sort((a, b) => a.title.localeCompare(b.title)),
         [tasks, isSchedulableTask]
     );
+    const planningTasks = useMemo(() => getCalendarPlanningCandidates(
+        tasks.filter(isSchedulableTask),
+        {
+            limit: 8,
+            now: new Date(),
+            prioritizeByPriority: prioritiesEnabled,
+            projects,
+            sectionScopedProjectIds: sequentialWithinSectionProjectIds,
+            sequentialProjectIds,
+        },
+    ), [
+        isSchedulableTask,
+        prioritiesEnabled,
+        projects,
+        sequentialProjectIds,
+        sequentialWithinSectionProjectIds,
+        tasks,
+    ]);
 
     const getDeadlinesForDay = (date: Date) => calendarTaskData.deadlinesByDay.get(dayKey(date)) ?? [];
     const getScheduledForDay = (date: Date) => calendarTaskData.scheduledByDay.get(dayKey(date)) ?? [];
@@ -815,6 +841,13 @@ export function useDesktopCalendarController() {
 
         openTaskComposerAt(slot, { mode: 'existing', taskId });
         setScheduleError(null);
+    };
+    const schedulePlanningTask = (taskId: string) => {
+        if (selectedDate) {
+            scheduleTaskOnSelectedDate(taskId);
+            return;
+        }
+        setScheduleError(resolveText('calendar.selectDayToPlan', 'Select a day to plan first.'));
     };
 
     const beginEditScheduledTime = (taskId: string) => {
@@ -1257,6 +1290,7 @@ export function useDesktopCalendarController() {
         openQuickAddForStart,
         openTask,
         openTaskFromCalendar,
+        planningTasks,
         resetSelectedDayState,
         resolveText,
         areas,
@@ -1267,6 +1301,7 @@ export function useDesktopCalendarController() {
         scheduleDays,
         scheduleError,
         scheduleQuery,
+        schedulePlanningTask,
         scheduleTaskOnSelectedDate,
         selectCalendarDate,
         selectedAllDayEvents,

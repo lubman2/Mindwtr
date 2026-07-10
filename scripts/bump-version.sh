@@ -1,21 +1,40 @@
 #!/usr/bin/env bash
-# Version bump script for Mindwtr monorepo
-# Usage: ./scripts/bump-version.sh 0.2.5
-#        ./scripts/bump-version.sh  (prompts for version)
+# Version bump script for Mindwtr monorepo.
+# Usage:
+#   ./scripts/bump-version.sh 0.2.5
+#   ./scripts/bump-version.sh v1.0.5-rc.1
+#   ./scripts/bump-version.sh  (prompts for version or RC tag)
 
 set -e
 
-if [ -n "$1" ]; then
-    NEW_VERSION="$1"
-else
+INPUT_VERSION="${1:-}"
+
+if [ -z "$INPUT_VERSION" ]; then
     echo "Current versions:"
-    grep '"version"' package.json apps/*/package.json packages/*/package.json apps/mobile/app.json apps/desktop/src-tauri/tauri.conf.json 2>/dev/null | head -10
+    grep '"version"' package.json apps/desktop/package.json apps/mobile/package.json apps/cloud/package.json packages/*/package.json apps/mobile/app.json apps/desktop/src-tauri/tauri.conf.json 2>/dev/null | head -10
     echo ""
-    read -p "Enter new version (e.g., 0.2.5): " NEW_VERSION
+    read -p "Enter new version or RC tag (e.g., 0.2.5 or v1.0.5-rc.1): " INPUT_VERSION
 fi
 
-if [ -z "$NEW_VERSION" ]; then
+if [ -z "$INPUT_VERSION" ]; then
     echo "Error: Version cannot be empty"
+    exit 1
+fi
+
+IS_RC=0
+RELEASE_TAG=""
+NEW_VERSION=""
+
+if [[ "$INPUT_VERSION" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)-rc\.([0-9]+)$ ]]; then
+    NEW_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+    RELEASE_TAG="v${NEW_VERSION}-rc.${BASH_REMATCH[4]}"
+    IS_RC=1
+    echo "Detected release candidate tag ${RELEASE_TAG}; app/package versions will use stable base ${NEW_VERSION}."
+elif [[ "$INPUT_VERSION" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    NEW_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+    RELEASE_TAG="v${NEW_VERSION}"
+else
+    echo "Error: Version must be x.y.z or an RC tag like v1.0.5-rc.1"
     exit 1
 fi
 
@@ -51,11 +70,24 @@ json.expo.android = { ...android, versionCode: next };
 fs.writeFileSync(appJsonPath, JSON.stringify(json, null, 2) + '\n');
 console.log(`Bumped Android versionCode: ${current || 0} -> ${next}`);
 NODE
+
+    if [ -n "${ANDROID_REMOTE_MAX_VERSION_CODE:-}" ]; then
+        echo "Ensuring Android versionCode is above Google Play max ${ANDROID_REMOTE_MAX_VERSION_CODE}..."
+        REMOTE_MAX_VERSION_CODE="${ANDROID_REMOTE_MAX_VERSION_CODE}" \
+            AUTO_BUMP_APP_JSON_VERSION_CODE=1 \
+            WRITE_APP_JSON=1 \
+            node scripts/ci/android-version-code-policy.js
+    fi
 }
 
 # Use Node.js script for safe JSON updates
 node scripts/update-versions.js "$NEW_VERSION"
 bump_android_version_code
+
+# Record the full release version (including any -rc.N suffix) for builds that
+# cannot receive CI env, e.g. reproducible F-Droid/IzzyOnDroid APKs.
+printf '{\n  "releaseVersion": "%s"\n}\n' "${RELEASE_TAG#v}" > apps/mobile/release-version.json
+echo "Updated apps/mobile/release-version.json to ${RELEASE_TAG#v}"
 
 update_snapcraft() {
     local snapcraft_file="snap/snapcraft.yaml"
@@ -89,6 +121,16 @@ update_snapcraft
 echo ""
 echo "Updating lockfile..."
 bun install
+
+echo ""
+echo "Validating core package.json/package-lock sync..."
+if ! node scripts/ci/check-package-lock-sync.js packages/core/package.json packages/core/package-lock.json; then
+    echo ""
+    echo "Core package-lock.json does not match packages/core/package.json."
+    echo "Repair it before tagging with:"
+    echo "  npm install --package-lock-only --prefix packages/core --legacy-peer-deps --workspaces=false"
+    exit 1
+fi
 
 echo ""
 echo "Validating desktop package.json/package-lock sync..."
@@ -125,6 +167,6 @@ fi
 echo ""
 echo "Done! Now you can:"
 echo "  git add -A"
-echo "  git commit -m 'chore(release): v$NEW_VERSION'"
-echo "  git tag v$NEW_VERSION"
-echo "  git push origin main --tags"
+echo "  git commit -m 'chore(release): ${RELEASE_TAG}'"
+echo "  git tag -a ${RELEASE_TAG} -m '${RELEASE_TAG}'"
+echo "  git push origin main ${RELEASE_TAG}"

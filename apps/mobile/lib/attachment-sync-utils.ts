@@ -4,9 +4,12 @@ import type { AppData, Attachment } from '@mindwtr/core';
 import {
   computeSha256Hex,
   createWebdavDownloadBackoff,
+  decodeUriSafe,
   globalProgressTracker,
+  isDropboxUnauthorizedError,
+  markAttachmentUnrecoverable,
+  sleep,
 } from '@mindwtr/core';
-import { DropboxUnauthorizedError } from './dropbox-sync';
 import {
   CLOUD_TOKEN_KEY,
   CLOUD_ALLOW_INSECURE_HTTP_KEY,
@@ -38,6 +41,8 @@ const webdavDownloadBackoff = createWebdavDownloadBackoff({
 });
 export const CLOUD_PROVIDER_DROPBOX = 'dropbox';
 
+export { markAttachmentUnrecoverable, sleep };
+
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const BASE64_LOOKUP = (() => {
   const map = new Uint8Array(256);
@@ -62,8 +67,6 @@ export const logAttachmentInfo = (message: string, extra?: Record<string, string
   void logInfo(message, { scope: 'attachment', extra });
 };
 
-export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 export const getWebdavDownloadBackoff = (attachmentId: string): number | null => {
   return webdavDownloadBackoff.getBlockedUntil(attachmentId);
 };
@@ -78,32 +81,6 @@ export const clearWebdavDownloadBackoff = (attachmentId: string): void => {
 
 export const pruneWebdavDownloadBackoff = (): void => {
   webdavDownloadBackoff.prune();
-};
-
-export const markAttachmentUnrecoverable = (attachment: Attachment): boolean => {
-  const now = new Date().toISOString();
-  let mutated = false;
-  if (attachment.cloudKey !== undefined) {
-    attachment.cloudKey = undefined;
-    mutated = true;
-  }
-  if (attachment.fileHash !== undefined) {
-    attachment.fileHash = undefined;
-    mutated = true;
-  }
-  if (attachment.localStatus !== 'missing') {
-    attachment.localStatus = 'missing';
-    mutated = true;
-  }
-  if (!attachment.deletedAt) {
-    attachment.deletedAt = now;
-    mutated = true;
-  }
-  if (attachment.updatedAt !== now) {
-    attachment.updatedAt = now;
-    mutated = true;
-  }
-  return mutated;
 };
 
 export const readAttachmentBytesForUpload = async (
@@ -194,14 +171,6 @@ const stripUriQueryAndFragment = (value: string): string => (
   value.split('?')[0]?.split('#')[0] ?? value
 );
 
-const decodeUriSafe = (value: string): string => {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-};
-
 const getSafLeafName = (value: string): string => {
   const decoded = decodeUriSafe(value);
   const stripped = stripUriQueryAndFragment(decoded).replace(/\/+$/, '');
@@ -240,15 +209,30 @@ export const writeBytesSafely = async (targetUri: string, bytes: Uint8Array): Pr
 
 export const copyFileSafely = async (sourceUri: string, targetUri: string): Promise<void> => {
   const tempUri = buildTempUri(targetUri);
-  await FileSystem.copyAsync({ from: sourceUri, to: tempUri });
+  try {
+    await FileSystem.copyAsync({ from: sourceUri, to: tempUri });
+  } catch (error) {
+    logAttachmentWarn('Attachment temp copy failed, falling back to byte write', error);
+    await writeBytesSafely(targetUri, await readFileAsBytes(sourceUri));
+    logAttachmentInfo('Attachment byte fallback copied file', { sourceUri, targetUri });
+    return;
+  }
   try {
     await FileSystem.moveAsync({ from: tempUri, to: targetUri });
-  } catch (error) {
-    await FileSystem.copyAsync({ from: sourceUri, to: targetUri });
+  } catch (moveError) {
+    logAttachmentWarn('Attachment temp move failed, falling back to direct copy', moveError);
     try {
-      await FileSystem.deleteAsync(tempUri, { idempotent: true });
-    } catch {
-      // Ignore cleanup errors for temp file.
+      await FileSystem.copyAsync({ from: sourceUri, to: targetUri });
+    } catch (copyError) {
+      logAttachmentWarn('Attachment direct copy failed, falling back to byte write', copyError);
+      await writeBytesSafely(targetUri, await readFileAsBytes(sourceUri));
+      logAttachmentInfo('Attachment byte fallback copied file', { sourceUri, targetUri });
+    } finally {
+      try {
+        await FileSystem.deleteAsync(tempUri, { idempotent: true });
+      } catch {
+        // Ignore cleanup errors for temp file.
+      }
     }
   }
 };
@@ -308,15 +292,6 @@ export const getDropboxClientId = async (): Promise<string> => {
   }
 };
 
-const isDropboxUnauthorizedError = (error: unknown): boolean => {
-  if (error instanceof DropboxUnauthorizedError) return true;
-  const message = sanitizeLogMessage(error instanceof Error ? error.message : String(error)).toLowerCase();
-  return message.includes('http 401')
-    || message.includes('invalid_access_token')
-    || message.includes('expired_access_token')
-    || message.includes('unauthorized');
-};
-
 export const runDropboxAuthorized = async <T,>(
   dropboxClientId: string,
   operation: (accessToken: string) => Promise<T>,
@@ -337,23 +312,32 @@ export const runDropboxAuthorized = async <T,>(
 };
 
 export const loadWebDavConfig = async (): Promise<WebDavConfig | null> => {
-  const url = await AsyncStorage.getItem(WEBDAV_URL_KEY);
+  const [url, username, password, allowInsecureHttp] = await Promise.all([
+    AsyncStorage.getItem(WEBDAV_URL_KEY),
+    AsyncStorage.getItem(WEBDAV_USERNAME_KEY),
+    AsyncStorage.getItem(WEBDAV_PASSWORD_KEY),
+    AsyncStorage.getItem(WEBDAV_ALLOW_INSECURE_HTTP_KEY),
+  ]);
   if (!url) return null;
   return {
     url,
-    username: (await AsyncStorage.getItem(WEBDAV_USERNAME_KEY)) || '',
-    password: (await AsyncStorage.getItem(WEBDAV_PASSWORD_KEY)) || '',
-    allowInsecureHttp: (await AsyncStorage.getItem(WEBDAV_ALLOW_INSECURE_HTTP_KEY)) === 'true',
+    username: username || '',
+    password: password || '',
+    allowInsecureHttp: allowInsecureHttp === 'true',
   };
 };
 
 export const loadCloudConfig = async (): Promise<CloudConfig | null> => {
-  const url = await AsyncStorage.getItem(CLOUD_URL_KEY);
+  const [url, token, allowInsecureHttp] = await Promise.all([
+    AsyncStorage.getItem(CLOUD_URL_KEY),
+    AsyncStorage.getItem(CLOUD_TOKEN_KEY),
+    AsyncStorage.getItem(CLOUD_ALLOW_INSECURE_HTTP_KEY),
+  ]);
   if (!url) return null;
   return {
     url,
-    token: (await AsyncStorage.getItem(CLOUD_TOKEN_KEY)) || '',
-    allowInsecureHttp: (await AsyncStorage.getItem(CLOUD_ALLOW_INSECURE_HTTP_KEY)) === 'true',
+    token: token || '',
+    allowInsecureHttp: allowInsecureHttp === 'true',
   };
 };
 

@@ -3,6 +3,7 @@ import {
     AI_PROVIDER_VALUE_SET,
     AI_REASONING_EFFORT_VALUE_SET,
     SETTINGS_DEFAULT_PROJECT_FLOW_MODE_VALUE_SET,
+    SETTINGS_DEFAULT_TASK_AREA_MODE_VALUE_SET,
     SETTINGS_DENSITY_VALUE_SET,
     SETTINGS_FOCUS_GROUP_BY_VALUE_SET,
     SETTINGS_KEYBINDING_STYLE_VALUE_SET,
@@ -20,7 +21,7 @@ import { isNonEmptyString, isObjectRecord, isValidTimestamp } from './sync-norma
 import { MAX_FOCUS_TASK_LIMIT, MIN_FOCUS_TASK_LIMIT, normalizeFocusTaskLimit } from './focus-utils';
 import { normalizeSavedFilters } from './saved-filters';
 import { chooseDeterministicWinner } from './sync-signatures';
-import { CLOCK_SKEW_THRESHOLD_MS, DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS } from './sync-types';
+import { DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS } from './sync-types';
 import { normalizeExternalCalendarColor } from './external-calendar-colors';
 
 const parseSyncTimestamp = (value?: string): number => {
@@ -73,9 +74,8 @@ const chooseSavedFilter = (localFilter: SavedFilter, incomingFilter: SavedFilter
     if (!Number.isFinite(incomingUpdatedAt) && Number.isFinite(localUpdatedAt)) return localFilter;
     if (Number.isFinite(incomingUpdatedAt) && Number.isFinite(localUpdatedAt)) {
         const updatedAtDiff = incomingUpdatedAt - localUpdatedAt;
-        if (Math.abs(updatedAtDiff) > CLOCK_SKEW_THRESHOLD_MS) {
-            return updatedAtDiff > 0 ? incomingFilter : localFilter;
-        }
+        if (updatedAtDiff > 0) return incomingFilter;
+        if (updatedAtDiff < 0) return localFilter;
         return chooseDeterministicWinner(localFilter, incomingFilter);
     }
     return incomingWins ? incomingFilter : localFilter;
@@ -117,9 +117,13 @@ const sanitizeAiForSync = (
         apiKey: undefined,
     };
     if (sanitized.speechToText) {
+        const localSpeechToText = localAi?.speechToText;
+        const keepLocalOfflineModelPath = Boolean(localSpeechToText?.offlineModelPath)
+            && sanitized.speechToText.provider === localSpeechToText?.provider
+            && sanitized.speechToText.model === localSpeechToText?.model;
         sanitized.speechToText = {
             ...sanitized.speechToText,
-            offlineModelPath: localAi?.speechToText?.offlineModelPath,
+            offlineModelPath: keepLocalOfflineModelPath ? localSpeechToText?.offlineModelPath : undefined,
         };
     }
     return sanitized;
@@ -418,6 +422,33 @@ export const sanitizeMergedSettingsForSync = (
         }
 
         if (
+            next.gtd.defaultAreaMode !== undefined
+            && !setContainsValue(SETTINGS_DEFAULT_TASK_AREA_MODE_VALUE_SET, next.gtd.defaultAreaMode)
+        ) {
+            next.gtd = {
+                ...next.gtd,
+                defaultAreaMode: localSettings.gtd?.defaultAreaMode,
+            };
+            if (next.gtd.defaultAreaMode === undefined) {
+                delete next.gtd.defaultAreaMode;
+            }
+        }
+
+        if (
+            next.gtd.defaultAreaId !== undefined
+            && next.gtd.defaultAreaId !== null
+            && !isNonEmptyString(next.gtd.defaultAreaId)
+        ) {
+            next.gtd = {
+                ...next.gtd,
+                defaultAreaId: localSettings.gtd?.defaultAreaId,
+            };
+            if (next.gtd.defaultAreaId === undefined) {
+                delete next.gtd.defaultAreaId;
+            }
+        }
+
+        if (
             next.gtd.defaultProjectFlowMode !== undefined
             && !setContainsValue(SETTINGS_DEFAULT_PROJECT_FLOW_MODE_VALUE_SET, next.gtd.defaultProjectFlowMode)
         ) {
@@ -574,12 +605,16 @@ export const mergeSettingsForSync = (
         'gtd',
         {
             defaultScheduleTime: localSettings.gtd?.defaultScheduleTime,
+            defaultAreaMode: localSettings.gtd?.defaultAreaMode,
+            defaultAreaId: localSettings.gtd?.defaultAreaId,
             focusTaskLimit: localSettings.gtd?.focusTaskLimit,
             focusGroupBy: localSettings.gtd?.focusGroupBy,
             defaultProjectFlowMode: localSettings.gtd?.defaultProjectFlowMode,
         },
         {
             defaultScheduleTime: incomingSettings.gtd?.defaultScheduleTime,
+            defaultAreaMode: incomingSettings.gtd?.defaultAreaMode,
+            defaultAreaId: incomingSettings.gtd?.defaultAreaId,
             focusTaskLimit: incomingSettings.gtd?.focusTaskLimit,
             focusGroupBy: incomingSettings.gtd?.focusGroupBy,
             defaultProjectFlowMode: incomingSettings.gtd?.defaultProjectFlowMode,
@@ -590,6 +625,16 @@ export const mergeSettingsForSync = (
                 delete nextGtd.defaultScheduleTime;
             } else {
                 nextGtd.defaultScheduleTime = value.defaultScheduleTime;
+            }
+            if (value.defaultAreaMode === undefined) {
+                delete nextGtd.defaultAreaMode;
+            } else {
+                nextGtd.defaultAreaMode = value.defaultAreaMode;
+            }
+            if (value.defaultAreaId === undefined) {
+                delete nextGtd.defaultAreaId;
+            } else {
+                nextGtd.defaultAreaId = value.defaultAreaId;
             }
             if (value.focusTaskLimit === undefined) {
                 delete nextGtd.focusTaskLimit;

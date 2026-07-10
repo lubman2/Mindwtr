@@ -22,6 +22,21 @@ type Labels = {
     feedbackCategoryOther: string;
     feedbackMessage: string;
     feedbackMessagePlaceholder: string;
+    feedbackMessagePlaceholderBug: string;
+    feedbackMessagePlaceholderFeature: string;
+    feedbackMessagePlaceholderOther: string;
+    feedbackWhere: string;
+    feedbackWherePlaceholder: string;
+    feedbackWhereMessagePrefix: string;
+    feedbackWhereInbox: string;
+    feedbackWhereFocus: string;
+    feedbackWhereProjects: string;
+    feedbackWhereReview: string;
+    feedbackWhereSettings: string;
+    feedbackWhereSync: string;
+    feedbackWhereImportExport: string;
+    feedbackWhereNotifications: string;
+    feedbackWhereOther: string;
     feedbackEmail: string;
     feedbackEmailPlaceholder: string;
     feedbackIncludeDiagnostics: string;
@@ -32,6 +47,8 @@ type Labels = {
     feedbackSent: string;
     feedbackFailed: string;
     feedbackUnavailable: string;
+    feedbackUnavailableDesc: string;
+    feedbackOpenGitHubIssue: string;
     feedbackRequired: string;
     feedbackInvalidEmail: string;
     close: string;
@@ -121,10 +138,10 @@ export function SettingsAboutPage({
                 <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">{t.documentation}</span>
                     <button
-                        onClick={() => onOpenLink('https://github.com/dongdongbh/Mindwtr/wiki')}
+                        onClick={() => onOpenLink('https://docs.mindwtr.app')}
                         className="text-primary hover:underline flex items-center gap-1"
                     >
-                        GitHub Wiki
+                        docs.mindwtr.app
                         <ExternalLink className="w-3 h-3" />
                     </button>
                 </div>
@@ -143,10 +160,10 @@ export function SettingsAboutPage({
                 <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">{t.sponsorProject}</span>
                     <button
-                        onClick={() => onOpenLink('https://ko-fi.com/dongdongbh')}
+                        onClick={() => onOpenLink('https://mindwtr.app/donate?src=app_about')}
                         className="text-blue-400 hover:underline cursor-pointer flex items-center gap-1"
                     >
-                        ko-fi.com/dongdongbh
+                        mindwtr.app/donate
                         <ExternalLink className="w-3 h-3" />
                     </button>
                 </div>
@@ -160,6 +177,7 @@ export function SettingsAboutPage({
                 isConfigured={feedbackConfigured}
                 isOpen={feedbackOpen}
                 onClose={() => setFeedbackOpen(false)}
+                onOpenIssue={() => onOpenLink('https://github.com/dongdongbh/Mindwtr/issues/new/choose')}
                 onSubmit={onSubmitFeedback}
                 t={t}
             />
